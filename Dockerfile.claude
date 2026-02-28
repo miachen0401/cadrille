@@ -1,15 +1,24 @@
-# Dockerfile — ML training/evaluation environment (no Claude Code)
-# Use this for CI/production runs or any non-interactive workload:
-#   docker build -t cadrille-train -f Dockerfile .
-#   docker run --rm --gpus all -v $(pwd):/workspace cadrille-train python train.py ...
+# Dockerfile.claude — combined ML + Claude Code environment for interactive development
+# Includes everything in Dockerfile (CUDA, PyTorch, Open3D, training deps) plus
+# Claude Code, so training and evaluation can be run directly from within the session.
+# Used by claude-container.sh:
+#   ./claude-container.sh
 #
-# For interactive development with Claude Code, use Dockerfile.claude instead.
+# For CI/production without Claude Code, use Dockerfile instead.
 
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
-RUN apt-get update \
-    && apt-get install -y git git-lfs wget libgl1-mesa-glx libosmesa6-dev libglu1-mesa-dev
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
 
+# System deps (merged from both Dockerfiles)
+RUN apt-get update && apt-get install -y \
+    curl git git-lfs wget ca-certificates build-essential \
+    libgl1-mesa-glx libosmesa6-dev libglu1-mesa-dev \
+    libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build Open3D from source with headless rendering (no display needed)
 RUN git clone https://github.com/isl-org/Open3D.git \
     && cd Open3D \
     && git checkout 8e434558a9b1ecacba7854da7601a07e8bdceb26 \
@@ -21,8 +30,10 @@ RUN git clone https://github.com/isl-org/Open3D.git \
              -DUSE_SYSTEM_GLFW=OFF \
              .. \
     && make -j8 \
-    && make install-pip-package
+    && make install-pip-package \
+    && cd / && rm -rf Open3D
 
+# Python ML packages
 RUN pip install --no-deps \
     git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f \
     git+https://github.com/CadQuery/cadquery.git@e99a15df3cf6a88b69101c405326305b5db8ed94 \
@@ -66,3 +77,19 @@ RUN pip install --no-deps \
     typish==1.9.3 \
     qwen-vl-utils==0.0.10 \
     widgetsnbextension==4.0.13
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (fast Python package manager, useful inside container)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Claude Code
+RUN npm install -g @anthropic-ai/claude-code
+
+WORKDIR /workspace
+
+CMD ["claude", "--dangerously-skip-permissions"]

@@ -45,14 +45,14 @@ def run(data_path, split, mode, checkpoint_path, py_path):
             noise_scale_img=-1,
             num_imgs=4,
             mode=mode)
-        batch_size = 256
+        batch_size = 32
 
     n_samples = 1
     counter = 0
     dataloader = DataLoader(
         dataset=ConcatDataset([dataset] * n_samples),
         batch_size=batch_size,
-        num_workers=16,
+        num_workers=0,
         collate_fn=partial(collate, processor=processor, n_points=256, eval=True))
 
     for batch in tqdm(dataloader):
