@@ -56,7 +56,7 @@ _WORKER_SCRIPT = textwrap.dedent('''\
 
         Matches evaluate.py:compute_chamfer_distance() exactly:
           - 8192 surface samples on each mesh
-          - Bidirectional: mean(min d(pred→gt)) + mean(min d(gt→pred))
+          - Bidirectional: mean(d²(pred→gt)) + mean(d²(gt→pred))  ← L2 Chamfer
         """
         try:
             from scipy.spatial import cKDTree
@@ -66,7 +66,7 @@ _WORKER_SCRIPT = textwrap.dedent('''\
             tree_pred = cKDTree(pred_pts)
             d_pg, _ = tree_gt.query(pred_pts, k=1)
             d_gp, _ = tree_pred.query(gt_pts, k=1)
-            return float(np.mean(d_pg) + np.mean(d_gp))
+            return float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
         except Exception:
             return None
 
