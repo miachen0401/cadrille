@@ -161,3 +161,123 @@ r_IoU     = IoU × 10   ∈ [0, 10]   (valid geometry)
 
 CadQuery execution uses `subprocess.run()` (not `multiprocessing.Process`) to avoid
 corrupting the CUDA context held by the training process.
+
+---
+
+## Stage 3: Visualization & Analysis (`viz/`)
+
+Goal: understand training data structure, model failure modes, and complexity–quality tradeoffs.
+These plots inform RL curriculum design, data augmentation decisions, and where to focus debugging.
+
+### Directory layout
+
+```
+viz/
+├── parse_cq.py          # Shared: regex feature extraction from CadQuery scripts
+├── dataset_stats.py     # Training data distribution → plots/dataset_stats/
+├── failure_analysis.py  # Eval failure modes → plots/failure_analysis/
+└── plots/               # Output directory (gitignored)
+    ├── dataset_stats/
+    └── failure_analysis/
+```
+
+### `viz/parse_cq.py`
+
+Regex-based feature extraction.  No heavy dependencies (only `re`, `pathlib`).
+
+Per-script features extracted:
+| Feature | Description |
+|---------|-------------|
+| `n_segments` | count of `.segment()` calls |
+| `n_arcs` | count of `.arc()` calls |
+| `n_splines` | count of `.spline()` calls |
+| `n_circles`, `n_rects`, `n_polygons` | closed sketch shapes |
+| `n_extrudes`, `n_revolves` | extrusion operations |
+| `n_unions`, `n_cuts`, `n_intersects` | boolean operations |
+| `n_cylinders`, `n_boxes`, `n_spheres` | primitives |
+| `n_fillets`, `n_chamfers`, `n_shells` | detail modifiers |
+| `n_push` | multi-region sketches (push/pop) |
+| `n_workplanes` | number of `Workplane()` calls |
+| `planes` | list of plane types used (XY/YZ/ZX) |
+| `n_sketch_ops` | segments + arcs + splines + circles + rects + polygons |
+| `n_bool_ops` | unions + cuts + intersects |
+| `n_bodies` | n_bool_ops + 1 (approximate body count) |
+| `code_length` | total character count |
+
+### `viz/dataset_stats.py`
+
+Reads: `./data/cad-recode-v1.5/train/batch_*/` (all training `.py` files)
+
+Plots saved to `viz/plots/dataset_stats/`:
+1. **Operation frequency** — horizontal bar, sorted; shows what the model has seen
+2. **Code length distribution** — histogram; characterises typical script complexity
+3. **Sketch ops per script** — histogram; distribution of geometric complexity
+4. **Plane type distribution** — bar; which orientations dominate training
+5. **Boolean ops per script** — histogram; number of bodies per shape
+6. **Train vs val complexity** — overlaid histograms; checks for distribution shift
+
+### `viz/failure_analysis.py`
+
+Reads: `--eval-dir` (directory of generated `.py` files from `test.py`)
+Optional: `--results-csv` (per-sample IoU/CD from `evaluate.py --results-csv`)
+
+For each generated script:
+1. Attempt subprocess execution with 10 s timeout (no CUDA risk)
+2. Classify result into one of:
+   - `success` — geometry produced
+   - `syntax_error` — Python parse failed
+   - `no_result` — code ran but `r` undefined
+   - `attribute_error` — invalid CadQuery API call (hallucinated method)
+   - `geometry_error` — OCC / trimesh failure (degenerate geometry)
+   - `timeout` — execution exceeded timeout
+   - `other_error` — any other exception
+
+Plots saved to `viz/plots/failure_analysis/`:
+1. **Failure type breakdown** — bar; overall error type distribution
+2. **Code length: success vs failure** — overlaid KDE or histogram
+3. **Sketch ops: success vs failure** — violin / box plots
+4. **Failure rate by operation type** — horizontal bar; for each op, % of scripts
+   containing that op that fail (reveals which operations the model struggles with)
+5. **Train vs generated distribution** — side-by-side bars for top operations;
+   shows distribution shift between training data and model outputs
+6. **IoU vs code length** (if `--results-csv`) — scatter with regression line
+7. **IoU by operation type** (if `--results-csv`) — box plot per op type
+
+### `evaluate.py` extension
+
+Add `--results-csv PATH` flag: after computing per-sample metrics, write a CSV with
+columns `file_name, id, cd, iou` (one row per generated `.py`).  Used by
+`failure_analysis.py` to correlate geometric quality with code features.
+
+### Running the analyses
+
+```bash
+# 1. Training data distribution
+python viz/dataset_stats.py --data-dir ./data/cad-recode-v1.5/train
+
+# 2. Failure analysis on HF baseline eval
+python viz/failure_analysis.py \
+    --eval-dir ./work_dirs/eval_hf_baseline \
+    --train-dir ./data/cad-recode-v1.5/train
+
+# 3. With IoU scores (run evaluate.py first):
+python evaluate.py \
+    --pred-py-path ./work_dirs/eval_hf_baseline \
+    --gt-mesh-path ./data/deepcad_test_mesh \
+    --results-csv ./work_dirs/eval_hf_baseline/results.csv
+python viz/failure_analysis.py \
+    --eval-dir ./work_dirs/eval_hf_baseline \
+    --results-csv ./work_dirs/eval_hf_baseline/results.csv \
+    --train-dir ./data/cad-recode-v1.5/train
+```
+
+### Key questions these plots answer
+
+| Question | Plot |
+|----------|------|
+| What operations does the model know? | Operation frequency (dataset_stats) |
+| Does the model generate more/less complex code than training? | Train vs generated distribution |
+| Which operation types cause the most failures? | Failure rate by operation type |
+| Does longer code fail more? | Code length: success vs failure |
+| Which error type dominates? | Failure type breakdown |
+| Does IoU degrade with complexity? | IoU vs code length (with results-csv) |
