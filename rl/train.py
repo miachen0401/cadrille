@@ -538,15 +538,30 @@ def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
+        clip_lower = (ratio < 1 - args.eps_low)
+        clip_upper = (ratio > 1 + args.eps_high)
+        kl_approx  = (ratio - 1 - torch.log(ratio.clamp(min=1e-8))).mean()
         last_metrics = {
-            'train/loss':          loss.item(),
-            'train/mean_reward':   mean_r.item(),
-            'train/reward_std':    std_r.item(),
-            'train/entropy':       entropy.item(),
-            'train/clip_fraction': ((ratio < 1 - args.eps_low) |
-                                    (ratio > 1 + args.eps_high)).float().mean().item(),
-            'train/ratio_mean':    ratio.mean().item(),
-            'train/ratio_std':     ratio.std().item(),
+            'train/loss':            loss.item(),
+            'train/mean_reward':     mean_r.item(),
+            'train/reward_std':      std_r.item(),
+            'train/reward_max':      rewards_t.max().item(),
+            'train/reward_min':      rewards_t.min().item(),
+            'train/entropy':         entropy.item(),
+            # IS ratio diagnostics (sequence-level, same decomposition as SAPO Fig.4a)
+            'train/clip_fraction':   (clip_lower | clip_upper).float().mean().item(),
+            'train/clip_lower_frac': clip_lower.float().mean().item(),  # ratio < 1-eps (neg-adv)
+            'train/clip_upper_frac': clip_upper.float().mean().item(),  # ratio > 1+eps (pos-adv)
+            'train/ratio_mean':      ratio.mean().item(),
+            'train/ratio_std':       ratio.std().item(),
+            'train/kl_approx':       kl_approx.item(),  # E[r - 1 - log r], ≈ KL(new||old)
+            # Advantage decomposition over top_N selected sequences
+            'train/adv_pos_frac':    (advantages > 0).float().mean().item(),
+            'train/adv_abs_mean':    advantages.abs().mean().item(),
+            # Distribution lists for wandb.Histogram (stripped before log.txt)
+            '_rewards_list':         rewards,                         # all G rollout rewards
+            '_ratio_list':           ratio.detach().cpu().tolist(),   # top_N ratios
+            '_adv_list':             advantages.detach().cpu().tolist(),  # top_N advantages
         }
 
     return last_metrics
@@ -746,15 +761,25 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                 H=f"{metrics['train/entropy']:.2f}")
 
             if step % args.log_steps == 0:
-                # Log to file with official-style key names
+                lr = optimizer.param_groups[0]['lr']
+                # Log to file (strip private _*_list keys)
                 log_line = (
                     f"step={step}"
                     f" loss={metrics['train/loss']:.4f}"
                     f" average_reward={metrics['train/mean_reward']:.4f}"
                     f" train/reward_std={metrics['train/reward_std']:.4f}"
+                    f" train/reward_max={metrics['train/reward_max']:.4f}"
+                    f" train/reward_min={metrics['train/reward_min']:.4f}"
                     f" train/entropy={metrics['train/entropy']:.4f}"
                     f" train/clip_fraction={metrics['train/clip_fraction']:.4f}"
-                    f" train/lr={optimizer.param_groups[0]['lr']:.2e}"
+                    f" train/clip_lower_frac={metrics['train/clip_lower_frac']:.4f}"
+                    f" train/clip_upper_frac={metrics['train/clip_upper_frac']:.4f}"
+                    f" train/kl_approx={metrics['train/kl_approx']:.6f}"
+                    f" train/adv_pos_frac={metrics['train/adv_pos_frac']:.4f}"
+                    f" train/adv_abs_mean={metrics['train/adv_abs_mean']:.4f}"
+                    f" train/ratio_mean={metrics['train/ratio_mean']:.4f}"
+                    f" train/ratio_std={metrics['train/ratio_std']:.4f}"
+                    f" train/lr={lr:.2e}"
                 )
                 with open(log_path, 'a') as f:
                     f.write(log_line + '\n')
@@ -764,12 +789,27 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                         # Official top-level key names (match paper dashboard)
                         'loss':           metrics['train/loss'],
                         'average_reward': metrics['train/mean_reward'],
-                        # Enhanced diagnostics
-                        'train/reward_std':    metrics['train/reward_std'],
-                        'train/entropy':       metrics['train/entropy'],
-                        'train/clip_fraction': metrics['train/clip_fraction'],
-                        'train/ratio_mean':    metrics['train/ratio_mean'],
-                        'train/lr':            optimizer.param_groups[0]['lr'],
+                        # Reward diagnostics
+                        'train/reward_std':      metrics['train/reward_std'],
+                        'train/reward_max':      metrics['train/reward_max'],
+                        'train/reward_min':      metrics['train/reward_min'],
+                        # Entropy + KL
+                        'train/entropy':         metrics['train/entropy'],
+                        'train/kl_approx':       metrics['train/kl_approx'],
+                        # IS ratio — full decomposition (matches SAPO Fig.4a style)
+                        'train/clip_fraction':   metrics['train/clip_fraction'],
+                        'train/clip_lower_frac': metrics['train/clip_lower_frac'],
+                        'train/clip_upper_frac': metrics['train/clip_upper_frac'],
+                        'train/ratio_mean':      metrics['train/ratio_mean'],
+                        'train/ratio_std':       metrics['train/ratio_std'],
+                        # Advantage decomposition
+                        'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
+                        'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
+                        'train/lr':              lr,
+                        # Sequence/reward distributions (visible as histograms in W&B)
+                        'dist/rewards': wandb.Histogram(metrics['_rewards_list']),
+                        'dist/ratios':  wandb.Histogram(metrics['_ratio_list']),
+                        'dist/advs':    wandb.Histogram(metrics['_adv_list']),
                     }, step=step)
 
             if val_examples and step % args.eval_steps == 0:
