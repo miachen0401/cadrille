@@ -38,12 +38,15 @@ reward_workers: 4
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation — 25 DeepCAD + 25 Fusion360, pc only (fast: 50 samples × 1 mode)
+# Validation — 25 DeepCAD + 25 Fusion360, both pc and img modalities.
+# Validation runs on CPU-offloaded old model (not in memory) + single forward
+# pass at a time → ~5-6 GB peak, well within 16 GB budget.
+# img modality is cheap during val (no rollout expansion, no grad).
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   25
 val_samples_fusion360: 25
-val_modalities:        pc
+val_modalities:        pc,img
 eval_steps: 200
 
 # Logging & checkpoints
