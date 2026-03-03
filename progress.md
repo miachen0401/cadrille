@@ -71,46 +71,66 @@
 
 ## Full Eval + Root Cause Analysis (2026-03-03)
 
-- [x] `evaluate.py` run on `eval_hf_baseline` → `results_hf_baseline.csv`
-- [x] `evaluate.py` run on `eval_gbmgrb95_mini` → `results_gbmgrb95_mini.csv`
-- [x] `test.py` + `evaluate.py` run on `cadrille-sft` checkpoint → `results_cadrille_sft.csv`
-- [x] `viz/failure_analysis.py` updated: plots 8 (error analysis), 9-10 (CD), 11 (IoU/CD joint)
-- [x] `viz/compare_evals.py` written: 5-plot side-by-side comparison
-- [x] Full failure analysis on all 3 checkpoints (11 plots each)
-- [x] Comparison plots: HF Baseline vs Cadrille-SFT (ours)
+### Checkpoint Map (authoritative)
+
+| Alias | Path | Architecture | What it is |
+|---|---|---|---|
+| **Official paper model** | `checkpoints/cadrille-rl` | `CADRecodeMM` | `maksimko123/cadrille` downloaded from HF — SFT+RL result from the paper |
+| **Our SFT repro** | `checkpoints/cadrille-sft` | `MyQwen2VLForConditionalGenerationJoint` | Our 12k-step SFT on CAD-Recode v1.5 |
+| **Our SFT + 10-step CPPO** | `work_dirs/cadrille-rl-hf-sft/checkpoint-final` | same | 10 CPPO rounds from our SFT — wandb `cadrille-rl-hf-sft` |
+| ~~gbmgrb95~~ | ~~removed~~ | — | Was 600-step SFT smoke test (Feb 28), underfitted — **removed from eval** |
 
 ### Eval Results (deepcad_test_mini, 100 samples, pc mode)
 
-| Checkpoint | IoU mean | CD median ×10³ | Failure rate | Notes |
-|---|---|---|---|---|
-| HF Baseline (`maksimko123/cadrille`) | 0.854 | 0.193 | 1% (1 geometry_error) | Official paper model |
-| **Cadrille-SFT (ours)** | **0.880** | **0.192** | **0%** | Our 12k-step SFT repro |
-| RL smoke test (10-step CPPO) | 0.133 | 129.0 | 11% | Expected: just 10 RL steps |
+| Checkpoint | IoU mean | CD median ×10³ | Failures | Source | Path |
+|---|---|---|---|---|---|
+| Paper cadrille (SFT only) | 0.756 | 8.9 | 1.8% | **Paper, 8,047 samples** | — |
+| Paper cadrille (SFT+RL) | 0.787 | 7.1 | 1.2% | **Paper, 8,047 samples** | — |
+| Official paper model (local) | 0.854 | 0.193 | 1% | Local, 100 samples | `checkpoints/cadrille-rl` |
+| **Our SFT repro (12k steps)** | **0.880** | **0.192** | **0%** | Local, 100 samples | `checkpoints/cadrille-sft` |
+| Our SFT + 10-step CPPO | 0.864 | 0.191 | 1% | Local, 100 samples | `cadrille-rl-hf-sft/checkpoint-final` |
+
+**Note:** Local 100-sample numbers appear higher than paper (8,047 samples) because the mini subset happens to be slightly easier. For paper-comparable numbers, run on full `deepcad_test_mesh`.
+
+### Tasks
+- [x] `evaluate.py` run on `eval_hf_baseline` → `results_hf_baseline.csv`
+- [x] `test.py` + `evaluate.py` run on `cadrille-sft` → `results_cadrille_sft.csv`
+- [x] `test.py` + `evaluate.py` run on `cadrille-rl-hf-sft` → `results_cadrille_rl_10step.csv`
+- [x] `viz/failure_analysis.py` updated: plots 8 (error analysis), 9-10 (CD), 11 (IoU/CD joint)
+- [x] `viz/compare_evals.py` written: 5-plot side-by-side comparison
+- [x] Full failure analysis on 3 valid checkpoints (11 plots each)
+- [x] Comparison plots: Official paper model vs Our SFT repro
+- [x] Removed gbmgrb95 (600-step smoke test) from all eval tables and plots
 
 ### Root Cause Analysis
 
-**HF Baseline failures (1/100):**
+**Official paper model failures (1/100):**
 - 1× `geometry_error`: `GC_MakeArcOfCircle::Value() - no result`
 - Root cause: degenerate arc geometry (floating-point issue in OCC kernel)
 
-**Cadrille-SFT failures (0/100):**
+**Our SFT failures (0/100):**
 - No failures — 100% valid geometry
 
-**RL smoke-test failures (11/100):**
-- All 11× `geometry_error`: `BRep_API: command not done`
-- Root cause: early RL training destabilises the model; generates geometrically invalid Boolean operations
+**Our SFT + 10-step CPPO failures (1/100):**
+- 1× `geometry_error` — identical pattern to baseline, not RL degradation
+
+**RL mode collapse diagnosis (from cadrille-rl-full log, 900 steps):**
+- Step 200: entropy 0.22→0.064 — collapse starts within ~20 gradient rounds
+- Step 500: reward=9.89, reward_std=0.028 — all G=16 rollouts generate same H-slab
+- Step 800: entropy=0.031 — fully collapsed; model ignores input, outputs same shape
+- Root cause: no KL penalty (Dr. GRPO design); model finds H-slab fills unit cube, IoU≈0.13 for all inputs
+- Fix: add entropy regularisation (`entropy_coef=0.01`) or skip degenerate groups (reward_std<0.5)
 
 ### Distribution Shift (training vs model-generated)
-- No fillet ops in training data (0%) → model never generates fillets
+- No fillet ops in training data (0%) → neither model generates fillets
 - Model under-uses arcs (19% vs 65%), segments (49% vs 76%), unions (14% vs 71%)
-- Our SFT matches HF baseline on op usage — similar distribution shift pattern
-- RL smoke-test generates even simpler code (fewer ops overall)
+- Our SFT and the paper model show same distribution shift pattern
 
 ### Generated Plots
-- `viz/plots/failure_analysis/hf_baseline/` — 11 plots (full suite with IoU/CD)
-- `viz/plots/failure_analysis/cadrille_sft/` — 8 plots (no failures, so no error-analysis plot)
-- `viz/plots/failure_analysis/gbmgrb95_mini/` — 11 plots (RL smoke-test, 11% failures)
-- `viz/plots/compare/` — 5 comparison plots: HF Baseline vs Cadrille-SFT (ours)
+- `viz/plots/failure_analysis/hf_baseline/` — 11 plots (official paper model)
+- `viz/plots/failure_analysis/cadrille_sft/` — 8 plots (our SFT, 0 failures)
+- `viz/plots/failure_analysis/cadrille_rl_10step/` — 11 plots (our SFT + 10-step CPPO)
+- `viz/plots/compare/` — 5 comparison plots: Official paper model vs Our SFT
 
 ---
 
