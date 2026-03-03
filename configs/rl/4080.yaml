@@ -1,0 +1,53 @@
+# Cadrille RL fine-tuning — single RTX 4080 SUPER (16 GB)
+# Sequential generation + Adam8bit to fit in 16 GB VRAM.
+#
+# Memory breakdown (~16 GB):
+#   Model weights (bf16):     ~4.5 GB
+#   Adam8bit optimizer states: ~2.0 GB
+#   Activations + KV cache:   ~8.0 GB (varies with sequence length)
+#   Old policy (CPU-offloaded): 0 GB GPU
+#
+# Usage: python rl/train.py --config configs/rl/4080.yaml
+
+# run_name: null   # leave unset for auto-naming
+checkpoints_dir: ./checkpoints
+
+mode: cppo
+checkpoint_path: ./checkpoints/cadrille-sft/checkpoint-best
+
+# Data
+data_dir: ./data/deepcad_test_mesh
+hard_examples_pkl: null
+dpo_dataset: null
+
+# Training
+max_steps: 50000
+lr: 3.0e-5
+
+# CPPO hyperparameters (reduced G for 16 GB GPU)
+G: 4                     # official=16; reduced to 4 for memory (sequential generation)
+top_N: 2                 # select top-2 of 4 by |advantage|
+eps_high: 0.1
+eps_low: 0.1
+batch_updates: 1         # official=3; reduced to 1 to avoid repeated activation peak
+K_update: 10
+max_new_tokens: 256      # official=400; reduced for memory
+reward_workers: 4
+
+# DPO (unused in cppo mode)
+beta: 0.3
+dpo_epochs_per_round: 10
+
+# Validation
+val_split_dir: ./data/deepcad_test_mesh
+val_samples: 50
+eval_steps: 200
+
+# Logging & checkpoints
+log_steps: 10
+save_steps: 500
+
+# W&B
+wandb_project: cadrille-rl
+wandb_entity: null
+wandb_offline: false

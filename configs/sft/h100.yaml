@@ -1,0 +1,40 @@
+# Cadrille SFT — 8× H100 (80 GB each), matches paper effective batch exactly
+#
+# Paper: 1× H100, bs=8 acc=4  → eff batch = 32, lr = 2e-4
+# Here:  8× H100, bs=4 acc=1  → eff batch = 4×8 = 32, lr = 2e-4  (unchanged)
+#
+# Launch with:
+#   torchrun --nproc_per_node=8 train.py --config configs/sft/h100.yaml
+# Or via helper script:
+#   bash scripts/run_sft.sh
+
+checkpoints_dir: ./checkpoints
+
+# Data
+data_path: ./data
+mode: pc_img
+use_text: false
+
+# Training — per-device settings (Trainer multiplies by nproc for effective batch)
+max_steps: 120000
+batch_size: 4             # per device; ×8 GPUs = 32 effective (matches paper)
+accumulation_steps: 1     # no accumulation needed — GPUs provide the parallelism
+learning_rate: 2.0e-4     # same as paper (same effective batch size)
+warmup_steps: 1000
+weight_decay: 0.01
+
+# H100 can use bf16 natively with no AMP overhead (hardware bf16 units)
+bf16: true
+gradient_checkpointing: false
+
+dataloader_workers: 8     # more workers for faster data loading across 8 GPUs
+
+# Logging & checkpoints
+log_steps: 100            # ~every 100 steps (generous to avoid W&B rate limits)
+save_steps: 10000
+eval_steps: 5000
+eval_on_start: true
+
+# W&B
+wandb_project: cadrille-sft
+wandb_entity: null
