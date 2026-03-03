@@ -1,0 +1,53 @@
+# Cadrille RL fine-tuning (Dr. CPPO / GRPO, matches official rl branch)
+# Usage: python rl/train.py --config configs/rl/default.yaml
+# Run name is auto-generated: rl-s50k-lr3e-5-G16-cppo-MMDD-HHMM
+# Override: python rl/train.py --config configs/rl/default.yaml --run-name my-run
+#
+# Official hyperparameters from col14m/cadrille (rl branch):
+#   G=16, top_N=4, lr=3e-5, eps=0.1, batch_updates=3, max_new_tokens=400
+
+# run_name: null   # leave unset for auto-naming
+checkpoints_dir: ./checkpoints
+
+# Mode: cppo (Dr. CPPO / GRPO) or dpo
+mode: cppo
+
+# SFT checkpoint to start from (point to your best SFT checkpoint)
+checkpoint_path: ./checkpoints/cadrille-sft/checkpoint-best
+
+# Data — real GT meshes (matches official deepcad_fusion_train)
+data_dir: ./data/deepcad_test_mesh
+hard_examples_pkl: null  # legacy: from rl/mine.py
+dpo_dataset: null        # for --mode dpo
+
+# Training
+max_steps: 50000
+lr: 3.0e-5               # Adam, matches official
+
+# Dr. CPPO / GRPO hyperparameters
+G: 16                    # rollout completions per prompt
+top_N: 4                 # select top-N by |advantage| for gradient update
+eps_high: 0.1            # PPO clip upper bound
+eps_low: 0.1             # PPO clip lower bound
+batch_updates: 3         # gradient steps per rollout (re-use same data)
+K_update: 10             # sync old→new policy every K_update steps
+max_new_tokens: 400      # max generation length
+reward_workers: 4        # parallel reward compute workers
+
+# DPO (only used with --mode dpo)
+beta: 0.3                # KL coefficient (official Table 13)
+dpo_epochs_per_round: 10
+
+# Validation — evaluation on held-out DeepCAD test split
+val_split_dir: ./data/deepcad_test_mesh
+val_samples: 200
+eval_steps: 500
+
+# Logging & checkpoints
+log_steps: 100
+save_steps: 5000
+
+# W&B
+wandb_project: cadrille-rl
+wandb_entity: null
+wandb_offline: false

@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/run_sft.sh                          # fresh run, auto config
 #   bash scripts/run_sft.sh --resume                 # resume latest checkpoint in run dir
-#   bash scripts/run_sft.sh --config configs/sft-s120k-lr2e-4-b4a1-8gpu.yaml
+#   bash scripts/run_sft.sh --config configs/sft/h100.yaml
 #   bash scripts/run_sft.sh --run-name my-run-v2
 #   N_GPUS=1 bash scripts/run_sft.sh                 # force single-GPU
 #
@@ -21,9 +21,9 @@ echo "GPUs detected: $N_GPUS"
 # ---------- Default config by GPU count ----------
 if [[ -z "${CONFIG:-}" ]]; then
     if [[ "$N_GPUS" -ge 8 ]]; then
-        CONFIG="configs/sft-s120k-lr2e-4-b4a1-8gpu.yaml"
+        CONFIG="configs/sft/h100.yaml"
     else
-        CONFIG="configs/sft-s120k-lr2e-4-b2a14-pc_img.yaml"
+        CONFIG="configs/sft/full.yaml"
     fi
 fi
 echo "Config: $CONFIG"
