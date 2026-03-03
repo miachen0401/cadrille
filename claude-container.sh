@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # Run Claude Code inside a container with --dangerously-skip-permissions.
-# Usage: ./claude-container.sh [extra claude args...]
+#
+# Usage:
+#   ./claude-container.sh                    # start a new Claude session (new container)
+#   ./claude-container.sh --model opus       # start with a specific model
+#
+# Re-entering an existing running container (avoids creating a new one):
+#   docker exec -it festive_shtern claude --dangerously-skip-permissions
+#
+# Or use this alias (auto-detects whichever cadrille container is running):
+#   docker exec -it $(docker ps --filter ancestor=cadrille-claude -q | head -1) claude --dangerously-skip-permissions
+#
+# Check running containers:
+#   docker ps --filter ancestor=cadrille-claude
+#
+# Monitor training from host (no need to enter container):
+#   docker exec -it festive_shtern bash -c "~/.local/bin/nvitop"
+#   docker exec -it festive_shtern tail -f /workspace/checkpoints/<run>/log.txt
+#
+# Kill training from host:
+#   docker exec festive_shtern pkill -f "python train.py"
 
 set -euo pipefail
 

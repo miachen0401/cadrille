@@ -1,0 +1,39 @@
+# Cadrille SFT — single RTX 4080 SUPER (16 GB), effective batch matches paper exactly
+# Paper: bs=28 acc=1 (eff=28) on H100. We use bs=2 acc=14 (eff=28) on 4080.
+# Usage: python train.py --config configs/sft-s12k-lr2e-4-b2a14-pc_img.yaml
+# Run name is auto-generated: sft-s12k-lr2e-4-b2a14-pc_img-MMDD-HHMM
+
+# run_name: null   # leave unset for auto-naming from hyperparams
+checkpoints_dir: ./checkpoints
+
+# Data
+data_path: ./data
+mode: pc_img
+use_text: false
+
+# Training
+max_steps: 12000
+batch_size: 2
+accumulation_steps: 14        # effective batch = 28, matches paper exactly
+learning_rate: 2.0e-4         # matches paper exactly
+warmup_steps: 1000            # ~0.8% of 12000 — paper unspecified, 1k is standard
+lr_scheduler_type: cosine     # paper unspecified; cosine is best practice for LLM SFT
+weight_decay: 0.01
+
+# Memory — no tricks needed on WSL2 (natural overcommit handles AdamW states)
+# DO NOT set bf16: true — model is natively bf16; bf16=True triggers AMP fp32 copies (+8 GB)
+# DO NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments — breaks WSL2 GPU overcommit
+bf16: false
+gradient_checkpointing: false
+
+dataloader_workers: 4
+
+# Logging & checkpoints
+log_steps: 30
+save_steps: 200               # must be a multiple of eval_steps; ~6h on 4080
+eval_steps: 200               # eval every ~3h on 4080 (val set takes ~50s)
+eval_on_start: true
+
+# W&B
+wandb_project: cadrille-sft
+wandb_entity: null

@@ -340,6 +340,50 @@ class Cadrille(Qwen2VLForConditionalGeneration):
             rope_deltas=self.rope_deltas,
         )
 
+    @staticmethod
+    def compute_sequence_logprob(
+        logits: 'torch.Tensor',
+        labels: 'torch.Tensor',
+        mean_reduction: bool = True,
+    ) -> 'torch.Tensor':
+        """Compute per-sequence log probabilities from logits and labels.
+
+        Used by the RL training loop to compute π_θ(τ|q) for both the current
+        policy (with grad) and the old policy / reference model (no grad).
+
+        Args:
+            logits:          [batch, seq_len, vocab_size]  (float32 recommended)
+            labels:          [batch, seq_len]  (-100 = masked prompt / padding)
+            mean_reduction:  if True, divide by the number of unmasked tokens
+                             (length-normalised log prob); if False, return sum.
+
+        Returns:
+            [batch] tensor of scalar sequence log probabilities.
+        """
+        # Causal LM: position i predicts position i+1
+        shift_logits = logits[..., :-1, :].contiguous()   # [B, L-1, V]
+        shift_labels = labels[..., 1:].contiguous()        # [B, L-1]
+
+        mask = (shift_labels != -100)                      # [B, L-1]
+
+        log_probs = torch.nn.functional.log_softmax(
+            shift_logits.float(), dim=-1)                  # [B, L-1, V]
+
+        # Replace -100 with 0 so gather doesn't index out-of-range
+        gather_labels = shift_labels.clone()
+        gather_labels[~mask] = 0
+
+        token_log_probs = log_probs.gather(
+            dim=-1, index=gather_labels.unsqueeze(-1)).squeeze(-1)  # [B, L-1]
+        token_log_probs = token_log_probs * mask.float()
+
+        seq_log_probs = token_log_probs.sum(dim=-1)  # [B]
+        if mean_reduction:
+            n_tokens = mask.float().sum(dim=-1).clamp(min=1)
+            seq_log_probs = seq_log_probs / n_tokens
+
+        return seq_log_probs
+
     def prepare_inputs_for_generation(self, *args, **kwargs):
         model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
         model_inputs['point_clouds'] = kwargs['point_clouds']
