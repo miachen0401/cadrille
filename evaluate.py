@@ -113,7 +113,7 @@ def run_cd_single(py_file_name, pred_py_path, pred_mesh_path, pred_brep_path, gt
     return dict(file_name=eval_file_name, id=index, cd=cd, iou=iou)
 
 
-def run(gt_mesh_path, pred_py_path, n_points):
+def run(gt_mesh_path, pred_py_path, n_points, results_csv=None):
     pred_mesh_path = os.path.join(os.path.dirname(pred_py_path), 'tmp_mesh')
     pred_brep_path = os.path.join(os.path.dirname(pred_py_path), 'tmp_brep')
     best_names_path = os.path.join(os.path.dirname(pred_py_path), 'tmp.txt')
@@ -135,6 +135,16 @@ def run(gt_mesh_path, pred_py_path, n_points):
                 gt_mesh_path=gt_mesh_path,
                 n_points=n_points),
             py_file_names), total=len(py_file_names)))
+
+    # optionally save per-sample results CSV for downstream analysis
+    if results_csv:
+        import csv as _csv
+        os.makedirs(os.path.dirname(os.path.abspath(results_csv)), exist_ok=True)
+        with open(results_csv, 'w', newline='') as f:
+            writer = _csv.DictWriter(f, fieldnames=['file_name', 'id', 'cd', 'iou'])
+            writer.writeheader()
+            writer.writerows(py_metrics)
+        print(f'Per-sample results saved → {results_csv}')
 
     # aggregate metrics per eval_file_name
     metrics = defaultdict(lambda: defaultdict(list))
@@ -185,5 +195,9 @@ if __name__ == '__main__':
     parser.add_argument('--gt-mesh-path', type=str, default='./data/deepcad_test_mesh')
     parser.add_argument('--pred-py-path', type=str, default='./work_dirs/tmp_py')
     parser.add_argument('--n-points', type=int, default=8192)
+    parser.add_argument('--results-csv', type=str, default=None,
+                        help='Path to save per-sample IoU/CD results CSV '
+                             '(used by viz/failure_analysis.py)')
     args = parser.parse_args()
-    run(args.gt_mesh_path, args.pred_py_path, args.n_points)
+    run(args.gt_mesh_path, args.pred_py_path, args.n_points,
+        results_csv=args.results_csv)
