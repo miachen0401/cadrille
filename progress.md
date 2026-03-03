@@ -65,7 +65,52 @@
 
 ### Generated Plots
 - `viz/plots/dataset_stats/` — 7 plots (op frequency×2, code length, sketch ops, plane types, body/bool, co-occurrence)
-- `viz/plots/failure_analysis/` — 5 plots (failure breakdown, code length vs status, sketch ops vs status, failure rate by op, distribution shift)
+- `viz/plots/failure_analysis/` — legacy 5-plot run (no IoU)
+
+---
+
+## Full Eval + Root Cause Analysis (2026-03-03)
+
+- [x] `evaluate.py` run on `eval_hf_baseline` → `results_hf_baseline.csv`
+- [x] `evaluate.py` run on `eval_gbmgrb95_mini` → `results_gbmgrb95_mini.csv`
+- [x] `test.py` + `evaluate.py` run on `cadrille-sft` checkpoint → `results_cadrille_sft.csv`
+- [x] `viz/failure_analysis.py` updated: plots 8 (error analysis), 9-10 (CD), 11 (IoU/CD joint)
+- [x] `viz/compare_evals.py` written: 5-plot side-by-side comparison
+- [x] Full failure analysis on all 3 checkpoints (11 plots each)
+- [x] Comparison plots: HF Baseline vs Cadrille-SFT (ours)
+
+### Eval Results (deepcad_test_mini, 100 samples, pc mode)
+
+| Checkpoint | IoU mean | CD median ×10³ | Failure rate | Notes |
+|---|---|---|---|---|
+| HF Baseline (`maksimko123/cadrille`) | 0.854 | 0.193 | 1% (1 geometry_error) | Official paper model |
+| **Cadrille-SFT (ours)** | **0.880** | **0.192** | **0%** | Our 12k-step SFT repro |
+| RL smoke test (10-step CPPO) | 0.133 | 129.0 | 11% | Expected: just 10 RL steps |
+
+### Root Cause Analysis
+
+**HF Baseline failures (1/100):**
+- 1× `geometry_error`: `GC_MakeArcOfCircle::Value() - no result`
+- Root cause: degenerate arc geometry (floating-point issue in OCC kernel)
+
+**Cadrille-SFT failures (0/100):**
+- No failures — 100% valid geometry
+
+**RL smoke-test failures (11/100):**
+- All 11× `geometry_error`: `BRep_API: command not done`
+- Root cause: early RL training destabilises the model; generates geometrically invalid Boolean operations
+
+### Distribution Shift (training vs model-generated)
+- No fillet ops in training data (0%) → model never generates fillets
+- Model under-uses arcs (19% vs 65%), segments (49% vs 76%), unions (14% vs 71%)
+- Our SFT matches HF baseline on op usage — similar distribution shift pattern
+- RL smoke-test generates even simpler code (fewer ops overall)
+
+### Generated Plots
+- `viz/plots/failure_analysis/hf_baseline/` — 11 plots (full suite with IoU/CD)
+- `viz/plots/failure_analysis/cadrille_sft/` — 8 plots (no failures, so no error-analysis plot)
+- `viz/plots/failure_analysis/gbmgrb95_mini/` — 11 plots (RL smoke-test, 11% failures)
+- `viz/plots/compare/` — 5 comparison plots: HF Baseline vs Cadrille-SFT (ours)
 
 ---
 

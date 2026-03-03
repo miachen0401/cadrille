@@ -521,6 +521,187 @@ def plot_iou_by_op_type(records: list, out_dir: str):
 
 
 # ---------------------------------------------------------------------------
+# Plot 8: Error message analysis (top errors by type)
+# ---------------------------------------------------------------------------
+
+def plot_error_analysis(records: list, out_dir: str):
+    """Two panels: (a) top error detail strings; (b) hallucinated API names."""
+    failures = [r for r in records if r['status'] != 'success' and r.get('detail')]
+
+    if not failures:
+        return
+
+    # --- Panel A: top error messages (cleaned) ---
+    import re as _re
+    def _clean(detail: str) -> str:
+        # Normalise numbers and file paths to reduce noise
+        s = _re.sub(r'\b\d+\.\d+\b', 'N', detail)
+        s = _re.sub(r'\b\d+\b', 'N', s)
+        s = _re.sub(r'/[^ ]+', '<path>', s)
+        return s[:120].strip()
+
+    cleaned = collections.Counter(_clean(r['detail']) for r in failures)
+    top_errors = cleaned.most_common(12)
+    if not top_errors:
+        return
+
+    # --- Panel B: hallucinated attribute names ---
+    attr_failures = [r for r in failures if r['status'] == 'attribute_error']
+    api_names: list = []
+    for r in attr_failures:
+        m = _re.search(r"attribute '([^']+)'", r.get('detail', ''))
+        if m:
+            api_names.append(m.group(1))
+    attr_counter = collections.Counter(api_names)
+    top_attrs = attr_counter.most_common(12)
+
+    n_panels = 1 + (1 if top_attrs else 0)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, max(5, len(top_errors) * 0.45 + 1)),
+                             facecolor='white')
+    if n_panels == 1:
+        axes = [axes]
+
+    # Error messages
+    ax = axes[0]
+    msgs, cnts = zip(*top_errors) if top_errors else ([], [])
+    ax.barh(range(len(msgs)), cnts, color='#EF5350', edgecolor='white')
+    ax.set_yticks(range(len(msgs)))
+    ax.set_yticklabels([m[:70] for m in msgs], fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel('Count')
+    ax.set_title(f'Top error messages  (failures={len(failures)})')
+
+    # Hallucinated API names
+    if top_attrs:
+        ax = axes[1]
+        anames, acnts = zip(*top_attrs)
+        bars = ax.barh(anames, acnts, color='#9C27B0', edgecolor='white')
+        for bar, c in zip(bars, acnts):
+            ax.text(c + 0.1, bar.get_y() + bar.get_height() / 2,
+                    str(c), va='center', fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xlabel('Count')
+        ax.set_title(f'Hallucinated CQ API attributes\n'
+                     f'(attribute_errors = {len(attr_failures)})')
+
+    fig.tight_layout()
+    _savefig(fig, os.path.join(out_dir, '08_error_analysis.png'))
+
+
+# ---------------------------------------------------------------------------
+# Plot 9: Chamfer Distance correlations (require results CSV)
+# ---------------------------------------------------------------------------
+
+def plot_cd_analysis(records: list, out_dir: str):
+    """CD vs complexity and CD by op type (mirrors IoU plots 6-7)."""
+    with_cd = [r for r in records if r.get('cd') is not None and r['status'] == 'success']
+    if len(with_cd) < 5:
+        return
+
+    # --- 9a: CD vs complexity ---
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), facecolor='white')
+    for ax, xkey, xlabel in [
+        (axes[0], 'code_length',  'Script length (chars)'),
+        (axes[1], 'n_sketch_ops', 'Sketch ops per script'),
+    ]:
+        xs  = [r[xkey] for r in with_cd]
+        cds = [r['cd']  for r in with_cd]
+        sc  = ax.scatter(xs, cds, alpha=0.5, s=15, c=cds, cmap='RdYlGn_r',
+                         edgecolors='none')
+        try:
+            bin_edges = np.percentile(xs, np.linspace(0, 100, 8))
+            bin_edges = np.unique(bin_edges)
+            midpts, means = [], []
+            for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+                mask = [lo <= x < hi for x in xs]
+                if sum(mask) > 0:
+                    midpts.append((lo + hi) / 2)
+                    means.append(np.mean([c for c, m in zip(cds, mask) if m]))
+            ax.plot(midpts, means, color='black', linewidth=2, label='binned mean')
+        except Exception:
+            pass
+        plt.colorbar(sc, ax=ax, label='CD (×10³)', format='%.2f')
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('Chamfer Distance')
+        ax.set_title(f'CD vs {xlabel}')
+        ax.legend(fontsize=8)
+    fig.suptitle(f'CD quality vs script complexity  (n={len(with_cd)} scripts)', fontsize=11)
+    fig.tight_layout()
+    _savefig(fig, os.path.join(out_dir, '09_cd_vs_complexity.png'))
+
+    # --- 9b: CD by op type ---
+    flag_keys = [
+        ('has_arc',           'arc'),
+        ('has_cut',           'cut'),
+        ('has_cylinder',      'cylinder'),
+        ('has_box',           'box'),
+        ('has_push',          'push'),
+        ('has_subtract_mode', 'sub-mode'),
+        ('has_revolve',       'revolve'),
+        ('has_fillet',        'fillet'),
+        ('has_multi_body',    'multi-body'),
+    ]
+    groups, group_labels = [[r['cd'] for r in with_cd]], [f'all\n(n={len(with_cd)})']
+    for feat_key, label in flag_keys:
+        subset = [r['cd'] for r in with_cd if r.get(feat_key)]
+        if len(subset) >= 3:
+            groups.append(subset)
+            group_labels.append(f'{label}\n(n={len(subset)})')
+
+    baseline_median = np.median(groups[0])
+    fig, ax = plt.subplots(figsize=(max(10, len(groups) * 1.2), 5), facecolor='white')
+    bp = ax.boxplot(groups, patch_artist=True, notch=False, vert=True,
+                    medianprops=dict(color='black', linewidth=2))
+    colors = ['#90A4AE'] + ['#F44336' if np.median(g) > baseline_median
+                            else '#4CAF50' for g in groups[1:]]
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+    ax.set_xticks(range(1, len(group_labels) + 1))
+    ax.set_xticklabels(group_labels, fontsize=8)
+    ax.set_ylabel('Chamfer Distance')
+    ax.set_title('CD distribution by operation type\n'
+                 '(red = median > baseline, green = below baseline)')
+    ax.axhline(baseline_median, color='gray', linestyle='--', linewidth=1,
+               label=f'baseline median: {baseline_median*1000:.3f} ×10³')
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    _savefig(fig, os.path.join(out_dir, '10_cd_by_op_type.png'))
+
+
+# ---------------------------------------------------------------------------
+# Plot 11: IoU/CD joint scatter — quality summary
+# ---------------------------------------------------------------------------
+
+def plot_iou_cd_joint(records: list, out_dir: str):
+    """Scatter of IoU vs CD per sample, coloured by script complexity."""
+    with_both = [r for r in records if r.get('iou') is not None and r.get('cd') is not None]
+    if len(with_both) < 5:
+        return
+
+    ious       = [r['iou']          for r in with_both]
+    cds        = [r['cd']           for r in with_both]
+    complexity = [r['n_sketch_ops'] for r in with_both]
+
+    fig, ax = plt.subplots(figsize=(8, 6), facecolor='white')
+    sc = ax.scatter(cds, ious, c=complexity, cmap='viridis', alpha=0.7, s=30, edgecolors='none')
+    plt.colorbar(sc, ax=ax, label='Sketch ops (complexity)')
+    ax.set_xlabel('Chamfer Distance')
+    ax.set_ylabel('IoU')
+    ax.set_xlim(left=0)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title(f'IoU vs Chamfer Distance per sample  (n={len(with_both)})\n'
+                 f'IoU mean={np.mean(ious):.3f}  CD median={np.median(cds)*1000:.3f}×10³')
+    # Annotate top-left (high IoU, low CD = best) and bottom-right (worst)
+    ax.text(0.02, 0.97, 'best', transform=ax.transAxes,
+            color='green', fontsize=9, va='top')
+    ax.text(0.98, 0.03, 'worst', transform=ax.transAxes,
+            color='red', fontsize=9, ha='right')
+    fig.tight_layout()
+    _savefig(fig, os.path.join(out_dir, '11_iou_cd_joint.png'))
+
+
+# ---------------------------------------------------------------------------
 # Load results CSV (from evaluate.py --results-csv)
 # ---------------------------------------------------------------------------
 
@@ -666,9 +847,36 @@ def main():
     plot_failure_rate_by_op(records, args.out_dir)
     if records_train:
         plot_distribution_shift(records, records_train, args.out_dir)
+    plot_error_analysis(records, args.out_dir)
     if any(r.get('iou') is not None for r in records):
         plot_iou_vs_complexity(records, args.out_dir)
         plot_iou_by_op_type(records, args.out_dir)
+    if any(r.get('cd') is not None for r in records):
+        plot_cd_analysis(records, args.out_dir)
+    if any(r.get('iou') is not None and r.get('cd') is not None for r in records):
+        plot_iou_cd_joint(records, args.out_dir)
+
+    # --- Print text summary for root cause ---
+    print('\n=== Root Cause Summary ===')
+    failures = [r for r in records if r['status'] != 'success']
+    if failures:
+        by_type = collections.defaultdict(list)
+        for r in failures:
+            by_type[r['status']].append(r.get('detail', ''))
+        for etype, details in sorted(by_type.items(), key=lambda x: -len(x[1])):
+            print(f'\n  {etype} ({len(details)} failures):')
+            import re as _re2
+            # hallucinated API extraction
+            if etype == 'attribute_error':
+                attrs = [_re2.search(r"attribute '([^']+)'", d or '') for d in details]
+                names = collections.Counter(m.group(1) for m in attrs if m)
+                for name, n in names.most_common(5):
+                    print(f'    no attribute "{name}" × {n}')
+            else:
+                for d in details[:3]:
+                    print(f'    {(d or "").strip()[:120]}')
+    else:
+        print('  No failures detected.')
 
     print('\nDone.')
 
