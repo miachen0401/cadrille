@@ -1,0 +1,54 @@
+# Cadrille RL fine-tuning — 8× H100 (640 GB total)
+# Uses torchrun / accelerate for DDP. Each rank processes one prompt with G=16
+# rollouts → effective batch = 8 × G = 128 rollouts per gradient step.
+#
+# Usage:
+#   torchrun --nproc_per_node=8 rl/train.py --config configs/rl/h100x8.yaml
+#   # or via accelerate:
+#   accelerate launch --num_processes=8 rl/train.py --config configs/rl/h100x8.yaml
+
+checkpoints_dir: ./checkpoints
+
+mode: cppo
+checkpoint_path: ./checkpoints/cadrille-sft
+
+# Data
+data_dir: ./data/deepcad_test_mesh
+hard_examples_pkl: null
+dpo_dataset: null
+
+# Training
+max_steps: 50000
+lr: 3.0e-5
+
+# Dr. CPPO official settings — full G=16, 3 updates/rollout
+G: 16
+top_N: 4
+eps_high: 0.1
+eps_low: 0.1
+batch_updates: 3
+K_update: 10
+max_new_tokens: 400
+reward_workers: 16       # more workers for 8-GPU node (more CPU cores available)
+
+# DPO (unused)
+beta: 0.3
+dpo_epochs_per_round: 10
+
+# Validation — 100 DeepCAD + 100 Fusion360, pc + img (full paper eval)
+# Run on rank 0 only; other ranks idle during validation.
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   100
+val_samples_fusion360: 100
+val_modalities:        pc,img
+eval_steps: 500
+
+# Logging & checkpoints
+log_steps: 10
+save_steps: 1000
+
+# W&B
+wandb_project: cadrille-rl
+wandb_entity: null
+wandb_offline: false

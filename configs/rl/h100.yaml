@@ -1,0 +1,55 @@
+# Cadrille RL fine-tuning — single H100 (80 GB)
+# Full official hyperparameters — no memory reduction needed.
+#
+# Memory breakdown (~55 GB):
+#   Model weights (bf16):      ~4.5 GB
+#   Adam fp32 optimizer:       ~9.0 GB  (use Adam8bit to save ~7 GB if needed)
+#   Activations (G=16 batch):  ~30 GB
+#   Old policy (CPU-offloaded): 0 GB GPU
+#
+# Usage: python rl/train.py --config configs/rl/h100.yaml
+
+checkpoints_dir: ./checkpoints
+
+mode: cppo
+checkpoint_path: ./checkpoints/cadrille-sft
+
+# Data
+data_dir: ./data/deepcad_test_mesh
+hard_examples_pkl: null
+dpo_dataset: null
+
+# Training (official hyperparameters)
+max_steps: 50000
+lr: 3.0e-5
+
+# Dr. CPPO official settings
+G: 16
+top_N: 4
+eps_high: 0.1
+eps_low: 0.1
+batch_updates: 3
+K_update: 10
+max_new_tokens: 400
+reward_workers: 8
+
+# DPO (unused)
+beta: 0.3
+dpo_epochs_per_round: 10
+
+# Validation — 100 DeepCAD + 100 Fusion360, pc + img (full paper eval)
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   100
+val_samples_fusion360: 100
+val_modalities:        pc,img
+eval_steps: 500
+
+# Logging & checkpoints
+log_steps: 50
+save_steps: 2000
+
+# W&B
+wandb_project: cadrille-rl
+wandb_entity: null
+wandb_offline: false

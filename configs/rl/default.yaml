@@ -38,9 +38,12 @@ reward_workers: 4        # parallel reward compute workers
 beta: 0.3                # KL coefficient (official Table 13)
 dpo_epochs_per_round: 10
 
-# Validation — evaluation on held-out DeepCAD test split
-val_split_dir: ./data/deepcad_test_mesh
-val_samples: 200
+# Validation — 100 DeepCAD + 100 Fusion360, pc + img (matches paper eval exactly)
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   100
+val_samples_fusion360: 100
+val_modalities:        pc,img
 eval_steps: 500
 
 # Logging & checkpoints

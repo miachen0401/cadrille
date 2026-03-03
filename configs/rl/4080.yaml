@@ -38,9 +38,12 @@ reward_workers: 4
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation
-val_split_dir: ./data/deepcad_test_mesh
-val_samples: 50
+# Validation — 25 DeepCAD + 25 Fusion360, pc only (fast: 50 samples × 1 mode)
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   25
+val_samples_fusion360: 25
+val_modalities:        pc
 eval_steps: 200
 
 # Logging & checkpoints

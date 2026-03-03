@@ -325,8 +325,14 @@ def compute_policy_entropy(logits: torch.Tensor, labels: torch.Tensor) -> torch.
 # Validation
 # ---------------------------------------------------------------------------
 
-def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256) -> list:
-    """Sample n_samples GT meshes from split_dir with a fixed seed."""
+def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256,
+                      modalities: tuple = ('pc',)) -> list:
+    """Sample n_samples GT meshes from split_dir with a fixed seed.
+
+    Returns one example dict per (mesh × modality) pair.
+    Each dict has keys: point_cloud (pc mode) OR video (img mode),
+    plus gt_mesh_path, file_name, _dataset_label, _modality.
+    """
     import trimesh
     from dataset import mesh_to_point_cloud
 
@@ -334,47 +340,85 @@ def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256) -> li
     rng = random.Random(42)
     rng.shuffle(stl_files)
 
-    examples = []
-    for fname in stl_files[:n_samples * 2]:
-        if len(examples) >= n_samples:
+    base = []
+    for fname in stl_files[:n_samples * 3]:
+        if len(base) >= n_samples:
             break
         gt_mesh_path = os.path.join(split_dir, fname)
         try:
             mesh = trimesh.load(gt_mesh_path)
             pc = mesh_to_point_cloud(mesh, n_points)
             pc = (pc - 0.5) * 2
-            examples.append({
-                'point_cloud': pc,
-                'description': 'Generate cadquery code',
-                'file_name': fname[:-4],
-                'gt_mesh_path': gt_mesh_path,
+            base.append({
+                '_gt_mesh_path': gt_mesh_path,
+                '_file_name': fname[:-4],
+                '_pc': pc,
+                '_mesh': mesh,
             })
         except Exception:
             pass
 
-    print(f'Loaded {len(examples)} validation examples from {split_dir}')
+    dataset_label = os.path.basename(os.path.normpath(split_dir))
+    # Normalise to official paper dataset names
+    if 'deepcad' in dataset_label.lower():
+        dataset_label = 'DeepCAD test'
+    elif 'fusion' in dataset_label.lower():
+        dataset_label = 'Fusion360 test'
+
+    examples = []
+    for b in base:
+        for mod in modalities:
+            if mod == 'pc':
+                examples.append({
+                    'point_cloud': b['_pc'],
+                    'description': 'Generate cadquery code',
+                    'file_name': b['_file_name'],
+                    'gt_mesh_path': b['_gt_mesh_path'],
+                    '_dataset_label': dataset_label,
+                    '_modality': 'pc',
+                })
+            elif mod == 'img':
+                try:
+                    img_item = _render_img(b['_gt_mesh_path'])
+                    img_item.update({
+                        'description': 'Generate cadquery code',
+                        'file_name': b['_file_name'],
+                        'gt_mesh_path': b['_gt_mesh_path'],
+                        '_dataset_label': dataset_label,
+                        '_modality': 'img',
+                    })
+                    examples.append(img_item)
+                except Exception:
+                    pass
+
+    n_pc  = sum(1 for e in examples if e['_modality'] == 'pc')
+    n_img = sum(1 for e in examples if e['_modality'] == 'img')
+    print(f'Loaded {len(base)} meshes from {split_dir} → {n_pc} pc + {n_img} img examples')
     return examples
 
 
 @torch.no_grad()
-def run_validation(model, val_examples: list, processor, args) -> dict:
-    """Greedy decode one completion per val example; return IoU + CD metrics.
+def _eval_one_pass(model, examples: list, processor, max_new_tokens: int) -> dict:
+    """Run greedy eval on a list of examples; return per-modality/dataset metrics dict.
 
-    Returns dict with keys matching official W&B dashboard naming:
-      eval/pc/DeepCAD test/IoU mean
-      eval/pc/DeepCAD test/IoU median
-      eval/pc/DeepCAD test/CD mean
-      eval/pc/DeepCAD test/CD median
-      eval/pc/DeepCAD test/Failures fraction
+    Each example must have '_modality' ('pc' or 'img') and '_dataset_label' keys.
+    Returns W&B-ready dict with keys: eval/{mod}/{dataset}/IoU mean|median|CD mean|median|Failures fraction
     """
     device = next(model.parameters()).device
     model.eval()
-    ious = []
-    cds = []
-    failures = 0
 
-    for item in val_examples:
-        batch = collate([item], processor=processor, n_points=256, eval=True)
+    # Accumulate by (modality, dataset_label)
+    from collections import defaultdict
+    buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
+
+    for item in examples:
+        mod   = item.get('_modality', 'pc')
+        label = item.get('_dataset_label', 'DeepCAD test')
+        key   = (mod, label)
+
+        # Strip private metadata before collate
+        collate_item = {k: v for k, v in item.items() if not k.startswith('_')}
+        batch = collate([collate_item], processor=processor, n_points=256, eval=True)
         generated_ids = model.generate(
             input_ids=batch['input_ids'].to(device),
             attention_mask=batch['attention_mask'].to(device),
@@ -387,36 +431,45 @@ def run_validation(model, val_examples: list, processor, args) -> dict:
             video_grid_thw=(
                 batch['video_grid_thw'].to(device)
                 if batch.get('video_grid_thw') is not None else None),
-            max_new_tokens=args.max_new_tokens,
+            max_new_tokens=max_new_tokens,
             do_sample=False)
 
         prompt_len = batch['input_ids'].shape[1]
         code = processor.decode(generated_ids[0, prompt_len:], skip_special_tokens=True)
         iou_reward, cd = compute_metrics(code, item['gt_mesh_path'], timeout=30.0)
 
+        buckets[key]['total'] += 1
         if iou_reward <= -10.0:
-            failures += 1
+            buckets[key]['failures'] += 1
         else:
-            ious.append(iou_reward / 10.0)   # convert reward back to [0,1] IoU
+            buckets[key]['ious'].append(iou_reward / 10.0)
             if cd is not None:
-                cds.append(cd)
+                buckets[key]['cds'].append(cd)
 
-    n = len(val_examples)
-    failure_frac = failures / n if n > 0 else 0.0
-    mean_iou    = float(np.mean(ious))    if ious else 0.0
-    median_iou  = float(np.median(ious))  if ious else 0.0
-    mean_cd     = float(np.mean(cds))     if cds  else float('nan')
-    median_cd   = float(np.median(cds))   if cds  else float('nan')
+    # Build W&B metrics dict
+    out = {}
+    for (mod, label), b in buckets.items():
+        ious = b['ious']
+        cds  = b['cds']
+        fail_frac = b['failures'] / b['total'] if b['total'] > 0 else 0.0
+        mean_iou   = float(np.mean(ious))   if ious else 0.0
+        median_iou = float(np.median(ious)) if ious else 0.0
+        mean_cd    = float(np.mean(cds))    if cds  else float('nan')
+        median_cd  = float(np.median(cds))  if cds  else float('nan')
+        prefix = f'eval/{mod}/{label}'
+        out[f'{prefix}/IoU mean']          = mean_iou
+        out[f'{prefix}/IoU median']        = median_iou
+        out[f'{prefix}/CD mean']           = mean_cd
+        out[f'{prefix}/CD median']         = median_cd
+        out[f'{prefix}/Failures fraction'] = fail_frac
+        print(f'  [{mod}/{label}] IoU={mean_iou:.3f}  CD={mean_cd:.2e}  Fail={fail_frac*100:.1f}%')
 
-    print(f'  IoU mean={mean_iou:.3f}  CD mean={mean_cd:.4f}  Failures={failure_frac*100:.1f}%')
+    return out
 
-    return {
-        'eval/pc/DeepCAD test/IoU mean':          mean_iou,
-        'eval/pc/DeepCAD test/IoU median':        median_iou,
-        'eval/pc/DeepCAD test/CD mean':           mean_cd,
-        'eval/pc/DeepCAD test/CD median':         median_cd,
-        'eval/pc/DeepCAD test/Failures fraction': failure_frac,
-    }
+
+def run_validation(model, val_examples: list, processor, args) -> dict:
+    """Greedy eval over all val_examples; returns W&B-ready metrics dict."""
+    return _eval_one_pass(model, val_examples, processor, args.max_new_tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -698,12 +751,18 @@ def train(args, cfg_to_save=None):
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         print('Optimizer: Adam (fp32) — bitsandbytes not found; may OOM on 16 GB GPU')
 
-    # Validation
+    # Validation — multi-dataset, multi-modality
+    val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
     val_examples = []
-    if args.val_split_dir and os.path.isdir(args.val_split_dir):
-        val_examples = load_val_examples(args.val_split_dir, args.val_samples)
-    else:
-        print('No --val-split-dir provided; skipping validation.')
+    for split_dir, n_samples in [
+        (args.val_deepcad_dir,    args.val_samples_deepcad),
+        (args.val_fusion360_dir,  args.val_samples_fusion360),
+    ]:
+        if split_dir and os.path.isdir(split_dir) and n_samples > 0:
+            val_examples += load_val_examples(
+                split_dir, n_samples, modalities=val_modalities)
+    if not val_examples:
+        print('No validation dirs found; skipping validation.')
 
     if args.mode == 'cppo':
         if args.data_dir:
@@ -937,9 +996,21 @@ if __name__ == '__main__':
     parser.add_argument('--log-steps', type=int, default=None)
     parser.add_argument('--save-steps', type=int, default=None)
 
-    # Validation
-    parser.add_argument('--val-split-dir', type=str, default=None)
-    parser.add_argument('--val-samples', type=int, default=None)
+    # Validation — multi-dataset, multi-modality
+    parser.add_argument('--val-split-dir', type=str, default=None,
+                        help='[legacy] single val dir; prefer --val-deepcad-dir')
+    parser.add_argument('--val-samples', type=int, default=None,
+                        help='[legacy] single split samples; prefer --val-samples-deepcad')
+    parser.add_argument('--val-deepcad-dir', type=str, default=None,
+                        help='DeepCAD test mesh dir (e.g. ./data/deepcad_test_mesh)')
+    parser.add_argument('--val-fusion360-dir', type=str, default=None,
+                        help='Fusion360 test mesh dir (e.g. ./data/fusion360_test_mesh)')
+    parser.add_argument('--val-samples-deepcad', type=int, default=None,
+                        help='N samples from DeepCAD val split (default: 25)')
+    parser.add_argument('--val-samples-fusion360', type=int, default=None,
+                        help='N samples from Fusion360 val split (default: 25)')
+    parser.add_argument('--val-modalities', type=str, default=None,
+                        help='Comma-separated modalities to eval: pc,img (default: pc)')
     parser.add_argument('--eval-steps', type=int, default=None)
 
     # W&B
@@ -988,8 +1059,24 @@ if __name__ == '__main__':
     args.lr               = _p(args.lr,               cfg.get('lr'),               3e-5)
     args.log_steps        = _p(args.log_steps,        cfg.get('log_steps'),        100)
     args.save_steps       = _p(args.save_steps,       cfg.get('save_steps'),       5000)
-    args.val_split_dir    = _p(args.val_split_dir,    cfg.get('val_split_dir'),    None)
-    args.val_samples      = _p(args.val_samples,      cfg.get('val_samples'),      50)
+    # Legacy single-dir validation (back-compat; new code uses val_deepcad_dir)
+    _legacy_dir     = _p(args.val_split_dir, cfg.get('val_split_dir'), None)
+    _legacy_samples = _p(args.val_samples,   cfg.get('val_samples'),   0)
+    args.val_deepcad_dir      = _p(args.val_deepcad_dir,
+                                   cfg.get('val_deepcad_dir'),
+                                   _legacy_dir)
+    args.val_fusion360_dir    = _p(args.val_fusion360_dir,
+                                   cfg.get('val_fusion360_dir'),
+                                   None)
+    args.val_samples_deepcad  = _p(args.val_samples_deepcad,
+                                   cfg.get('val_samples_deepcad'),
+                                   _legacy_samples if _legacy_samples else 25)
+    args.val_samples_fusion360 = _p(args.val_samples_fusion360,
+                                    cfg.get('val_samples_fusion360'),
+                                    25)
+    args.val_modalities       = _p(args.val_modalities,
+                                   cfg.get('val_modalities'),
+                                   'pc')
     args.eval_steps       = _p(args.eval_steps,       cfg.get('eval_steps'),       500)
     args.wandb_project    = _p(args.wandb_project,    cfg.get('wandb_project'),    None)
     args.wandb_entity     = _p(args.wandb_entity,     cfg.get('wandb_entity'),     None)
