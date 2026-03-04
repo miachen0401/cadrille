@@ -107,24 +107,29 @@ def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256,
 
 
 @torch.no_grad()
-def eval_one_pass(model, examples: list, processor, max_new_tokens: int) -> dict:
+def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
+                  eval_batch_size: int = 8, reward_workers: int = 8) -> dict:
     """Greedy eval on a list of examples; return per-modality/dataset metrics dict.
 
-    Returns W&B-ready dict: eval/{mod}/{dataset}/IoU mean|median|CD mean|median|Failures fraction
+    Batches inference (eval_batch_size items per generate call) and runs
+    compute_metrics in parallel (reward_workers threads) to maximise GPU/CPU
+    utilisation.  Returns W&B-ready dict.
     """
     from collections import defaultdict
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     device = next(model.parameters()).device
     model.eval()
 
-    buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
+    # ── 1. Batched inference ──────────────────────────────────────────────────
+    all_codes = []
+    n = len(examples)
+    for i in range(0, n, eval_batch_size):
+        chunk = examples[i:i + eval_batch_size]
+        collate_items = [{k: v for k, v in ex.items() if not k.startswith('_')}
+                         for ex in chunk]
+        batch = collate(collate_items, processor=processor, n_points=256, eval=True)
 
-    for item in examples:
-        mod   = item.get('_modality', 'pc')
-        label = item.get('_dataset_label', 'DeepCAD test')
-        key   = (mod, label)
-
-        collate_item = {k: v for k, v in item.items() if not k.startswith('_')}
-        batch = collate([collate_item], processor=processor, n_points=256, eval=True)
         generated_ids = model.generate(
             input_ids=batch['input_ids'].to(device),
             attention_mask=batch['attention_mask'].to(device),
@@ -144,16 +149,33 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int) -> dict
             top_k=None)
 
         prompt_len = batch['input_ids'].shape[1]
-        code = processor.decode(generated_ids[0, prompt_len:], skip_special_tokens=True)
-        iou_reward, cd = compute_metrics(code, item['gt_mesh_path'], timeout=30.0)
+        for j in range(len(chunk)):
+            code = processor.decode(generated_ids[j, prompt_len:], skip_special_tokens=True)
+            all_codes.append(code)
 
-        buckets[key]['total'] += 1
-        if iou_reward <= -10.0:
-            buckets[key]['failures'] += 1
-        else:
-            buckets[key]['ious'].append(iou_reward / 10.0)
-            if cd is not None:
-                buckets[key]['cds'].append(cd)
+    # ── 2. Parallel reward computation ───────────────────────────────────────
+    buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
+
+    def _score(idx):
+        ex = examples[idx]
+        iou_reward, cd = compute_metrics(all_codes[idx], ex['gt_mesh_path'], timeout=30.0)
+        return idx, iou_reward, cd
+
+    with ThreadPoolExecutor(max_workers=reward_workers) as pool:
+        futures = [pool.submit(_score, i) for i in range(n)]
+        for fut in as_completed(futures):
+            idx, iou_reward, cd = fut.result()
+            ex    = examples[idx]
+            mod   = ex.get('_modality', 'pc')
+            label = ex.get('_dataset_label', 'DeepCAD test')
+            key   = (mod, label)
+            buckets[key]['total'] += 1
+            if iou_reward <= -10.0:
+                buckets[key]['failures'] += 1
+            else:
+                buckets[key]['ious'].append(iou_reward / 10.0)
+                if cd is not None:
+                    buckets[key]['cds'].append(cd)
 
     out = {}
     for (mod, label), b in buckets.items():
@@ -177,4 +199,6 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int) -> dict
 
 def run_validation(model, val_examples: list, processor, args) -> dict:
     """Greedy eval over all val_examples; returns W&B-ready metrics dict."""
-    return eval_one_pass(model, val_examples, processor, args.max_new_tokens)
+    return eval_one_pass(model, val_examples, processor, args.max_new_tokens,
+                         eval_batch_size=getattr(args, 'eval_batch_size', 8),
+                         reward_workers=getattr(args, 'reward_workers', 8))
