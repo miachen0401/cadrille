@@ -279,8 +279,11 @@ def train_cppo(model, old_model, optimizer, dataset, processor,
 
     if val_examples and step == 0:
         print('\n[eval step=0 (pre-training baseline)]')
-        val_metrics = run_validation(model, val_examples, processor, args)
-        log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
+        try:
+            val_metrics = run_validation(model, val_examples, processor, args)
+            log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
+        except Exception as e:
+            print(f'[eval step=0] failed (skipping): {e}')
         model.train()
 
     pbar = tqdm(total=args.max_steps, desc='Dr. CPPO')
