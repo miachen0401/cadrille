@@ -277,7 +277,7 @@ def train_cppo(model, old_model, optimizer, dataset, processor,
         print(f'Resuming from step {step}')
     indices = list(range(len(dataset)))
 
-    if val_examples:
+    if val_examples and step == 0:
         print('\n[eval step=0 (pre-training baseline)]')
         val_metrics = run_validation(model, val_examples, processor, args)
         log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
