@@ -33,11 +33,19 @@ RUN git clone https://github.com/isl-org/Open3D.git \
     && make install-pip-package \
     && cd / && rm -rf Open3D
 
-# Python ML packages
-RUN pip install --no-deps \
-    git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f \
-    git+https://github.com/CadQuery/cadquery.git@e99a15df3cf6a88b69101c405326305b5db8ed94 \
+# Install uv — fast parallel package resolver
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Git-only packages (no PyPI release)
+RUN uv pip install --system --no-deps \
+    "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f" \
+    "git+https://github.com/CadQuery/cadquery.git@e99a15df3cf6a88b69101c405326305b5db8ed94"
+
+# All standard ML packages
+RUN uv pip install --system \
     accelerate==0.34.2 \
+    bitsandbytes>=0.43.0 \
     cadquery-ocp==7.7.2 \
     casadi==3.6.7 \
     comm==0.2.2 \
@@ -65,6 +73,7 @@ RUN pip install --no-deps \
     pyparsing==3.2.0 \
     python-dateutil==2.9.0.post0 \
     pyzmq==26.2.0 \
+    pyyaml \
     regex==2024.11.6 \
     safetensors==0.4.5 \
     scikit-image==0.25.0 \
@@ -72,20 +81,18 @@ RUN pip install --no-deps \
     tifffile==2024.12.12 \
     tokenizers==0.21.0 \
     tornado==6.4.2 \
+    tqdm \
     transformers==4.50.3 \
     trimesh==4.5.3 \
     typish==1.9.3 \
     qwen-vl-utils==0.0.10 \
+    wandb \
     widgetsnbextension==4.0.13
 
 # Node.js 20
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-# uv (fast Python package manager, useful inside container)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
 
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code
