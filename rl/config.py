@@ -107,6 +107,15 @@ def resolve_args(args, cfg: dict) -> dict:
     args.wandb_run_name = cfg.get('wandb_run_name', run_name)
     args.run_name       = run_name
 
+    # Resume step: auto-detect from checkpoint directory name (e.g. checkpoint-5000 → 5000)
+    start_step = 0
+    ckpt_path = getattr(args, 'checkpoint_path', None)
+    if ckpt_path:
+        ckpt_name = os.path.basename(ckpt_path.rstrip('/'))
+        if ckpt_name.startswith('checkpoint-') and ckpt_name[len('checkpoint-'):].isdigit():
+            start_step = int(ckpt_name[len('checkpoint-'):])
+    args.start_step = start_step
+
     # Return resolved config dict for saving alongside checkpoint
     resolved = {k: v for k, v in vars(args).items()
                 if not k.startswith('_') and k != 'config'}
