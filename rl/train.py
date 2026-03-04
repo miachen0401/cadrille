@@ -61,23 +61,36 @@ def train(args, cfg_to_save=None):
             print('Warning: wandb not installed.')
         else:
             try:
+                # Attempt to resume the same W&B run if we have a stored run ID.
+                # Without id=, wandb.init(resume='allow') creates a new run each time.
+                wandb_id_file = os.path.join(args.output_dir, 'wandb_run_id.txt')
+                stored_run_id = None
+                if os.path.exists(wandb_id_file):
+                    with open(wandb_id_file) as f:
+                        stored_run_id = f.read().strip() or None
+
                 wandb.init(
                     project=args.wandb_project,
                     name=args.wandb_run_name or args.run_name,
                     entity=args.wandb_entity or None,
+                    id=stored_run_id,        # None on first run; stored ID on resume
                     config=cfg_to_save or vars(args),
                     mode='offline' if args.wandb_offline else 'online',
                     resume='allow',
                     settings=wandb.Settings(console='off'),
                 )
-                try:
-                    if wandb.run:
-                        with open(os.path.join(args.output_dir, 'wandb_run.txt'), 'w') as f:
-                            f.write(f"run_id: {wandb.run.id}\n")
+                if wandb.run:
+                    # Persist run ID so session restarts can resume the same W&B run
+                    with open(wandb_id_file, 'w') as f:
+                        f.write(wandb.run.id)
+                    # Human-readable info (url may be None in offline mode)
+                    with open(os.path.join(args.output_dir, 'wandb_run.txt'), 'w') as f:
+                        f.write(f"run_id: {wandb.run.id}\n")
+                        try:
                             f.write(f"run_url: {wandb.run.url}\n")
-                            f.write(f"project: {wandb.run.project}\n")
-                except Exception:
-                    pass
+                        except Exception:
+                            pass
+                        f.write(f"project: {wandb.run.project}\n")
                 use_wandb = True
             except Exception as e:
                 print(f'Warning: wandb.init() failed ({e}). Pass --wandb-offline for local logging.')

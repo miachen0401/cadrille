@@ -272,7 +272,9 @@ def cppo_step(model, old_model, optimizer, item: dict, processor, args) -> dict:
 def train_cppo(model, old_model, optimizer, dataset, processor,
                val_examples, use_wandb, args):
     log_path = os.path.join(args.output_dir, 'log.txt')
-    step = 0
+    step = getattr(args, 'start_step', 0)
+    if step > 0:
+        print(f'Resuming from step {step}')
     indices = list(range(len(dataset)))
 
     if val_examples:
