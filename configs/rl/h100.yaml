@@ -39,12 +39,14 @@ sequential_generation: false  # G=16 in one batched generate call; fits in 80 GB
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation — 100 DeepCAD + 100 Fusion360, pc + img (full paper eval)
+# Validation — 50 DeepCAD + 50 Fusion360, pc only (~5 min per eval pass on H100)
+# 100+100 with pc+img = 400 sequential inference calls ≈ 2-3 h per pass; not useful.
+# pc-only at 50+50 = 100 calls ≈ 5-10 min per pass. Increase after confirming rewards.
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
-val_samples_deepcad:   100
-val_samples_fusion360: 100
-val_modalities:        pc,img
+val_samples_deepcad:   50
+val_samples_fusion360: 50
+val_modalities:        pc
 eval_steps: 500
 
 # Logging & checkpoints

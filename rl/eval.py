@@ -138,7 +138,10 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int) -> dict
                 batch['video_grid_thw'].to(device)
                 if batch.get('video_grid_thw') is not None else None),
             max_new_tokens=max_new_tokens,
-            do_sample=False)
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None)
 
         prompt_len = batch['input_ids'].shape[1]
         code = processor.decode(generated_ids[0, prompt_len:], skip_special_tokens=True)
