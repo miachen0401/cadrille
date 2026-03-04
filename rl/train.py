@@ -806,11 +806,30 @@ def train(args, cfg_to_save=None):
         wandb.finish()
 
 
+def _log_eval(val_metrics, step, log_path, use_wandb):
+    """Write an eval result to log.txt and optionally W&B."""
+    log_line = (
+        f"step={step}"
+        + ''.join(f" {k}={v:.4f}" for k, v in val_metrics.items())
+    )
+    with open(log_path, 'a') as f:
+        f.write(log_line + '\n')
+    if use_wandb:
+        wandb.log(val_metrics, step=step)
+
+
 def _train_cppo(model, old_model, optimizer, dataset, processor,
                 val_examples, use_wandb, args):
     log_path = os.path.join(args.output_dir, 'log.txt')
     step = 0
     indices = list(range(len(dataset)))
+
+    # Pre-training eval at step=0 (baseline before any RL updates)
+    if val_examples:
+        print('\n[eval step=0 (pre-training baseline)]')
+        val_metrics = run_validation(model, val_examples, processor, args)
+        _log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
+        model.train()
 
     pbar = tqdm(total=args.max_steps, desc='Dr. CPPO')
     while step < args.max_steps:
@@ -849,6 +868,10 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                     f" train/kl_approx={metrics['train/kl_approx']:.6f}"
                     f" train/adv_pos_frac={metrics['train/adv_pos_frac']:.4f}"
                     f" train/adv_abs_mean={metrics['train/adv_abs_mean']:.4f}"
+                    f" train/q_pp={metrics['train/q_pp']:.4f}"
+                    f" train/q_pn={metrics['train/q_pn']:.4f}"
+                    f" train/q_np={metrics['train/q_np']:.4f}"
+                    f" train/q_nn={metrics['train/q_nn']:.4f}"
                     f" train/ratio_mean={metrics['train/ratio_mean']:.4f}"
                     f" train/ratio_std={metrics['train/ratio_std']:.4f}"
                     f" train/lr={lr:.2e}"
@@ -877,6 +900,10 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                         # Advantage decomposition
                         'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
                         'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
+                        'train/q_pp':            metrics['train/q_pp'],
+                        'train/q_pn':            metrics['train/q_pn'],
+                        'train/q_np':            metrics['train/q_np'],
+                        'train/q_nn':            metrics['train/q_nn'],
                         'train/lr':              lr,
                         # Sequence/reward distributions (visible as histograms in W&B)
                         'dist/rewards': wandb.Histogram(metrics['_rewards_list']),
@@ -887,15 +914,7 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
             if val_examples and step % args.eval_steps == 0:
                 print(f'\n[eval step={step}]')
                 val_metrics = run_validation(model, val_examples, processor, args)
-                # Log to file
-                log_line = (
-                    f"step={step}"
-                    + ''.join(f" {k}={v:.4f}" for k, v in val_metrics.items())
-                )
-                with open(log_path, 'a') as f:
-                    f.write(log_line + '\n')
-                if use_wandb:
-                    wandb.log(val_metrics, step=step)
+                _log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
                 model.train()
 
             # Sync old policy
@@ -920,6 +939,13 @@ def _train_dpo(model, optimizer, dataset, processor,
     log_path = os.path.join(args.output_dir, 'log.txt')
     step = 0
     epoch = 0
+
+    # Pre-training eval at step=0 (baseline before any DPO updates)
+    if val_examples:
+        print('\n[eval step=0 (pre-training baseline)]')
+        val_metrics = run_validation(model, val_examples, processor, args)
+        _log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
+        model.train()
 
     pbar = tqdm(total=args.max_steps, desc='DPO')
     while step < args.max_steps:
@@ -955,14 +981,7 @@ def _train_dpo(model, optimizer, dataset, processor,
             if val_examples and step % args.eval_steps == 0:
                 print(f'\n[eval step={step}]')
                 val_metrics = run_validation(model, val_examples, processor, args)
-                log_line = (
-                    f"step={step}"
-                    + ''.join(f" {k}={v:.4f}" for k, v in val_metrics.items())
-                )
-                with open(log_path, 'a') as f:
-                    f.write(log_line + '\n')
-                if use_wandb:
-                    wandb.log(val_metrics, step=step)
+                _log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
                 model.train()
 
             if step % args.save_steps == 0:
