@@ -369,6 +369,12 @@ def main():
     if eval_rows:
         iou = _col(eval_rows, 'eval/pc/DeepCAD test/IoU mean')
         print(f'  Eval IoU: {np.nanmin(iou):.3f} → {np.nanmax(iou):.3f}')
+    gen_secs = _col(train_rows, 'train/gen_seconds')
+    if not np.all(np.isnan(gen_secs)):
+        mean_gen = np.nanmean(gen_secs)
+        total_gen_h = mean_gen * len(train_rows) / 3600
+        print(f'  Gen time: {mean_gen:.1f}s/step avg  '
+              f'({total_gen_h:.1f}h total generation over {len(train_rows)} steps)')
 
 
 if __name__ == '__main__':

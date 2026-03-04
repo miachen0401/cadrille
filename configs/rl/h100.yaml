@@ -32,6 +32,7 @@ batch_updates: 3
 K_update: 10
 max_new_tokens: 400
 reward_workers: 8
+sequential_generation: false  # G=16 in one batched generate call; fits in 80 GB easily
 
 # DPO (unused)
 beta: 0.3

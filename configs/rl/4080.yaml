@@ -1,11 +1,14 @@
 # Cadrille RL fine-tuning — single RTX 4080 SUPER (16 GB)
 # Sequential generation + Adam8bit to fit in 16 GB VRAM.
 #
-# Memory breakdown (~16 GB):
-#   Model weights (bf16):     ~4.5 GB
-#   Adam8bit optimizer states: ~2.0 GB
-#   Activations + KV cache:   ~8.0 GB (varies with sequence length)
-#   Old policy (CPU-offloaded): 0 GB GPU
+# Memory breakdown per generation call (~16 GB total, sequential):
+#   Model weights (bf16):          ~4.5 GB
+#   Adam8bit optimizer states:     ~2.0 GB
+#   Activations + KV cache (×1):   ~7.0 GB  ← safe headroom
+#   Old policy (CPU-offloaded):     0.0 GB
+#
+# Batched generation (G=4 simultaneous) technically fits (97% VRAM) but runs
+# slower than sequential due to memory-bandwidth saturation.  Force sequential.
 #
 # Usage: python rl/train.py --config configs/rl/4080.yaml
 
@@ -33,6 +36,7 @@ batch_updates: 1         # official=3; reduced to 1 to avoid repeated activation
 K_update: 10
 max_new_tokens: 256      # official=400; reduced for memory
 reward_workers: 4
+sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
 
 # DPO (unused in cppo mode)
 beta: 0.3
