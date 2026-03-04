@@ -96,7 +96,7 @@ def train(args, cfg_to_save=None):
                 print(f'Warning: wandb.init() failed ({e}). Pass --wandb-offline for local logging.')
 
     processor = AutoProcessor.from_pretrained(
-        'Qwen/Qwen2-VL-2B-Instruct',
+        args.base_model,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')

@@ -101,6 +101,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
+        base_model='Qwen/Qwen2-VL-2B-Instruct',
         resume_from_checkpoint=None, cfg_to_save=None):
 
     os.makedirs(output_dir, exist_ok=True)
@@ -165,12 +166,12 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         mode=mode) if has_val else None
 
     processor = AutoProcessor.from_pretrained(
-        'Qwen/Qwen2-VL-2B-Instruct',
+        base_model,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')
     model = Cadrille.from_pretrained(
-        'Qwen/Qwen2-VL-2B-Instruct',
+        base_model,
         torch_dtype=torch.bfloat16,
         attn_implementation='flash_attention_2')
 
@@ -314,6 +315,7 @@ if __name__ == '__main__':
     eval_steps        = _p(args.eval_steps,          cfg.get('eval_steps'),         10000)
     eval_on_start         = bool(args.eval_on_start or cfg.get('eval_on_start',         False))
     wandb_project         = _p(args.wandb_project,    cfg.get('wandb_project'),         None)
+    base_model            = cfg.get('base_model', 'Qwen/Qwen2-VL-2B-Instruct')
     bf16                  = bool(cfg.get('bf16',              False))
     tf32                  = bool(cfg.get('tf32',              False))
     gradient_checkpointing= bool(cfg.get('gradient_checkpointing', False))
@@ -359,6 +361,7 @@ if __name__ == '__main__':
         'eval_steps':             eval_steps,
         'eval_on_start':          eval_on_start,
         'wandb_project':          wandb_project,
+        'base_model':             base_model,
     }
 
     print(f'Run name : {run_name}')
@@ -369,5 +372,6 @@ if __name__ == '__main__':
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
+        base_model=base_model,
         resume_from_checkpoint=resume_from_checkpoint,
         cfg_to_save=resolved_cfg)

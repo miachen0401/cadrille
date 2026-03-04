@@ -1,0 +1,44 @@
+# Cadrille SFT — single A100 80 GB (SXM4 or PCIe)
+# Same paper-exact hyperparameters as a single H100 — A100 80 GB has identical VRAM.
+# bf16: true is safe on A100 (hardware bf16 units, no AMP overhead unlike 4080/WSL2).
+#
+# Memory breakdown (~22 GB):
+#   Model weights (bf16):   ~4.5 GB
+#   AdamW fp32 optimizer:   ~9.0 GB
+#   Activations (bs=28):    ~8.0 GB
+#
+# Throughput estimate: ~2–3 s/step → 120k steps in ~3–5 days
+#
+# Usage: python train.py --config configs/sft/a100.yaml
+
+checkpoints_dir: ./checkpoints
+
+# Data
+data_path: ./data
+mode: pc_img
+use_text: false
+
+# Training — paper-exact settings
+max_steps: 120000
+batch_size: 28        # fits in 80 GB; matches paper single-GPU setting
+accumulation_steps: 1 # no accumulation needed
+learning_rate: 2.0e-4
+warmup_steps: 1000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+# A100 bf16 is hardware-native — safe to enable (unlike 4080/WSL2)
+bf16: true
+gradient_checkpointing: false
+
+dataloader_workers: 4
+
+# Logging & checkpoints
+log_steps: 100
+save_steps: 5000
+eval_steps: 2500
+eval_on_start: true
+
+# W&B
+wandb_project: cadrille-sft
+wandb_entity: null
