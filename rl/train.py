@@ -107,13 +107,8 @@ def train(args, cfg_to_save=None):
         attn_implementation='flash_attention_2',
         device_map='auto')
 
-    try:
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.lr)
-        print('Optimizer: Adam8bit (bitsandbytes)')
-    except ImportError:
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-        print('Optimizer: Adam (fp32) — bitsandbytes not found; may OOM on 16 GB GPU')
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    print('Optimizer: Adam (fp32)')
 
     # Validation
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
