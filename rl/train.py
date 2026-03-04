@@ -83,6 +83,86 @@ def _preflight_check(args):
     print(f'[preflight] CadQuery subprocess OK  {proc.stdout.strip()}')
 
 
+@torch.no_grad()
+def _reward_smoke_test(model, dataset, processor, args, n=3):
+    """Generate code for n examples and run the full reward pipeline.
+
+    Prints the generated code and full subprocess stderr so you can see
+    exactly why reward = -10 without waiting for training to get going.
+    """
+    import subprocess as _sp
+    from cadrille import collate
+    from rl.reward import _get_worker_path
+    import json as _json
+
+    print(f'\n{"="*60}')
+    print(f'[smoke test] Generating + scoring {n} examples ...')
+    print(f'{"="*60}')
+    device = next(model.parameters()).device
+    model.eval()
+
+    for i in range(min(n, len(dataset))):
+        example = dataset[i]
+        collate_item = {k: v for k, v in example.items() if k != 'gt_mesh_path'}
+        batch = collate([collate_item], processor=processor, n_points=256, eval=True)
+
+        generated_ids = model.generate(
+            input_ids=batch['input_ids'].to(device),
+            attention_mask=batch['attention_mask'].to(device),
+            point_clouds=batch['point_clouds'].to(device),
+            is_pc=batch['is_pc'].to(device),
+            is_img=batch['is_img'].to(device),
+            pixel_values_videos=(
+                batch['pixel_values_videos'].to(device)
+                if batch.get('pixel_values_videos') is not None else None),
+            video_grid_thw=(
+                batch['video_grid_thw'].to(device)
+                if batch.get('video_grid_thw') is not None else None),
+            max_new_tokens=args.max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            top_k=None)
+
+        prompt_len = batch['input_ids'].shape[1]
+        code = processor.decode(generated_ids[0, prompt_len:], skip_special_tokens=True)
+
+        print(f'\n─── example {i+1}: {example.get("file_name", "?")} ───')
+        print(f'  generated ({len(code)} chars):')
+        # Print first 400 chars of generated code, indented
+        for line in code[:400].splitlines():
+            print(f'    {line}')
+        if len(code) > 400:
+            print('    ...')
+
+        # Run the reward subprocess with full stderr exposed
+        payload = _json.dumps({
+            'code_str': code,
+            'gt_mesh_path': example['gt_mesh_path'],
+            'compute_chamfer': False,
+        })
+        proc = _sp.run(
+            [sys.executable, _get_worker_path()],
+            input=payload, capture_output=True, text=True, timeout=30)
+
+        if proc.stdout.strip():
+            data = _json.loads(proc.stdout.strip())
+            if data.get('iou') is not None:
+                print(f'  → IoU = {data["iou"]:.4f}  reward = {data["iou"]*10:.2f}  ✓')
+            else:
+                print(f'  → FAILED  error: {data.get("error", "?")}')
+        else:
+            print(f'  → FAILED  returncode={proc.returncode}')
+
+        if proc.stderr.strip():
+            print(f'  subprocess stderr (last 400 chars):')
+            for line in proc.stderr.strip()[-400:].splitlines():
+                print(f'    {line}')
+
+    print(f'\n{"="*60}\n')
+    model.train()
+
+
 def train(args, cfg_to_save=None):
     _preflight_check(args)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -169,6 +249,8 @@ def train(args, cfg_to_save=None):
             dataset = RLDataset(args.hard_examples_pkl)
         else:
             raise ValueError('Provide data_dir (real meshes) or hard_examples_pkl in config')
+
+        _reward_smoke_test(model, dataset, processor, args)
 
         old_model = copy.deepcopy(model).cpu()
         old_model.eval()
