@@ -61,6 +61,7 @@ import argparse
 import yaml
 from datetime import datetime
 
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -476,6 +477,91 @@ def run_validation(model, val_examples: list, processor, args) -> dict:
 # Dr. CPPO / GRPO step  (matches official grpo_mm.py)
 # ---------------------------------------------------------------------------
 
+# Keys forwarded to model.generate(); everything else in collate output is
+# internal bookkeeping (e.g. gt_mesh_path) and must not be forwarded.
+_GEN_INPUT_KEYS = (
+    'input_ids', 'attention_mask',
+    'point_clouds', 'is_pc', 'is_img',
+    'pixel_values_videos', 'video_grid_thw',
+)
+
+
+def _generate_rollouts(model, single_batch: dict, G: int, args, pad_token_id: int):
+    """Generate G completions for one prompt.
+
+    Tries batched generation first (one model.generate call with G copies of the
+    prompt tensors) for maximum GPU utilisation.  On OOM it falls back to G
+    sequential calls of batch_size=1, each result moved to CPU immediately.
+    The fallback is *sticky*: once OOM is detected ``args.sequential_generation``
+    is set to True so subsequent steps skip the batched attempt.
+
+    Args:
+        single_batch: dict with batch_size=1 tensors already on device.
+        G:            number of rollout sequences to generate.
+        pad_token_id: token used to right-pad shorter sequences when stacking.
+
+    Returns:
+        generated_ids [G, max_seq_len] on CPU.
+    """
+    gen_kwargs = dict(
+        max_new_tokens=args.max_new_tokens,
+        do_sample=True,
+        temperature=1.0,
+        top_p=1.0,
+        top_k=50,
+    )
+
+    sequential = getattr(args, 'sequential_generation', False)
+
+    if not sequential:
+        try:
+            # Expand every tensor from [1, ...] → [G, ...] along dim 0.
+            # Scalar/None values (is_pc/is_img are bool tensors [1]) are repeated too.
+            expanded = {}
+            for k in _GEN_INPUT_KEYS:
+                v = single_batch.get(k)
+                if v is None:
+                    expanded[k] = None
+                elif isinstance(v, torch.Tensor):
+                    expanded[k] = v.repeat(G, *([1] * (v.dim() - 1)))
+                else:
+                    expanded[k] = v
+            with torch.no_grad():
+                out = model.generate(**expanded, **gen_kwargs)
+            return out.cpu()   # [G, seq_len]
+
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print(
+                f'[rollout] batched G={G} OOM — '
+                'switching to sequential for the rest of this run'
+            )
+            args.sequential_generation = True
+
+    # --- Sequential fallback (G calls of batch_size=1) ---
+    single_kwargs = {
+        k: single_batch.get(k) for k in _GEN_INPUT_KEYS
+    }
+    generated_ids_list = []
+    with torch.no_grad():
+        for _ in range(G):
+            ids = model.generate(**single_kwargs, **gen_kwargs)
+            generated_ids_list.append(ids.cpu())
+
+    # Pad sequences to the same length before stacking.
+    max_len = max(ids.shape[1] for ids in generated_ids_list)
+    padded = []
+    for ids in generated_ids_list:
+        if ids.shape[1] < max_len:
+            pad = torch.full(
+                (1, max_len - ids.shape[1]), pad_token_id, dtype=ids.dtype)
+            ids = torch.cat([ids, pad], dim=1)
+        padded.append(ids)
+    return torch.cat(padded, dim=0)   # [G, max_len] on CPU
+
+
+# ---------------------------------------------------------------------------
+
 def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
     """One Dr. CPPO update: rollout G completions, select top_N, do batch_updates
     gradient steps.  Matches the official grpo_mm.py train_with_grpo_mm logic.
@@ -490,47 +576,20 @@ def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
     batch = collate([item], processor=processor, n_points=256, eval=True)
     gt_mesh_path = item['gt_mesh_path']
 
-    # --- 2. Generate G completions one at a time (avoids batch-G peak memory) ---
-    # Generating batch_size=G simultaneously requires G × activation memory, which
-    # OOMs on 16 GB. Sequential generation uses batch_size=1, trading speed for memory.
+    # --- 2. Generate G completions ---
+    # Batched (default): one model.generate call with G copies of the prompt.
+    # Falls back to sequential (batch_size=1 × G) on OOM — see _generate_rollouts().
     single_batch = {
         k: v.to(device) if isinstance(v, torch.Tensor) else v
         for k, v in batch.items()
     }
     model.eval()
-    generated_ids_list = []
-    with torch.no_grad():
-        for _ in range(G):
-            ids = model.generate(
-                input_ids=single_batch['input_ids'],
-                attention_mask=single_batch['attention_mask'],
-                point_clouds=single_batch['point_clouds'],
-                is_pc=single_batch['is_pc'],
-                is_img=single_batch['is_img'],
-                pixel_values_videos=(
-                    single_batch['pixel_values_videos']
-                    if single_batch.get('pixel_values_videos') is not None else None),
-                video_grid_thw=(
-                    single_batch['video_grid_thw']
-                    if single_batch.get('video_grid_thw') is not None else None),
-                max_new_tokens=args.max_new_tokens,
-                do_sample=True,
-                temperature=1.0,
-                top_p=1.0,
-                top_k=50)
-            generated_ids_list.append(ids.cpu())  # move to CPU to free GPU cache
-
-    # Pad all sequences to the same length before stacking
-    prompt_len = batch['input_ids'].shape[1]
-    max_len = max(ids.shape[1] for ids in generated_ids_list)
     pad_id = processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
-    padded = []
-    for ids in generated_ids_list:
-        if ids.shape[1] < max_len:
-            pad = torch.full((1, max_len - ids.shape[1]), pad_id, dtype=ids.dtype)
-            ids = torch.cat([ids, pad], dim=1)
-        padded.append(ids)
-    generated_ids = torch.cat(padded, dim=0)  # [G, max_len] on CPU
+    prompt_len = batch['input_ids'].shape[1]
+
+    t_gen = time.perf_counter()
+    generated_ids = _generate_rollouts(model, single_batch, G, args, pad_id)
+    gen_seconds = time.perf_counter() - t_gen
 
     code_strings = processor.batch_decode(
         generated_ids[:, prompt_len:],
@@ -624,6 +683,8 @@ def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
                            ((advantages <= 0) & (ratio > 1.0)).float().mean().item()),
             'train/q_nn': (float('nan') if std_r.item() < 1e-6 else
                            ((advantages <= 0) & (ratio <= 1.0)).float().mean().item()),
+            # Generation timing (seconds per step, useful for batched vs sequential comparison)
+            'train/gen_seconds':     gen_seconds,
             # Distribution lists for wandb.Histogram (stripped before log.txt)
             '_rewards_list':         rewards,                         # all G rollout rewards
             '_ratio_list':           ratio.detach().cpu().tolist(),   # top_N ratios
@@ -874,6 +935,7 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                     f" train/q_nn={metrics['train/q_nn']:.4f}"
                     f" train/ratio_mean={metrics['train/ratio_mean']:.4f}"
                     f" train/ratio_std={metrics['train/ratio_std']:.4f}"
+                    f" train/gen_seconds={metrics['train/gen_seconds']:.2f}"
                     f" train/lr={lr:.2e}"
                 )
                 with open(log_path, 'a') as f:
@@ -904,6 +966,7 @@ def _train_cppo(model, old_model, optimizer, dataset, processor,
                         'train/q_pn':            metrics['train/q_pn'],
                         'train/q_np':            metrics['train/q_np'],
                         'train/q_nn':            metrics['train/q_nn'],
+                        'train/gen_seconds':     metrics['train/gen_seconds'],
                         'train/lr':              lr,
                         # Sequence/reward distributions (visible as histograms in W&B)
                         'dist/rewards': wandb.Histogram(metrics['_rewards_list']),
@@ -1072,6 +1135,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-new-tokens', type=int, default=None,
                         help='Max generation length (official: 400)')
     parser.add_argument('--reward-workers', type=int, default=None)
+    parser.add_argument('--sequential-generation', action='store_true', default=None,
+                        help='Force sequential rollout generation (batch_size=1 × G). '
+                             'Default: try batched, fall back to sequential on OOM.')
 
     # DPO
     parser.add_argument('--dpo-dataset', type=str, default=None)
@@ -1125,6 +1191,13 @@ if __name__ == '__main__':
     args.K_update         = _p(args.K_update,         cfg.get('K_update'),         10)
     args.max_new_tokens   = _p(args.max_new_tokens,   cfg.get('max_new_tokens'),   256)
     args.reward_workers   = _p(args.reward_workers,   cfg.get('reward_workers'),   4)
+    # sequential_generation:
+    #   False (default) — try batched; OOM → sticky fallback to sequential.
+    #   True            — always sequential (safe for 16 GB GPU without OOM probe).
+    _seq = args.sequential_generation  # CLI flag (store_true → True or None)
+    if _seq is None:
+        _seq = cfg.get('sequential_generation', False)
+    args.sequential_generation = bool(_seq)
     args.dpo_dataset      = _p(args.dpo_dataset,      cfg.get('dpo_dataset'),      None)
     args.beta             = _p(args.beta,             cfg.get('beta'),             0.3)
     args.dpo_epochs_per_round = _p(args.dpo_epochs_per_round, cfg.get('dpo_epochs_per_round'), 10)
