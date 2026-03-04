@@ -17,7 +17,6 @@ import textwrap
 import tempfile
 import subprocess
 import numpy as np
-import trimesh
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
@@ -197,7 +196,7 @@ def _execute_code_in_subprocess(
 # Public API
 # ---------------------------------------------------------------------------
 
-def compute_iou(gt_mesh: trimesh.Trimesh, pred_mesh: trimesh.Trimesh) -> Optional[float]:
+def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
     """Volumetric IoU between two trimesh objects.
 
     Copied from evaluate.py for use when both meshes are already loaded in
