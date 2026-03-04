@@ -3,10 +3,14 @@
 .local
 .env
 .cache
+*.pdf
 checkpoints/
 __pycache__
 data/cad-recode-v1.5
 data/text2cad
 data/deepcad_test_mesh
+data/deepcad_test_mini
 data/fusion360_test_mesh
 work_dirs
+wandb/
+ref_code/
