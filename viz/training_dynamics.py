@@ -144,40 +144,35 @@ def plot_reward(ax, steps, rows):
     ax.legend(handles=ax.get_legend().legend_handles + [patch], fontsize=7, loc='upper left')
 
 
-def plot_oob_is(ax, steps, rows):
-    """OOB IS ratio matching SAPO Fig. 4a exactly.
+def plot_adv_is(ax, steps, rows):
+    """Panel (b): Advantage fraction (left) + IS ratio mean ± std (right).
 
-    Left y-axis bars: lower/upper PORTION of OOB sequences (fraction of OOB that
-    are lower-bound vs upper-bound clipped) — so lower+upper = 1.0 within OOB steps.
-    Right y-axis gold line: total OOB rate % (clip_fraction * 100).
+    Left y-axis stackplot: fraction of top-N sequences with positive vs negative
+    advantage (2-way split).  Collapse zones (reward_std≈0) are forward-filled
+    and shaded grey.
 
-    A bar only appears when clip_fraction > 0. When no clipping occurs the bar
-    height is 0 (not plotted), so the axis never reaches 100% spuriously.
+    Right y-axis: IS ratio mean ± std band with clip-bound lines at
+    [1-EPS_LOW, 1+EPS_HIGH].  Falls back to total OOB rate when ratio_mean
+    is not present in the log.
     """
-    clip_lo  = np.nan_to_num(_col(rows, 'train/clip_lower_frac'))
-    clip_hi  = np.nan_to_num(_col(rows, 'train/clip_upper_frac'))
-    clip_tot = np.nan_to_num(_col(rows, 'train/clip_fraction'))
+    std_r    = _col(rows, 'train/reward_std')
+    pos_frac = _col(rows, 'train/adv_pos_frac')
 
-    has_decomp = not (np.all(clip_lo == 0) and np.all(clip_hi == 0))
+    # Mask degenerate collapse steps and forward-fill for stackplot
+    pos_frac  = np.where(std_r < 1e-3, np.nan, pos_frac)
+    pos_filled = _ffill(pos_frac, fill_val=0.5)
+    neg_filled = 1.0 - pos_filled
 
-    # Normalise to fraction-of-OOB (lower + upper = 1 when clip_tot > 0)
-    safe_tot = np.where(clip_tot > 0, clip_tot, np.nan)
-    lower_portion = np.where(clip_tot > 0, clip_lo / safe_tot, 0.0)
-    upper_portion = np.where(clip_tot > 0, clip_hi / safe_tot, 0.0)
+    _shade_collapse(ax, steps, std_r)
+    ax.stackplot(steps,
+                 [neg_filled, pos_filled],
+                 labels=['Adv < 0', 'Adv > 0'],
+                 colors=['#FF7F0E', '#1F77B4'],
+                 alpha=0.55)
+    ax.set_ylabel('Advantage Fraction', fontsize=9)
+    ax.set_ylim(0, 1)
 
-    width = max(1, (steps[-1] - steps[0]) / len(steps) * 0.8) if len(steps) > 1 else 1
-
-    if has_decomp:
-        ax.bar(steps, lower_portion, width=width,
-               color='#4878CF', alpha=0.85, label='Lower (neg-adv)')
-        ax.bar(steps, upper_portion, width=width, bottom=lower_portion,
-               color='#9DC3E6', alpha=0.85, label='Upper (pos-adv)')
-    else:
-        # No decomposition available — just show total as a single bar
-        ax.bar(steps, np.where(clip_tot > 0, 1.0, 0.0), width=width,
-               color='#4878CF', alpha=0.85, label='OOB (no decomp)')
-
-    # Right axis: IS ratio mean ± std with clip-bound lines
+    # Right axis: IS ratio mean ± std
     ratio_mean = _col(rows, 'train/ratio_mean')
     ratio_std  = np.nan_to_num(_col(rows, 'train/ratio_std'), nan=0.0)
     has_ratio  = not np.all(np.isnan(ratio_mean))
@@ -189,23 +184,21 @@ def plot_oob_is(ax, steps, rows):
         ax2.fill_between(steps, rm - ratio_std, rm + ratio_std,
                          color='#D4A017', alpha=0.18, label='±ratio_std')
         ax2.axhline(1 - EPS_LOW,  color='#D4A017', lw=0.9, ls='--', alpha=0.7,
-                    label=f'clip bounds [{1 - EPS_LOW:.1f}, {1 + EPS_HIGH:.1f}]')
+                    label=f'clip [{1 - EPS_LOW:.1f}, {1 + EPS_HIGH:.1f}]')
         ax2.axhline(1 + EPS_HIGH, color='#D4A017', lw=0.9, ls='--', alpha=0.7)
         ax2.axhline(1.0,          color='#D4A017', lw=0.6, ls=':', alpha=0.4)
         ax2.set_ylabel('IS Ratio (π_new / π_old)', color='#D4A017', fontsize=8)
         ax2.tick_params(axis='y', labelcolor='#D4A017', labelsize=7)
         ax2.legend(fontsize=7, loc='upper right')
     else:
-        ax2.plot(steps, clip_tot * 100, color='#D4A017', lw=1.5, label='Total OOB rate (%)')
-        ax2.set_ylabel('Total OOB Rate (%)', color='#D4A017', fontsize=8)
+        clip_tot = np.nan_to_num(_col(rows, 'train/clip_fraction'))
+        ax2.plot(steps, clip_tot * 100, color='#D4A017', lw=1.5, label='OOB rate (%)')
+        ax2.set_ylabel('OOB Rate (%)', color='#D4A017', fontsize=8)
         ax2.tick_params(axis='y', labelcolor='#D4A017', labelsize=7)
         ax2.legend(fontsize=7, loc='upper right')
 
-    ax.set_ylabel('Lower / Upper Portion of OOB', fontsize=8)
-    ax.set_title('(b) IS Ratio + OOB Decomposition', fontsize=9, fontweight='bold')
-    ax.set_ylim(0, 1.05)
+    ax.set_title('(b) Advantage Fraction + IS Ratio', fontsize=9, fontweight='bold')
     ax.legend(fontsize=7, loc='upper left')
-    # Note: right-axis legend handled above
 
 
 def plot_entropy_kl(ax, steps, rows):
@@ -240,49 +233,77 @@ def _ffill(arr: np.ndarray, fill_val: float = 0.5) -> np.ndarray:
     return out
 
 
-def plot_advantage(ax, steps, rows, eval_rows):
-    pos_frac  = _col(rows, 'train/adv_pos_frac')
-    abs_mean  = _col(rows, 'train/adv_abs_mean')
-    std_r     = _col(rows, 'train/reward_std')
+def plot_4quadrant(ax, steps, rows, eval_rows):
+    """Panel (d): 4-quadrant advantage × IS-ratio stackplot + eval IoU.
 
-    # Mask degenerate collapse steps (reward_std≈0 → all advantages=0 → pos_frac=0 is misleading)
-    pos_frac = np.where(std_r < 1e-3, np.nan, pos_frac)
+    The 4 quadrants partition every top-N sequence by:
+      - advantage sign  (adv > 0  vs  adv ≤ 0)
+      - IS ratio vs 1   (ratio > 1  vs  ratio ≤ 1)
 
-    # Forward-fill NaN so stackplot has no gaps (collapse zones kept at last known split)
-    pos_filled = _ffill(pos_frac, fill_val=0.5)
-    neg_filled = 1.0 - pos_filled
+    Healthy training concentrates in pp (green) and nn (blue).
+    Mismatch quadrants np (red) and pn (orange) indicate the policy moved
+    against the gradient signal.
 
-    # Shade collapse zones so it's clear those regions are forward-filled
+    Falls back to 2-way advantage fraction when q_* metrics are absent (old logs).
+    """
+    std_r = _col(rows, 'train/reward_std')
+    q_pp  = _col(rows, 'train/q_pp')   # adv>0, IS>1  (good)
+    q_pn  = _col(rows, 'train/q_pn')   # adv>0, IS≤1  (mismatch)
+    q_np  = _col(rows, 'train/q_np')   # adv≤0, IS>1  (mismatch)
+    q_nn  = _col(rows, 'train/q_nn')   # adv≤0, IS≤1  (good)
+
+    has_4q = not np.all(np.isnan(q_pp))
+
     _shade_collapse(ax, steps, std_r)
 
-    ax.stackplot(steps,
-                 [neg_filled, pos_filled],
-                 labels=['Adv < 0 (neg)', 'Adv > 0 (pos)'],
-                 colors=['#FF7F0E', '#1F77B4'],
-                 alpha=0.55)
+    if has_4q:
+        # Mask degenerate steps and forward-fill
+        def _prep(arr):
+            return _ffill(np.where(std_r < 1e-3, np.nan, arr), fill_val=0.25)
+        pp = _prep(q_pp);  pn = _prep(q_pn)
+        np_ = _prep(q_np); nn = _prep(q_nn)
 
-    ax2 = ax.twinx()
-    ax2.plot(steps, abs_mean, color='black', lw=1.2, ls='--', label='|adv| mean')
-    ax2.set_ylabel('|advantage| mean', fontsize=8)
-    ax2.tick_params(axis='y', labelsize=7)
+        # Normalise rows to sum to 1 (guard floating-point drift)
+        total = pp + pn + np_ + nn
+        total = np.where(total > 0, total, 1.0)
+        pp /= total;  pn /= total;  np_ /= total;  nn /= total
 
-    # Overlay eval IoU if available
+        # Stacking order (bottom→top): nn, np, pn, pp
+        ax.stackplot(steps,
+                     [nn, np_, pn, pp],
+                     labels=['Adv≤0 IS≤1 ✓', 'Adv≤0 IS>1 ✗', 'Adv>0 IS≤1 ✗', 'Adv>0 IS>1 ✓'],
+                     colors=['#1F77B4', '#D62728', '#FF7F0E', '#2CA02C'],
+                     alpha=0.65)
+        ax.axhline(0.5, color='grey', lw=0.6, ls=':', alpha=0.5)
+    else:
+        # Fallback: 2-way advantage fraction (old log without q_* keys)
+        pos_frac  = _col(rows, 'train/adv_pos_frac')
+        pos_frac  = np.where(std_r < 1e-3, np.nan, pos_frac)
+        pos_filled = _ffill(pos_frac, fill_val=0.5)
+        ax.stackplot(steps,
+                     [1.0 - pos_filled, pos_filled],
+                     labels=['Adv < 0', 'Adv > 0'],
+                     colors=['#FF7F0E', '#1F77B4'],
+                     alpha=0.55)
+        ax.text(0.5, 0.5, 'train/q_* not in log\n(run new training for 4-quadrant)',
+                transform=ax.transAxes, ha='center', va='center',
+                fontsize=7, color='grey', style='italic')
+
+    ax.set_ylabel('Fraction of top-N sequences', fontsize=9)
+    ax.set_ylim(0, 1)
+    ax.set_title('(d) Adv × IS-Ratio Quadrants + Eval IoU', fontsize=9, fontweight='bold')
+    ax.legend(fontsize=7, loc='upper left')
+
+    # Eval IoU overlay
     if eval_rows:
         e_steps = np.array([r['step'] for r in eval_rows])
         e_iou   = _col(eval_rows, 'eval/pc/DeepCAD test/IoU mean')
-        ax3 = ax.twinx()
-        ax3.spines['right'].set_position(('outward', 45))
-        ax3.plot(e_steps, e_iou, 'D-', color='#D62728', ms=5, lw=1.2, label='eval IoU')
-        ax3.set_ylabel('Eval IoU', color='#D62728', fontsize=8)
-        ax3.tick_params(axis='y', labelcolor='#D62728', labelsize=7)
-        ax3.set_ylim(0, 1)
-        ax3.legend(fontsize=7, loc='lower right')
-
-    ax.set_ylabel('Advantage Fraction', fontsize=9)
-    ax.set_ylim(0, 1)
-    ax.set_title('(d) Advantage Decomposition + Eval IoU', fontsize=9, fontweight='bold')
-    ax.legend(fontsize=7, loc='upper left')
-    ax2.legend(fontsize=7, loc='upper right')
+        ax2 = ax.twinx()
+        ax2.plot(e_steps, e_iou, 'D-', color='black', ms=5, lw=1.2, label='eval IoU')
+        ax2.set_ylabel('Eval IoU', fontsize=8)
+        ax2.tick_params(axis='y', labelsize=7)
+        ax2.set_ylim(0, 1)
+        ax2.legend(fontsize=7, loc='lower right')
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +340,9 @@ def main():
         ax.tick_params(labelsize=7)
 
     plot_reward(ax1, steps, train_rows)
-    plot_oob_is(ax2, steps, train_rows)
+    plot_adv_is(ax2, steps, train_rows)
     plot_entropy_kl(ax3, steps, train_rows)
-    plot_advantage(ax4, steps, train_rows, eval_rows)
+    plot_4quadrant(ax4, steps, train_rows, eval_rows)
 
     title = args.title or os.path.splitext(os.path.basename(os.path.dirname(args.log)))[0]
     fig.suptitle(f'CPPO Training Dynamics — {title}', fontsize=11, fontweight='bold')

@@ -613,6 +613,17 @@ def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
             'train/adv_pos_frac':    (float('nan') if std_r.item() < 1e-6
                                       else (advantages > 0).float().mean().item()),
             'train/adv_abs_mean':    advantages.abs().mean().item(),
+            # 4-quadrant IS × advantage decomposition (NaN when degenerate).
+            # q_pp / q_nn are "healthy" quadrants (model moved in the right direction).
+            # q_pn / q_np are "mismatch" quadrants (model moved against the gradient).
+            'train/q_pp': (float('nan') if std_r.item() < 1e-6 else
+                           ((advantages > 0) & (ratio > 1.0)).float().mean().item()),
+            'train/q_pn': (float('nan') if std_r.item() < 1e-6 else
+                           ((advantages > 0) & (ratio <= 1.0)).float().mean().item()),
+            'train/q_np': (float('nan') if std_r.item() < 1e-6 else
+                           ((advantages <= 0) & (ratio > 1.0)).float().mean().item()),
+            'train/q_nn': (float('nan') if std_r.item() < 1e-6 else
+                           ((advantages <= 0) & (ratio <= 1.0)).float().mean().item()),
             # Distribution lists for wandb.Histogram (stripped before log.txt)
             '_rewards_list':         rewards,                         # all G rollout rewards
             '_ratio_list':           ratio.detach().cpu().tolist(),   # top_N ratios
