@@ -181,11 +181,13 @@ def train(args, cfg_to_save=None):
             print('Warning: wandb not installed.')
         else:
             try:
-                # Attempt to resume the same W&B run if we have a stored run ID.
-                # Without id=, wandb.init(resume='allow') creates a new run each time.
+                # Resume the same W&B run ONLY when resuming a checkpoint.
+                # Fresh training (start_step=0) always creates a new run so that
+                # wandb.log(step=N) is never rejected as "step < last logged step"
+                # from a previous crashed run that already had data at step N.
                 wandb_id_file = os.path.join(args.output_dir, 'wandb_run_id.txt')
                 stored_run_id = None
-                if os.path.exists(wandb_id_file):
+                if args.start_step > 0 and os.path.exists(wandb_id_file):
                     with open(wandb_id_file) as f:
                         stored_run_id = f.read().strip() or None
 
@@ -193,7 +195,7 @@ def train(args, cfg_to_save=None):
                     project=args.wandb_project,
                     name=args.wandb_run_name or args.run_name,
                     entity=args.wandb_entity or None,
-                    id=stored_run_id,        # None on first run; stored ID on resume
+                    id=stored_run_id,
                     config=cfg_to_save or vars(args),
                     mode='offline' if args.wandb_offline else 'online',
                     resume='allow',
@@ -203,13 +205,18 @@ def train(args, cfg_to_save=None):
                     # Persist run ID so session restarts can resume the same W&B run
                     with open(wandb_id_file, 'w') as f:
                         f.write(wandb.run.id)
-                    # Human-readable info (url may be None in offline mode)
+                    try:
+                        run_url = wandb.run.url or wandb.run.get_url()
+                    except Exception:
+                        run_url = f'https://wandb.ai/{wandb.run.entity}/{wandb.run.project}/runs/{wandb.run.id}'
+                    # Print URL prominently so it's visible in Colab output
+                    print(f'\n{"="*60}')
+                    print(f'W&B run : {run_url}')
+                    print(f'Run ID  : {wandb.run.id}')
+                    print(f'{"="*60}\n')
                     with open(os.path.join(args.output_dir, 'wandb_run.txt'), 'w') as f:
                         f.write(f"run_id: {wandb.run.id}\n")
-                        try:
-                            f.write(f"run_url: {wandb.run.url}\n")
-                        except Exception:
-                            pass
+                        f.write(f"run_url: {run_url}\n")
                         f.write(f"project: {wandb.run.project}\n")
                 use_wandb = True
             except Exception as e:

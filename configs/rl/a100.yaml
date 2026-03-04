@@ -50,7 +50,7 @@ val_modalities:        pc
 eval_steps: 500
 
 # Logging & checkpoints
-log_steps: 50
+log_steps: 10      # ~3-10 min between W&B updates at actual A100 throughput
 save_steps: 500    # save frequently — Colab A100 sessions can timeout after ~12h
 
 # W&B
