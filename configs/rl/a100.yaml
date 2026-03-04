@@ -1,9 +1,8 @@
 # Cadrille RL fine-tuning — single A100 40 GB (Colab Pro)
-# Fits comfortably in 40 GB with Adam8bit + G=8.
 #
-# Memory breakdown (~28 GB):
+# Memory breakdown (~30 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   Adam8bit optimizer:        ~2.0 GB  (saves ~7 GB vs fp32 Adam)
+#   Adam fp32 optimizer:       ~9.0 GB
 #   Activations (G=8 batch):   ~15 GB
 #   Old policy (CPU-offloaded): 0 GB GPU
 #
@@ -34,7 +33,7 @@ eps_high: 0.1
 eps_low: 0.1
 batch_updates: 2
 K_update: 10
-max_new_tokens: 400
+max_new_tokens: 800
 reward_workers: 8
 sequential_generation: false  # G=8 batched fits in 40 GB; set true if OOM
 
@@ -42,12 +41,12 @@ sequential_generation: false  # G=8 batched fits in 40 GB; set true if OOM
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation — 100 DeepCAD + 100 Fusion360, pc + img
+# Validation — 50 DeepCAD + 50 Fusion360, pc only (~5 min per eval pass)
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
-val_samples_deepcad:   100
-val_samples_fusion360: 100
-val_modalities:        pc,img
+val_samples_deepcad:   50
+val_samples_fusion360: 50
+val_modalities:        pc
 eval_steps: 500
 
 # Logging & checkpoints
