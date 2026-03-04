@@ -115,6 +115,9 @@ _WORKER_SCRIPT = textwrap.dedent('''\
 
 # Module-level cache: written once per process lifetime
 _worker_path: Optional[str] = None
+# Log first N worker errors to help diagnose reward = -10 issues
+_error_log_count = 0
+_MAX_ERROR_LOGS = 5
 
 
 def _get_worker_path() -> str:
@@ -149,6 +152,7 @@ def _execute_code_in_subprocess(
         'gt_mesh_path': gt_mesh_path,
         'compute_chamfer': compute_chamfer,
     })
+    global _error_log_count
     try:
         proc = subprocess.run(
             [sys.executable, _get_worker_path()],
@@ -158,10 +162,25 @@ def _execute_code_in_subprocess(
             timeout=timeout,
         )
         if not proc.stdout.strip():
+            if _error_log_count < _MAX_ERROR_LOGS:
+                _error_log_count += 1
+                print(f'[reward worker] empty stdout (returncode={proc.returncode})'
+                      f'\n  stderr: {proc.stderr[:300].strip()}', flush=True)
             return None, None
         data = json.loads(proc.stdout.strip())
+        if data.get('error') and _error_log_count < _MAX_ERROR_LOGS:
+            _error_log_count += 1
+            print(f'[reward worker] error: {data["error"]}', flush=True)
         return data.get('iou'), data.get('cd')
-    except Exception:
+    except subprocess.TimeoutExpired:
+        if _error_log_count < _MAX_ERROR_LOGS:
+            _error_log_count += 1
+            print(f'[reward worker] timeout after {timeout}s', flush=True)
+        return None, None
+    except Exception as exc:
+        if _error_log_count < _MAX_ERROR_LOGS:
+            _error_log_count += 1
+            print(f'[reward worker] exception: {exc}', flush=True)
         return None, None
 
 
