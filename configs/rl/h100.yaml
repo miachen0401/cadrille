@@ -3,7 +3,7 @@
 #
 # Memory breakdown (~55 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   Adam fp32 optimizer:       ~9.0 GB  (use Adam8bit to save ~7 GB if needed)
+#   Adam fp32 optimizer:       ~9.0 GB
 #   Activations (G=16 batch):  ~30 GB
 #   Old policy (CPU-offloaded): 0 GB GPU
 #
