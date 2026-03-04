@@ -72,6 +72,7 @@ _WORKER_SCRIPT = textwrap.dedent('''\
 
 
     def run_worker(code_str, gt_mesh_path, compute_chamfer=False):
+        import io
         import trimesh
         import cadquery as cq  # noqa: F401 (used implicitly via exec)
 
@@ -83,6 +84,14 @@ _WORKER_SCRIPT = textwrap.dedent('''\
         vertices, faces = compound.tessellate(0.001, 0.1)
         pred_mesh = trimesh.Trimesh([(v.x, v.y, v.z) for v in vertices], faces)
         assert len(pred_mesh.faces) > 2
+
+        # Export → reload through STL to trigger trimesh's repair pipeline
+        # (merge vertices, fix winding, fill holes → watertight mesh).
+        # evaluate.py does the same via disk; we do it in memory.
+        # Without this, complex .union() tessellations are non-manifold and
+        # trimesh's boolean intersection silently returns None → iou=None.
+        buf = trimesh.exchange.stl.export_stl(pred_mesh)
+        pred_mesh = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
 
         # Normalize: center → scale to unit extent → translate to [0.5, 0.5, 0.5]
         # Matches evaluate.py:run_cd_single() exactly.
