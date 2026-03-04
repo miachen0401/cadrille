@@ -54,8 +54,7 @@ class MeshDataset:
         import trimesh
         from dataset import mesh_to_point_cloud
 
-        stl_files = sorted(glob(os.path.join(data_dir, '**', '*.stl'), recursive=True)
-                           + glob(os.path.join(data_dir, '*.stl')))
+        stl_files = sorted(glob(os.path.join(data_dir, '**', '*.stl'), recursive=True))
         if size is not None:
             rng = random.Random(42)
             rng.shuffle(stl_files)
