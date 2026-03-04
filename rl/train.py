@@ -79,7 +79,7 @@ def _preflight_check(args):
         raise RuntimeError(
             f"\n[preflight] CadQuery subprocess test failed — reward will be -10 for all outputs.\n"
             f"  returncode : {proc.returncode}\n"
-            f"  stderr     : {proc.stderr[:600]}")
+            f"  stderr     :\n{proc.stderr}")
     print(f'[preflight] CadQuery subprocess OK  {proc.stdout.strip()}')
 
 
