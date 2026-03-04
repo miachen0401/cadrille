@@ -88,6 +88,7 @@ def resolve_args(args, cfg: dict) -> dict:
     args.K_update         = cfg.get('K_update', 10)
     args.max_new_tokens   = cfg.get('max_new_tokens', 256)
     args.reward_workers   = cfg.get('reward_workers', 4)
+    args.eval_batch_size  = cfg.get('eval_batch_size', 8)
     # sequential_generation: CLI --sequential-generation overrides YAML
     _seq = getattr(args, 'sequential_generation', None)
     if not _seq:
