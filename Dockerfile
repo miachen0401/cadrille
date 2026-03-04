@@ -1,15 +1,17 @@
 # Dockerfile — ML training/evaluation environment (no Claude Code)
 # Use this for CI/production runs or any non-interactive workload:
 #   docker build -t cadrille-train -f Dockerfile .
-#   docker run --rm --gpus all -v $(pwd):/workspace cadrille-train python train.py ...
+#   docker run --rm --gpus all -v $(pwd):/workspace cadrille-train \
+#       python rl/train.py --config configs/rl/h100.yaml
 #
 # For interactive development with Claude Code, use Dockerfile.claude instead.
 
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 RUN apt-get update \
-    && apt-get install -y git git-lfs wget libgl1-mesa-glx libosmesa6-dev libglu1-mesa-dev
+    && apt-get install -y git git-lfs wget curl libgl1-mesa-glx libosmesa6-dev libglu1-mesa-dev
 
+# Open3D — headless build required for mesh rendering in evaluation
 RUN git clone https://github.com/isl-org/Open3D.git \
     && cd Open3D \
     && git checkout 8e434558a9b1ecacba7854da7601a07e8bdceb26 \
@@ -23,10 +25,19 @@ RUN git clone https://github.com/isl-org/Open3D.git \
     && make -j8 \
     && make install-pip-package
 
-RUN pip install --no-deps \
-    git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f \
-    git+https://github.com/CadQuery/cadquery.git@e99a15df3cf6a88b69101c405326305b5db8ed94 \
+# Install uv — much faster package resolver/installer than pip
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Git-only packages (no PyPI release) — install before uv resolves the rest
+RUN uv pip install --system --no-deps \
+    "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f" \
+    "git+https://github.com/CadQuery/cadquery.git@e99a15df3cf6a88b69101c405326305b5db8ed94"
+
+# All standard packages — uv resolves in parallel, significantly faster than pip
+RUN uv pip install --system \
     accelerate==0.34.2 \
+    bitsandbytes>=0.43.0 \
     cadquery-ocp==7.7.2 \
     casadi==3.6.7 \
     comm==0.2.2 \
@@ -54,6 +65,7 @@ RUN pip install --no-deps \
     pyparsing==3.2.0 \
     python-dateutil==2.9.0.post0 \
     pyzmq==26.2.0 \
+    pyyaml \
     regex==2024.11.6 \
     safetensors==0.4.5 \
     scikit-image==0.25.0 \
@@ -61,8 +73,12 @@ RUN pip install --no-deps \
     tifffile==2024.12.12 \
     tokenizers==0.21.0 \
     tornado==6.4.2 \
+    tqdm \
     transformers==4.50.3 \
     trimesh==4.5.3 \
     typish==1.9.3 \
     qwen-vl-utils==0.0.10 \
+    wandb \
     widgetsnbextension==4.0.13
+
+WORKDIR /workspace

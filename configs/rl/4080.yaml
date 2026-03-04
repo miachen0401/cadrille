@@ -16,7 +16,7 @@
 checkpoints_dir: ./checkpoints
 
 mode: cppo
-checkpoint_path: ./checkpoints/cadrille-sft/checkpoint-best
+checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
 data_dir: ./data/deepcad_test_mesh
