@@ -96,6 +96,8 @@ def _col(rows, key, default=np.nan, aliases=()):
 
 COLLAPSE_THRESHOLD = 0.5   # reward_std below this → mode collapse zone
 ENTROPY_THRESHOLD  = 0.5   # entropy below this → low-entropy zone
+EPS_LOW   = 0.1            # CPPO lower clip bound  (ratio < 1 - EPS_LOW)
+EPS_HIGH  = 0.1            # CPPO upper clip bound  (ratio > 1 + EPS_HIGH)
 
 
 def _shade_collapse(ax, steps, reward_std, alpha=0.12):
@@ -143,41 +145,67 @@ def plot_reward(ax, steps, rows):
 
 
 def plot_oob_is(ax, steps, rows):
-    """Stacked bar of lower/upper OOB IS fraction + total clip_fraction line.
+    """OOB IS ratio matching SAPO Fig. 4a exactly.
 
-    Mirrors SAPO Fig. 4a: lower portion (negative-adv clips) in blue,
-    upper portion (positive-adv clips) in lighter blue, total OOB line in gold.
+    Left y-axis bars: lower/upper PORTION of OOB sequences (fraction of OOB that
+    are lower-bound vs upper-bound clipped) — so lower+upper = 1.0 within OOB steps.
+    Right y-axis gold line: total OOB rate % (clip_fraction * 100).
+
+    A bar only appears when clip_fraction > 0. When no clipping occurs the bar
+    height is 0 (not plotted), so the axis never reaches 100% spuriously.
     """
-    clip_lo = _col(rows, 'train/clip_lower_frac')
-    clip_hi = _col(rows, 'train/clip_upper_frac')
-    clip_tot = _col(rows, 'train/clip_fraction')
+    clip_lo  = np.nan_to_num(_col(rows, 'train/clip_lower_frac'))
+    clip_hi  = np.nan_to_num(_col(rows, 'train/clip_upper_frac'))
+    clip_tot = np.nan_to_num(_col(rows, 'train/clip_fraction'))
 
-    # Fall back to total only if decomposed not logged
-    has_decomp = not (np.all(np.isnan(clip_lo)) and np.all(np.isnan(clip_hi)))
+    has_decomp = not (np.all(clip_lo == 0) and np.all(clip_hi == 0))
+
+    # Normalise to fraction-of-OOB (lower + upper = 1 when clip_tot > 0)
+    safe_tot = np.where(clip_tot > 0, clip_tot, np.nan)
+    lower_portion = np.where(clip_tot > 0, clip_lo / safe_tot, 0.0)
+    upper_portion = np.where(clip_tot > 0, clip_hi / safe_tot, 0.0)
 
     width = max(1, (steps[-1] - steps[0]) / len(steps) * 0.8) if len(steps) > 1 else 1
 
     if has_decomp:
-        ax.bar(steps, np.nan_to_num(clip_lo), width=width,
+        ax.bar(steps, lower_portion, width=width,
                color='#4878CF', alpha=0.85, label='Lower (neg-adv)')
-        ax.bar(steps, np.nan_to_num(clip_hi), width=width,
-               bottom=np.nan_to_num(clip_lo),
+        ax.bar(steps, upper_portion, width=width, bottom=lower_portion,
                color='#9DC3E6', alpha=0.85, label='Upper (pos-adv)')
     else:
-        ax.bar(steps, np.nan_to_num(clip_tot), width=width,
-               color='#4878CF', alpha=0.85, label='OOB total')
+        # No decomposition available — just show total as a single bar
+        ax.bar(steps, np.where(clip_tot > 0, 1.0, 0.0), width=width,
+               color='#4878CF', alpha=0.85, label='OOB (no decomp)')
+
+    # Right axis: IS ratio mean ± std with clip-bound lines
+    ratio_mean = _col(rows, 'train/ratio_mean')
+    ratio_std  = np.nan_to_num(_col(rows, 'train/ratio_std'), nan=0.0)
+    has_ratio  = not np.all(np.isnan(ratio_mean))
 
     ax2 = ax.twinx()
-    ax2.plot(steps, np.nan_to_num(clip_tot) * 100, color='#D4A017',
-             lw=1.5, label='Total OOB rate (%)')
-    ax2.set_ylabel('Total OOB Rate (%)', color='#D4A017', fontsize=8)
-    ax2.tick_params(axis='y', labelcolor='#D4A017', labelsize=7)
+    if has_ratio:
+        rm = np.nan_to_num(ratio_mean, nan=1.0)
+        ax2.plot(steps, rm, color='#D4A017', lw=1.5, label='IS ratio mean')
+        ax2.fill_between(steps, rm - ratio_std, rm + ratio_std,
+                         color='#D4A017', alpha=0.18, label='±ratio_std')
+        ax2.axhline(1 - EPS_LOW,  color='#D4A017', lw=0.9, ls='--', alpha=0.7,
+                    label=f'clip bounds [{1 - EPS_LOW:.1f}, {1 + EPS_HIGH:.1f}]')
+        ax2.axhline(1 + EPS_HIGH, color='#D4A017', lw=0.9, ls='--', alpha=0.7)
+        ax2.axhline(1.0,          color='#D4A017', lw=0.6, ls=':', alpha=0.4)
+        ax2.set_ylabel('IS Ratio (π_new / π_old)', color='#D4A017', fontsize=8)
+        ax2.tick_params(axis='y', labelcolor='#D4A017', labelsize=7)
+        ax2.legend(fontsize=7, loc='upper right')
+    else:
+        ax2.plot(steps, clip_tot * 100, color='#D4A017', lw=1.5, label='Total OOB rate (%)')
+        ax2.set_ylabel('Total OOB Rate (%)', color='#D4A017', fontsize=8)
+        ax2.tick_params(axis='y', labelcolor='#D4A017', labelsize=7)
+        ax2.legend(fontsize=7, loc='upper right')
 
-    ax.set_ylabel('Lower / Upper Portion', fontsize=8)
-    ax.set_title('(b) Out-of-Bounds IS Ratio', fontsize=9, fontweight='bold')
+    ax.set_ylabel('Lower / Upper Portion of OOB', fontsize=8)
+    ax.set_title('(b) IS Ratio + OOB Decomposition', fontsize=9, fontweight='bold')
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=7, loc='upper left')
-    ax2.legend(fontsize=7, loc='upper right')
+    # Note: right-axis legend handled above
 
 
 def plot_entropy_kl(ax, steps, rows):
@@ -201,16 +229,34 @@ def plot_entropy_kl(ax, steps, rows):
     ax.legend(fontsize=7, loc='upper left')
 
 
-def plot_advantage(ax, steps, rows, eval_rows):
-    pos_frac = _col(rows, 'train/adv_pos_frac')
-    abs_mean = _col(rows, 'train/adv_abs_mean')
+def _ffill(arr: np.ndarray, fill_val: float = 0.5) -> np.ndarray:
+    """Forward-fill NaN values; use fill_val if no prior valid entry."""
+    out = arr.copy()
+    last = fill_val
+    for i, v in enumerate(arr):
+        if not np.isnan(v):
+            last = v
+        out[i] = last
+    return out
 
-    # Stacked area: pos_frac (blue) vs neg_frac (orange)
-    neg_frac = 1.0 - np.nan_to_num(pos_frac, nan=0.5)
-    pos_frac_filled = np.nan_to_num(pos_frac, nan=0.5)
+
+def plot_advantage(ax, steps, rows, eval_rows):
+    pos_frac  = _col(rows, 'train/adv_pos_frac')
+    abs_mean  = _col(rows, 'train/adv_abs_mean')
+    std_r     = _col(rows, 'train/reward_std')
+
+    # Mask degenerate collapse steps (reward_std≈0 → all advantages=0 → pos_frac=0 is misleading)
+    pos_frac = np.where(std_r < 1e-3, np.nan, pos_frac)
+
+    # Forward-fill NaN so stackplot has no gaps (collapse zones kept at last known split)
+    pos_filled = _ffill(pos_frac, fill_val=0.5)
+    neg_filled = 1.0 - pos_filled
+
+    # Shade collapse zones so it's clear those regions are forward-filled
+    _shade_collapse(ax, steps, std_r)
 
     ax.stackplot(steps,
-                 [neg_frac, pos_frac_filled],
+                 [neg_filled, pos_filled],
                  labels=['Adv < 0 (neg)', 'Adv > 0 (pos)'],
                  colors=['#FF7F0E', '#1F77B4'],
                  alpha=0.55)
