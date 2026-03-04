@@ -1,41 +1,30 @@
-## `cadrille`: Multi-modal CAD Reconstruction with Online Reinforcement Learning
+## CAD Reconstruction Research — NeurIPS 2026
 
-[![arXiv](https://img.shields.io/badge/arXiv-2505.22914-b31b1b.svg)](https://arxiv.org/abs/2505.22914)
-[![ICLR 2026](https://img.shields.io/badge/ICLR-2026-blue.svg)](https://iclr.cc)
-[![HuggingFace SFT](https://img.shields.io/badge/🤗%20HuggingFace-SFT-yellow)](https://huggingface.co/maksimko123/cadrille)
-[![HuggingFace RL](https://img.shields.io/badge/🤗%20HuggingFace-RL-orange)](https://huggingface.co/maksimko123/cadrille-rl)
+Research codebase extending [cadrille (ICLR 2026)](https://arxiv.org/abs/2505.22914) with improved RL training infrastructure and richer reward signals for multi-modal CAD reconstruction.
 
-**News**:
-- 🔥 Jan, 2026. `cadrille` is accepted to ICLR 2026.
-- 🔥 May, 2025. `cadrille` is state-of-the-art in three CAD reconstruction benchmarks: DeepCAD, Fusion360, CC3D.
+---
 
-This repository contains the implementation of `cadrille`, a multi-modal (point clouds / images / text) 3D CAD reconstruction method introduced in our paper:
+### Baseline results (cadrille, for comparison)
 
-> **cadrille: Multi-modal CAD Reconstruction with Online Reinforcement Learning**<br>
-> [Maksim Kolodiazhnyi](https://github.com/col14m),
-> [Denis Tarasov](https://dt6a.github.io),
-> [Dmitrii Zhemchuzhnikov](https://github.com/zhemdi),
-> [Alexander Nikulin](https://howuhh.github.io),
-> [Ilya Zisman](https://zis.mn),
-> [Anna Vorontsova](https://highrut.github.io),
-> [Anton Konushin](https://scholar.google.com/citations?user=ZT_k-wMAAAAJ),
-> [Vladislav Kurenkov](https://dunnolab.ai),
-> [Danila Rukhovich](https://github.com/filaPro) <br>
-> https://arxiv.org/abs/2505.22914
+| Method | DeepCAD IoU ↑ | Fusion360 IoU ↑ | CC3D IoU ↑ | Invalid ↓ |
+|--------|:---:|:---:|:---:|:---:|
+| CAD-Recode (ICCV 2025) | 0.721 | 0.663 | 0.357 | 2.3% |
+| cadrille SFT | 0.756 | 0.674 | 0.368 | 1.8% |
+| cadrille SFT + Dr. CPPO | **0.787** | **0.706** | **0.392** | **1.2%** |
+| **Ours** | — | — | — | — |
 
 ---
 
 ### Overview
 
-`cadrille` reconstructs 3D CAD models as executable CadQuery Python scripts from point clouds, images, or text descriptions. It combines supervised fine-tuning (SFT) of a 2B vision-language model with online reinforcement learning (Dr. CPPO / GRPO) guided by volumetric IoU rewards.
+This repo extends the cadrille training pipeline with:
 
-**Results on DeepCAD test split (point cloud input):**
+- **Modular RL package** (`rl/`) — clean separation of algorithm (`cppo.py`, `dpo.py`), dataset, evaluation, and reward; easy to swap reward signals and algorithms
+- **Process-level rewards** (`rl/reward.py`) — IoU reward via isolated subprocess; Chamfer Distance computed alongside IoU for richer eval signal
+- **Multi-GPU and Colab support** — configs for H100 80 GB, A100 40/80 GB, RTX 4080 16 GB; `colab.ipynb` for cloud training with Drive-backed checkpoints
+- **Comprehensive validation** — per-step greedy eval on DeepCAD + Fusion360 test sets, both `pc` and `img` modalities, logged to W&B
 
-| Method | IoU ↑ | CD ↓ | Invalid ↓ |
-|--------|-------|------|----------|
-| CAD-Recode | 0.721 | — | 2.3% |
-| cadrille (SFT) | 0.756 | 0.0089 | 1.8% |
-| **cadrille (SFT+RL)** | **0.787** | **0.0071** | **1.2%** |
+The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B + point cloud encoder). The RL training starts from the public cadrille SFT checkpoint.
 
 ---
 
@@ -48,88 +37,105 @@ pip install -r requirements.txt
 
 **Option 2: Docker** (recommended for reproducibility)
 ```bash
-docker build -f Dockerfile -t cadrille .
-docker run --gpus all -it cadrille bash
+docker build -f Dockerfile -t cadrille-research .
+docker run --gpus all -it cadrille-research bash
 ```
 
-We support DeepCAD (test), Fusion360 (test), Text2CAD (train / val / test), and CAD-Recode (train, val) datasets. Follow the [data README](data/README.md) to download and preprocess data.
+**Option 3: Google Colab**
+
+Open `colab.ipynb`. Cells [1]–[7] set up the environment; cell [8] starts RL training.
+GPU is auto-detected (H100 / A100 40 GB / A100 80 GB).
+
+---
+
+### Data
+
+Download the mesh datasets from HuggingFace (each is a separate repo):
+
+```bash
+# DeepCAD test split — used as RL training prompts + evaluation
+huggingface-cli download maksimko123/deepcad_test_mesh \
+    --repo-type dataset --local-dir data/deepcad_test_mesh
+
+# Fusion360 test split — cross-dataset validation
+huggingface-cli download maksimko123/fusion360_test_mesh \
+    --repo-type dataset --local-dir data/fusion360_test_mesh
+
+# CAD-Recode v1.5 — for SFT training (~100k CadQuery scripts + STL meshes)
+huggingface-cli download filapro/cad-recode-v1.5 \
+    --repo-type dataset --local-dir data/cad-recode-v1.5
+python data/cadrecode2mesh.py   # convert .py → .stl for the SFT dataset
+```
 
 ---
 
 ### SFT Training
 
-Supervised fine-tuning on the CAD-Recode v1.5 dataset (~100k CadQuery scripts):
+Supervised fine-tuning on the CAD-Recode v1.5 dataset (~100k CadQuery scripts).
+Starting from scratch or use the public [cadrille SFT checkpoint](https://huggingface.co/maksimko123/cadrille) directly.
 
 ```bash
-# Single GPU (RTX 4080, 16 GB) — 12k steps, effective batch=28
+# Single GPU (RTX 4080, 16 GB) — 12k steps, effective batch 28
 bash scripts/run_sft.sh --config configs/sft/default.yaml
 
-# Single H100 or multi-GPU — full 120k steps
+# Single H100 or multi-GPU — full 120k steps (matches cadrille paper)
 bash scripts/run_sft.sh --config configs/sft/full.yaml
 
-# 8× H100 (matches paper exactly)
-bash scripts/run_sft.sh --config configs/sft/h100.yaml
-
-# Smoke test (600 steps, verifies setup)
+# Smoke test (600 steps, verifies setup in ~20 min)
 bash scripts/run_sft.sh --config configs/sft/smoke.yaml
 ```
 
-Training progress is logged to [Weights & Biases](https://wandb.ai). Set `wandb_project` in the config or pass `--wandb-project cadrille-sft`.
-
-**Key SFT hyperparameters** (from `configs/sft/full.yaml`):
+Key SFT hyperparameters:
 ```
-optimizer:    AdamW
-lr:           2e-4  (cosine schedule)
-warmup:       1000 steps
-max_steps:    120,000
-batch:        28 per-device × 1 accum = 28 effective
-precision:    bfloat16 + flash_attention_2
+optimizer:    AdamW  |  lr: 2e-4 (cosine)  |  warmup: 1000 steps
+max_steps:    120,000  |  batch: 28  |  precision: bfloat16 + flash_attention_2
 ```
 
 ---
 
 ### RL Fine-tuning
 
-Online RL using Dr. CPPO (GRPO variant) with IoU rewards. Starts from your best SFT checkpoint:
+Online RL (Dr. CPPO / GRPO) starting from the cadrille SFT checkpoint.
+Reward: `r = -10` (invalid) or `IoU × 10 ∈ [0, 10]` (valid geometry).
 
 ```bash
-# Single RTX 4080 (16 GB) — reduced G=4, Adam8bit optimizer
-bash scripts/run_rl.sh --config configs/rl/4080.yaml \
-    --checkpoint-path ./checkpoints/cadrille-sft/checkpoint-final
+# RTX 4080 16 GB — G=4, Adam8bit, sequential generation
+python rl/train.py --config configs/rl/4080.yaml
 
-# 8× H100 — official G=16, full hyperparameters, independent shards
-DISTRIBUTED=1 bash scripts/run_rl.sh --config configs/rl/default.yaml
+# A100 40 GB — G=8, Adam8bit
+python rl/train.py --config configs/rl/a100.yaml
+
+# H100 or A100 80 GB — G=16, full official hyperparameters
+python rl/train.py --config configs/rl/h100.yaml
+
+# Resume after crash / session timeout
+python rl/train.py --config configs/rl/h100.yaml \
+    --run-name cadrille-rl-v1 \
+    --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-5000
 ```
 
-**W&B dashboard** will show (matching official cadrille naming):
+Key RL hyperparameters (H100 config, matching cadrille paper):
+```
+algorithm:      Dr. CPPO / GRPO
+optimizer:      Adam (Adam8bit on ≤ 40 GB GPU)
+lr:             3e-5  |  G: 16 rollouts  |  top_N: 4  |  eps: 0.1
+batch_updates:  3     |  max_new_tokens: 400
+```
+
+W&B metrics logged each step:
 - `loss` — PPO clip loss
 - `average_reward` — mean IoU reward across G rollouts
-- `eval/pc/DeepCAD test/IoU mean` — validation IoU
-- `eval/pc/DeepCAD test/CD mean` — validation Chamfer Distance
+- `eval/pc/DeepCAD test/IoU mean` — greedy validation IoU
+- `eval/pc/DeepCAD test/CD mean` — greedy validation Chamfer Distance
 - `eval/pc/DeepCAD test/Failures fraction` — fraction of invalid completions
-
-**Key RL hyperparameters** (from `configs/rl/default.yaml`):
-```
-algorithm:    Dr. CPPO / GRPO
-optimizer:    Adam (Adam8bit on single GPU)
-lr:           3e-5
-G:            16 rollouts/step  (4 on RTX 4080)
-top_N:        4 selected by |advantage|
-eps:          0.1 (PPO clip)
-batch_updates: 3
-max_new_tokens: 400
-reward:       r = -10 (invalid) or IoU × 10 ∈ [0, 10]
-```
 
 ---
 
 ### Inference
 
-Generate CadQuery scripts for a test split:
-
 ```bash
 python test.py \
-    --checkpoint-path maksimko123/cadrille-rl \
+    --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-final \
     --split deepcad_test_mesh \
     --mode pc \
     --py-path ./outputs/deepcad_pc
@@ -141,57 +147,70 @@ Supported modes: `pc` (point cloud), `img` (image), `pc_img` (both), `text`.
 
 ### Evaluation
 
-Compute IoU, Chamfer Distance, and invalidity ratio:
-
 ```bash
 # One-shot pipeline (generate + evaluate)
 bash scripts/run_eval.sh \
-    --checkpoint ./checkpoints/cadrille-rl/checkpoint-final \
+    --checkpoint ./checkpoints/cadrille-rl-v1/checkpoint-final \
     --split deepcad_test_mesh \
     --mode pc_img
 
-# Or separately
+# Separately
 python test.py --checkpoint-path $CKPT --split deepcad_test_mesh --mode pc --py-path ./outputs
 python evaluate.py --py-path ./outputs
 ```
 
 ---
 
-### Pre-trained Models
-
-| Model | Description | HuggingFace |
-|-------|-------------|-------------|
-| `maksimko123/cadrille` | SFT on CAD-Recode v1.5 | [🤗 link](https://huggingface.co/maksimko123/cadrille) |
-| `maksimko123/cadrille-rl` | SFT + RL fine-tuning | [🤗 link](https://huggingface.co/maksimko123/cadrille-rl) |
-
----
-
 ### Repository Structure
 
 ```
-cadrille/
-├── cadrille.py          Core model (Qwen2-VL + point cloud encoder)
-├── dataset.py           Dataset loaders
+├── cadrille.py          Core model (Qwen2-VL-2B + point cloud encoder, unchanged from paper)
+├── dataset.py           Dataset loaders (SFT)
 ├── train.py             SFT training (HuggingFace Trainer)
 ├── test.py              Inference / script generation
-├── evaluate.py          Metrics: IoU, CD, invalidity
+├── evaluate.py          Metrics: IoU, CD, invalidity rate
+│
 ├── rl/
-│   ├── train.py         RL training (Dr. CPPO / GRPO)
-│   ├── reward.py        IoU + CD reward via subprocess
-│   └── mine.py          Hard example mining (optional pre-filter)
+│   ├── train.py         Entry point — CLI + W&B init + model loading
+│   ├── config.py        YAML loading and CLI/config merge
+│   ├── dataset.py       MeshDataset, RLDataset, DPODataset
+│   ├── eval.py          Greedy validation — IoU + CD per dataset/modality
+│   ├── reward.py        IoU + CD reward via isolated subprocess
+│   ├── mine.py          Hard example mining (optional)
+│   └── algorithms/
+│       ├── cppo.py      Dr. CPPO / GRPO implementation
+│       └── dpo.py       DPO implementation
+│
 ├── configs/
-│   ├── sft/             SFT configs (default, full, h100, smoke)
-│   └── rl/              RL configs (default, 4080)
-└── scripts/
-    ├── run_sft.sh       SFT launcher
-    ├── run_rl.sh        RL launcher
-    ├── run_eval.sh      Evaluation pipeline
-    └── setup.sh         Environment setup
+│   ├── sft/             SFT configs: default (12k), full (120k), h100, smoke
+│   └── rl/              RL configs: 4080 (16 GB), a100 (40 GB), h100 (80 GB)
+│
+├── scripts/
+│   ├── run_sft.sh       SFT launcher
+│   ├── run_rl.sh        RL launcher
+│   ├── run_eval.sh      Evaluation pipeline
+│   └── setup.sh         Environment setup
+│
+├── tests/
+│   └── test_cppo_step.py  Unit test for CPPO step (no mesh files needed)
+│
+└── colab.ipynb          Google Colab notebook (H100 / A100 40 GB / A100 80 GB)
 ```
+
+---
+
+### Pre-trained Models (cadrille baselines)
+
+| Model | Description | HuggingFace |
+|-------|-------------|-------------|
+| `maksimko123/cadrille` | SFT on CAD-Recode v1.5 — starting point for RL | [🤗](https://huggingface.co/maksimko123/cadrille) |
+| `maksimko123/cadrille-rl` | cadrille SFT + Dr. CPPO — baseline to beat | [🤗](https://huggingface.co/maksimko123/cadrille-rl) |
 
 ---
 
 ### Citation
+
+If you use this codebase, please also cite the cadrille paper it builds on:
 
 ```bibtex
 @inproceedings{kolodiazhnyi2026cadrille,
@@ -204,7 +223,3 @@ cadrille/
   url       = {https://arxiv.org/abs/2505.22914}
 }
 ```
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/8b811b14-e646-48d6-9a0c-06a9655bdbaf" alt="cadrille scheme"/>
-</p>
