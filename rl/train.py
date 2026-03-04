@@ -608,8 +608,10 @@ def cppo_step(model, old_model, optimizer, item, processor, args) -> dict:
             'train/ratio_mean':      ratio.mean().item(),
             'train/ratio_std':       ratio.std().item(),
             'train/kl_approx':       kl_approx.item(),  # E[r - 1 - log r], ≈ KL(new||old)
-            # Advantage decomposition over top_N selected sequences
-            'train/adv_pos_frac':    (advantages > 0).float().mean().item(),
+            # Advantage decomposition over top_N selected sequences.
+            # NaN when all advantages are zero (degenerate step: all rewards equal).
+            'train/adv_pos_frac':    (float('nan') if std_r.item() < 1e-6
+                                      else (advantages > 0).float().mean().item()),
             'train/adv_abs_mean':    advantages.abs().mean().item(),
             # Distribution lists for wandb.Histogram (stripped before log.txt)
             '_rewards_list':         rewards,                         # all G rollout rewards
