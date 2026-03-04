@@ -44,7 +44,47 @@ except ImportError:
     _WANDB_AVAILABLE = False
 
 
+def _preflight_check(args):
+    """Fail fast before loading the model if checkpoint or CadQuery is broken."""
+    import glob as _glob
+    import subprocess
+    import textwrap
+
+    # ── 1. Checkpoint has actual weight files ─────────────────────────────────
+    ckpt = args.checkpoint_path
+    weights = (_glob.glob(os.path.join(ckpt, 'model*.safetensors')) +
+               _glob.glob(os.path.join(ckpt, 'pytorch_model*.bin')))
+    if not weights:
+        raise RuntimeError(
+            f"\n[preflight] No weight files found in: {ckpt}\n"
+            f"  Expected model*.safetensors or pytorch_model*.bin.\n"
+            f"  Re-download with: huggingface-cli download maksimko123/cadrille "
+            f"--repo-type model --local-dir {ckpt}")
+    print(f'[preflight] Checkpoint OK  ({len(weights)} weight file(s))')
+
+    # ── 2. CadQuery subprocess produces a valid mesh ──────────────────────────
+    # The reward worker does exec(code) then g['r'].val().tessellate(...)
+    # If CadQuery is broken or OCP libs are missing, every reward will be -10.
+    probe = textwrap.dedent("""\
+        import cadquery as cq, json
+        r = cq.Workplane('XY').box(1, 1, 1)
+        v, f = r.val().tessellate(0.01)
+        assert len(f) > 0
+        print(json.dumps({'faces': len(f)}))
+    """)
+    proc = subprocess.run(
+        [sys.executable, '-c', probe],
+        capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise RuntimeError(
+            f"\n[preflight] CadQuery subprocess test failed — reward will be -10 for all outputs.\n"
+            f"  returncode : {proc.returncode}\n"
+            f"  stderr     : {proc.stderr[:600]}")
+    print(f'[preflight] CadQuery subprocess OK  {proc.stdout.strip()}')
+
+
 def train(args, cfg_to_save=None):
+    _preflight_check(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
     if cfg_to_save:
