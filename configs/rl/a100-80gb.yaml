@@ -34,7 +34,7 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-max_new_tokens: 400
+max_new_tokens: 1024
 reward_workers: 8
 sequential_generation: false  # G=16 batched fits in 80 GB
 

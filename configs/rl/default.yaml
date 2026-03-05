@@ -4,7 +4,7 @@
 # Override: python rl/train.py --config configs/rl/default.yaml --run-name my-run
 #
 # Official hyperparameters from col14m/cadrille (rl branch):
-#   G=16, top_N=4, lr=3e-5, eps=0.1, batch_updates=3, max_new_tokens=400
+#   G=16, top_N=4, lr=3e-5, eps=0.1, batch_updates=3, max_new_tokens=1024
 
 # run_name: null   # leave unset for auto-naming
 checkpoints_dir: ./checkpoints
@@ -30,7 +30,7 @@ top_N: 4                 # select top-N by |advantage| for gradient update
 eps_high: 0.1            # PPO clip upper bound
 eps_low: 0.1             # PPO clip lower bound
 batch_updates: 3         # gradient steps per rollout (re-use same data)
-max_new_tokens: 400      # max generation length
+max_new_tokens: 1024     # official=400; set to 1024 for complete code generation
 reward_workers: 4        # parallel reward compute workers
 
 # DPO (only used with --mode dpo)
