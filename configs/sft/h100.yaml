@@ -1,7 +1,7 @@
-# Cadrille SFT — 8× H100 (80 GB each), matches paper effective batch exactly
+# Cadrille SFT — 8× H100 (80 GB each)
 #
-# Paper: 1× H100, bs=8 acc=4  → eff batch = 32, lr = 2e-4
-# Here:  8× H100, bs=4 acc=1  → eff batch = 4×8 = 32, lr = 2e-4  (unchanged)
+# Official (1× H100): bs=15 acc=2 → eff batch = 30, lr = 2e-4
+# Here (8× H100):     bs=4  acc=1 → eff batch = 4×8 = 32, lr = 2e-4  (≈ official)
 #
 # Launch with:
 #   torchrun --nproc_per_node=8 train.py --config configs/sft/h100.yaml

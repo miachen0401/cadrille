@@ -14,10 +14,10 @@ use_text: false       # set true to mix in Text2CAD (changes default batch to 8,
 # Model
 base_model: Qwen/Qwen2-VL-2B-Instruct
 
-# Training
+# Training (official: batch_size=15, accumulation_steps=2, eff=30)
 max_steps: 120000
-batch_size: 28        # per-device; null = auto (28 for pc_img, 8 with use_text)
-accumulation_steps: 1 # null = auto (1 for pc_img, 4 with use_text)
+batch_size: 15        # per-device; official single-GPU setting
+accumulation_steps: 2 # effective batch = 30, matches official
 learning_rate: 2.0e-4
 weight_decay: 0.01
 dataloader_workers: 8

@@ -27,7 +27,6 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-K_update: 10
 max_new_tokens: 400
 reward_workers: 16       # more workers for 8-GPU node (more CPU cores available)
 sequential_generation: false  # G=16 batched; each rank has 80 GB

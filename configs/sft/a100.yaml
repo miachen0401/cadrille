@@ -18,10 +18,10 @@ data_path: ./data
 mode: pc_img
 use_text: false
 
-# Training — paper-exact settings
+# Training — official settings (batch_size=15, acc=2, eff=30)
 max_steps: 120000
-batch_size: 28        # fits in 80 GB; matches paper single-GPU setting
-accumulation_steps: 1 # no accumulation needed
+batch_size: 15        # official single-GPU setting
+accumulation_steps: 2 # effective batch = 30, matches official
 learning_rate: 2.0e-4
 warmup_steps: 1000
 lr_scheduler_type: cosine

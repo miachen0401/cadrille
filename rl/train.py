@@ -24,7 +24,6 @@ import sys
 # Allow execution from repo root or rl/ subdirectory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import copy
 import argparse
 import yaml
 import torch
@@ -234,8 +233,8 @@ def train(args, cfg_to_save=None):
         attn_implementation='flash_attention_2',
         device_map='auto')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    print('Optimizer: Adam (fp32)')
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    print('Optimizer: AdamW (fp32)')
 
     # Validation
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
@@ -259,11 +258,9 @@ def train(args, cfg_to_save=None):
 
         _reward_smoke_test(model, dataset, processor, args)
 
-        old_model = copy.deepcopy(model).cpu()
-        old_model.eval()
-        for p in old_model.parameters():
-            p.requires_grad_(False)
-        train_cppo(model, old_model, optimizer, dataset, processor,
+        # No separate old_model — old log-probs are computed from the current
+        # model at rollout time (matching the reference grpo_mm.py design).
+        train_cppo(model, optimizer, dataset, processor,
                    val_examples, use_wandb, args)
 
     elif args.mode == 'dpo':
