@@ -7,7 +7,7 @@ import torch
 
 from cadrille import Cadrille, collate
 from rl.dataset import render_img
-from rl.reward import compute_metrics
+from rl.reward import compute_metrics, init_eval_pool
 
 try:
     import wandb
@@ -108,12 +108,15 @@ def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256,
 
 @torch.no_grad()
 def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
-                  eval_batch_size: int = 8, reward_workers: int = 8) -> dict:
+                  eval_batch_size: int = 8, reward_workers: int = 2,
+                  eval_timeout: float = 120.0) -> dict:
     """Greedy eval on a list of examples; return per-modality/dataset metrics dict.
 
     Batches inference (eval_batch_size items per generate call) and runs
-    compute_metrics in parallel (reward_workers threads) to maximise GPU/CPU
-    utilisation.  Returns W&B-ready dict.
+    compute_metrics via the warm eval pool (Fix 2) with the longer eval_timeout
+    (Fix 1) and result cache (Fix 4).  reward_workers controls the
+    ThreadPoolExecutor used to submit pool jobs concurrently (Fix 5).
+    Returns W&B-ready dict.
     """
     from collections import defaultdict
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -158,7 +161,11 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
 
     def _score(idx):
         ex = examples[idx]
-        iou_reward, cd = compute_metrics(all_codes[idx], ex['gt_mesh_path'], timeout=30.0)
+        iou_reward, cd = compute_metrics(
+            all_codes[idx], ex['gt_mesh_path'],
+            timeout=eval_timeout,
+            use_pool=True,   # warm pool + result cache (Fix 1/2/4)
+        )
         return idx, iou_reward, cd
 
     with ThreadPoolExecutor(max_workers=reward_workers) as pool:
@@ -199,6 +206,9 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
 
 def run_validation(model, val_examples: list, processor, args) -> dict:
     """Greedy eval over all val_examples; returns W&B-ready metrics dict."""
-    return eval_one_pass(model, val_examples, processor, args.max_new_tokens,
-                         eval_batch_size=getattr(args, 'eval_batch_size', 8),
-                         reward_workers=getattr(args, 'reward_workers', 8))
+    return eval_one_pass(
+        model, val_examples, processor, args.max_new_tokens,
+        eval_batch_size=getattr(args, 'eval_batch_size', 8),
+        reward_workers=getattr(args, 'eval_workers', 2),   # Fix 5: separate eval_workers
+        eval_timeout=getattr(args, 'eval_timeout', 120.0), # Fix 1: longer eval timeout
+    )

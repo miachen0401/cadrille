@@ -88,6 +88,8 @@ def resolve_args(args, cfg: dict) -> dict:
     args.batch_updates    = cfg.get('batch_updates', 1)
     args.max_new_tokens   = cfg.get('max_new_tokens', 256)
     args.reward_workers   = cfg.get('reward_workers', 4)
+    args.eval_workers     = cfg.get('eval_workers', 2)       # Fix 5: separate from reward_workers
+    args.eval_timeout     = cfg.get('eval_timeout', 120.0)   # Fix 1: long timeout for eval
     args.eval_batch_size  = cfg.get('eval_batch_size', 8)
     # sequential_generation: CLI --sequential-generation overrides YAML
     _seq = getattr(args, 'sequential_generation', None)

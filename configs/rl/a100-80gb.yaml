@@ -36,6 +36,8 @@ eps_low: 0.1
 batch_updates: 3
 max_new_tokens: 1024
 reward_workers: 8
+eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
+eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
 sequential_generation: false  # G=16 batched fits in 80 GB
 
 # DPO (unused in default run)

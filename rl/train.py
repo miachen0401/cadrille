@@ -33,6 +33,7 @@ from cadrille import Cadrille
 from rl.config import load_yaml, resolve_args
 from rl.dataset import MeshDataset, RLDataset, DPODataset
 from rl.eval import load_val_examples
+from rl.reward import init_eval_pool
 from rl.algorithms.cppo import train_cppo
 from rl.algorithms.dpo import train_dpo
 
@@ -247,6 +248,11 @@ def train(args, cfg_to_save=None):
             val_examples += load_val_examples(split_dir, n_samples, modalities=val_modalities)
     if not val_examples:
         print('No validation dirs found; skipping validation.')
+
+    # Fix 2+3: Start warm eval process pool before training begins.
+    # Workers pre-import cadquery/trimesh and run at nice=10.
+    if val_examples:
+        init_eval_pool(n_workers=getattr(args, 'eval_workers', 2))
 
     if args.mode == 'cppo':
         if args.data_dir:

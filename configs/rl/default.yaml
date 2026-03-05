@@ -32,6 +32,8 @@ eps_low: 0.1             # PPO clip lower bound
 batch_updates: 3         # gradient steps per rollout (re-use same data)
 max_new_tokens: 1024     # official=400; set to 1024 for complete code generation
 reward_workers: 4        # parallel reward compute workers
+eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
+eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
 
 # DPO (only used with --mode dpo)
 beta: 0.3                # KL coefficient (official Table 13)
