@@ -243,7 +243,8 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
 # CPPO step  (aligned with grpo_mm.py)
 # ---------------------------------------------------------------------------
 
-def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
+def cppo_step(model, optimizer, item: dict, processor, args,
+              compute_diag: bool = True) -> dict:
     """One Dr. CPPO / GRPO update step.
 
     1. Collate prompt → batch (CPU)
@@ -253,6 +254,11 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
     5. Compute old-policy log probs from the *current* model (no_grad)
        — old_log_probs stay fixed across the batch_updates inner iterations
     6. Do batch_updates gradient steps with per-token clipped PPO loss
+    7. [Only if compute_diag=True] Compute KL-quadrant diagnostics from the
+       LAST inner iteration's new_lp vs old_lp (paper Phase-3 convention)
+
+    Note: advantages are per-SEQUENCE scalars broadcast over tokens in the loss
+    ([N,1] × [N,T]). This matches CPPO/GRPO — there is no token-level advantage.
     """
     device = next(model.parameters()).device
     G = args.G
@@ -348,11 +354,18 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
         old_out  = model_forward(model, sel_ids, full_attn_mask, sel_g_batch, device)
         old_lp   = compute_token_log_probs(old_out.logits, sel_ids, logits_to_keep).detach()
 
-    last_metrics = {}
-    for _ in range(args.batch_updates):
+    # Inner update loop — batch_updates gradient steps on the same rollout batch.
+    # Diagnostics are intentionally NOT computed here; they use only the LAST
+    # iteration's new_lp (paper Phase-3 convention) and are computed after the loop.
+    last_loss    = 0.0
+    last_entropy = float('nan')
+    last_new_lp  = None                  # saved from final inner iteration
+
+    for k in range(args.batch_updates):
+        is_last = (k == args.batch_updates - 1)
         model.train()
-        new_out  = model_forward(model, sel_ids, full_attn_mask, sel_g_batch, device)
-        new_lp   = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
+        new_out = model_forward(model, sel_ids, full_attn_mask, sel_g_batch, device)
+        new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
 
         loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
                             args.eps_high, args.eps_low)
@@ -363,80 +376,96 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
 
-        # Diagnostics (per-sequence ratio + KL-weighted quadrant decomposition)
-        with torch.no_grad():
-            ratio_tok = torch.exp(new_lp - old_lp)              # [N, T]
-            # Sequence-level ratio: exp of mean token log-ratio
-            ratio_seq = (ratio_tok * comp_mask).sum(1) / comp_mask.sum(1).clamp(min=1)
-            entropy   = compute_policy_entropy(new_out.logits, comp_mask, logits_to_keep)
+        if is_last:
+            last_loss = loss.item()
+            with torch.no_grad():
+                last_entropy = compute_policy_entropy(
+                    new_out.logits, comp_mask, logits_to_keep).item()
+            last_new_lp = new_lp.detach()   # keep for post-loop diagnostics
+
+    # ------------------------------------------------------------------
+    # Phase 3: Diagnostics — computed ONCE using the last inner iteration's
+    # IS ratio (new_lp after last update vs old_lp at rollout time).
+    # Only computed on logging steps (compute_diag=True) to avoid overhead
+    # on every non-logging step.
+    # Advantages are per-SEQUENCE scalars [N, 1] broadcast over tokens in
+    # the loss — there is no token-level advantage in CPPO/GRPO.
+    # ------------------------------------------------------------------
+    with torch.no_grad():
+        if compute_diag and last_new_lp is not None:
+            ratio_tok = torch.exp(last_new_lp - old_lp)         # [N, T]
+            # Sequence-level IS: arithmetic mean of per-token ratios (diagnostic proxy)
+            ratio_seq = (ratio_tok * comp_mask).sum(1) \
+                        / comp_mask.sum(1).clamp(min=1)          # [N]
 
             clip_lower = (ratio_tok < 1 - args.eps_low)
             clip_upper = (ratio_tok > 1 + args.eps_high)
-            clip_frac  = ((clip_lower | clip_upper).float() * comp_mask).sum() \
-                         / comp_mask.sum().clamp(min=1)
+            n_tok_sum  = comp_mask.sum().clamp(min=1)
+            clip_frac  = ((clip_lower | clip_upper).float() * comp_mask).sum() / n_tok_sum
 
-            # Sampled-action KL approximation: k(r) = r - 1 - log r ≈ KL(old||new)
-            # evaluated at the generated token (standard PPO/TRL approach).
-            # Full-vocab KL would require materialising [N, T, V=151936] tensors
-            # (~4.8 GB on 16 GB), so the approximation is used here.
-            # Zero additional overhead: ratio_tok [N, T] is already in memory.
+            # Sampled-action KL approximation: k(r) = r − 1 − log r ≥ 0
+            # Reuses ratio_tok [N, T] already in memory; zero extra overhead.
             kl_tok     = (ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8))) \
-                         * comp_mask                             # [N, T] — masked
-            kl_per_seq = kl_tok.sum(dim=1)                      # [N]    — per-sequence
-            kl_total   = kl_per_seq.sum().clamp(min=1e-8)       # scalar — denominator
+                         * comp_mask
+            kl_per_seq = kl_tok.sum(dim=1)                       # [N]
+            kl_total   = kl_per_seq.sum().clamp(min=1e-8)
             kl_approx  = kl_per_seq.mean() / comp_mask.sum(1).mean().clamp(min=1)
 
-            _degen   = std_r.item() < 1e-6
-            adv_sq   = advantages.squeeze(1)                    # [N]
-            # KL-weighted quadrant fractions (replaces qualitative q_* sample counts).
-            # Each value = fraction of total update KL "spent" in that quadrant:
-            #   kl_q_pp : Adv > 0, IS > 1  — correct direction, amplified      (good)
-            #   kl_q_pn : Adv > 0, IS < 1  — correct direction, dampened       (mild concern)
-            #   kl_q_np : Adv < 0, IS > 1  — wrong direction, amplified        (bad — should be 0 with perfect clip)
-            #   kl_q_nn : Adv < 0, IS < 1  — wrong direction, dampened by clip (expected)
-            if _degen:
-                kl_q_pp = kl_q_pn = kl_q_np = kl_q_nn = float('nan')
-            else:
-                kl_q_pp = kl_per_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum() / kl_total
-                kl_q_pn = kl_per_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum() / kl_total
-                kl_q_np = kl_per_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum() / kl_total
-                kl_q_nn = kl_per_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum() / kl_total
-                kl_q_pp = kl_q_pp.item()
-                kl_q_pn = kl_q_pn.item()
-                kl_q_np = kl_q_np.item()
-                kl_q_nn = kl_q_nn.item()
+            adv_sq = advantages.squeeze(1)                       # [N]
+            # KL-weighted quadrant fractions — sum to ~1.0.
+            # kl_q_np > 0  ⇒ clip is failing (bad-advantage sequences moving up).
+            kl_q_pp = kl_per_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum() / kl_total
+            kl_q_pn = kl_per_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum() / kl_total
+            kl_q_np = kl_per_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum() / kl_total
+            kl_q_nn = kl_per_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum() / kl_total
 
-        last_metrics = {
-            'train/loss':            loss.item(),
-            'train/mean_reward':     mean_r.item(),
-            'train/reward_std':      std_r.item(),
-            'train/reward_max':      rewards_t.max().item(),
-            'train/reward_min':      rewards_t.min().item(),
-            'train/entropy':         entropy.item(),
-            'train/clip_fraction':   clip_frac.item(),
-            'train/clip_lower_frac': ((clip_lower.float() * comp_mask).sum()
-                                      / comp_mask.sum().clamp(min=1)).item(),
-            'train/clip_upper_frac': ((clip_upper.float() * comp_mask).sum()
-                                      / comp_mask.sum().clamp(min=1)).item(),
-            'train/ratio_mean':      ratio_seq.mean().item(),
-            'train/ratio_std':       ratio_seq.std().item(),
-            'train/kl_approx':       kl_approx.item(),
-            'train/adv_pos_frac':    float('nan') if _degen else
-                                     (advantages > 0).float().mean().item(),
-            'train/adv_abs_mean':    advantages.abs().mean().item(),
-            # KL-weighted quadrant decomposition (replaces qualitative q_pp/pn/np/nn).
-            # Values sum to ~1.0; kl_q_np > 0 signals the clip is failing (bad updates).
-            'train/kl_q_pp':         kl_q_pp,
-            'train/kl_q_pn':         kl_q_pn,
-            'train/kl_q_np':         kl_q_np,
-            'train/kl_q_nn':         kl_q_nn,
-            'train/gen_seconds':     gen_seconds,
-            '_rewards_list':         rewards,
-            '_ratio_list':           ratio_seq.detach().cpu().tolist(),
-            '_adv_list':             advantages.squeeze(1).detach().cpu().tolist(),
-        }
+            diag = {
+                'train/clip_fraction':   clip_frac.item(),
+                'train/clip_lower_frac': ((clip_lower.float() * comp_mask).sum()
+                                          / n_tok_sum).item(),
+                'train/clip_upper_frac': ((clip_upper.float() * comp_mask).sum()
+                                          / n_tok_sum).item(),
+                'train/ratio_mean':      ratio_seq.mean().item(),
+                'train/ratio_std':       ratio_seq.std().item(),
+                'train/kl_approx':       kl_approx.item(),
+                'train/adv_pos_frac':    (advantages > 0).float().mean().item(),
+                'train/kl_q_pp':         kl_q_pp.item(),
+                'train/kl_q_pn':         kl_q_pn.item(),
+                'train/kl_q_np':         kl_q_np.item(),
+                'train/kl_q_nn':         kl_q_nn.item(),
+                '_ratio_list':           ratio_seq.cpu().tolist(),
+                '_adv_list':             advantages.squeeze(1).cpu().tolist(),
+            }
+        else:
+            # Non-logging step: skip diagnostics, return NaN placeholders
+            diag = {
+                'train/clip_fraction':   float('nan'),
+                'train/clip_lower_frac': float('nan'),
+                'train/clip_upper_frac': float('nan'),
+                'train/ratio_mean':      float('nan'),
+                'train/ratio_std':       float('nan'),
+                'train/kl_approx':       float('nan'),
+                'train/adv_pos_frac':    float('nan'),
+                'train/kl_q_pp':         float('nan'),
+                'train/kl_q_pn':         float('nan'),
+                'train/kl_q_np':         float('nan'),
+                'train/kl_q_nn':         float('nan'),
+                '_ratio_list':           [],
+                '_adv_list':             [],
+            }
 
-    return last_metrics
+    return {
+        'train/loss':        last_loss,
+        'train/mean_reward': mean_r.item(),
+        'train/reward_std':  std_r.item(),
+        'train/reward_max':  rewards_t.max().item(),
+        'train/reward_min':  rewards_t.min().item(),
+        'train/entropy':     last_entropy,
+        'train/adv_abs_mean': advantages.abs().mean().item(),
+        'train/gen_seconds': gen_seconds,
+        '_rewards_list':     rewards,
+        **diag,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +523,11 @@ def train_cppo(model, optimizer, dataset, processor,
             if step >= args.max_steps:
                 break
             try:
-                metrics = cppo_step(model, optimizer, dataset[idx], processor, args)
+                # compute_diag=True only on steps that will be logged.
+                # step+1 because step is incremented after cppo_step returns.
+                compute_diag = ((step + 1) % args.log_steps == 0)
+                metrics = cppo_step(model, optimizer, dataset[idx], processor, args,
+                                    compute_diag=compute_diag)
             except Exception as e:
                 print(f'[step {step}] cppo_step error: {e}')
                 continue
