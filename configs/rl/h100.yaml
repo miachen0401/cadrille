@@ -1,26 +1,31 @@
 # Cadrille RL fine-tuning — single H100 (80 GB)
-# Full official hyperparameters — no memory reduction needed.
+# Official hyperparameters (Table 11, Cadrille paper): G=16, N=4, lr=3e-5,
+# K_updates=3, eps=0.1, optimizer=Adam.
 #
 # Memory breakdown (~55 GB):
 #   Model weights (bf16):      ~4.5 GB
 #   Adam fp32 optimizer:       ~9.0 GB
 #   Activations (G=16 batch):  ~30 GB
-#   Old policy (CPU-offloaded): 0 GB GPU
+#   (No reference model — Dr. GRPO design saves ~4.5 GB)
 #
 # Usage: python rl/train.py --config configs/rl/h100.yaml
+#
+# Colab: update checkpoint_path and data paths below before running.
 
 checkpoints_dir: ./checkpoints
 
 mode: cppo
 # base_model: /content/models/Qwen2-VL-2B-Instruct  # set on Colab to avoid HF rate limits
+# Colab: set checkpoint_path to your SFT checkpoint path, e.g.:
+#   checkpoint_path: /content/models/cadrille-sft
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data
+# Data — update paths for Colab (e.g. /content/data/deepcad_test_mesh)
 data_dir: ./data/deepcad_test_mesh
 hard_examples_pkl: null
 dpo_dataset: null
 
-# Training (official hyperparameters)
+# Training (official hyperparameters — Table 11)
 max_steps: 50000
 lr: 3.0e-5
 
@@ -30,19 +35,18 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-max_new_tokens: 1024
+max_new_tokens: 1024          # must be >800 for complete CAD code; 1024 matches paper
 reward_workers: 8
-eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
-eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
-sequential_generation: false  # G=16 in one batched generate call; fits in 80 GB easily
+eval_workers: 2
+eval_timeout: 120.0
+sequential_generation: false  # G=16 batched fits in 80 GB on H100
 
 # DPO (unused)
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation — 50 DeepCAD + 50 Fusion360, pc only (~5 min per eval pass on H100)
-# 100+100 with pc+img = 400 sequential inference calls ≈ 2-3 h per pass; not useful.
-# pc-only at 50+50 = 100 calls ≈ 5-10 min per pass. Increase after confirming rewards.
+# Validation — 50 DeepCAD + 50 Fusion360, pc only (~5-10 min per pass on H100)
+# Update paths for Colab. Set val_fusion360_dir: null if data unavailable.
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
@@ -51,9 +55,8 @@ val_modalities:        pc
 eval_steps: 500
 
 # Logging & checkpoints
-# save_total_limit=20 keeps latest 20 checkpoints (20×4.5 GB ≈ 90 GB).
-# save_steps=2500 → 20 evenly spaced points over 50k steps for pass@k sweep.
-# Colab H100 sessions timeout after ~12h — checkpoint-final is always saved.
+# save_total_limit=20: 20 × 4.5 GB ≈ 90 GB; ensure Colab drive has space.
+# save_steps=2500 → 20 evenly spaced checkpoints over 50k steps.
 log_steps: 10
 save_steps: 2500
 save_total_limit: 20

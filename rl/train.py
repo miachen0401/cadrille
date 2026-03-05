@@ -234,8 +234,8 @@ def train(args, cfg_to_save=None):
         attn_implementation='flash_attention_2',
         device_map='auto')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    print('Optimizer: AdamW (fp32)')
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    print('Optimizer: Adam (fp32, weight_decay=0 — matches official cadrille paper Table 11)')
 
     # Validation
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
