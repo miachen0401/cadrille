@@ -287,6 +287,35 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
     advantages_raw = rewards_t - mean_r
     _, top_idx = torch.topk(advantages_raw.abs(), N)
 
+    # Degenerate group: all G rollouts have identical reward → all advantages=0
+    # → zero loss, zero gradient, no learning. Skip the expensive forward passes
+    # and optimizer step entirely to save ~20 s/step.
+    if std_r.item() < 1e-6:
+        return {
+            'train/loss':            0.0,
+            'train/mean_reward':     mean_r.item(),
+            'train/reward_std':      0.0,
+            'train/reward_max':      rewards_t.max().item(),
+            'train/reward_min':      rewards_t.min().item(),
+            'train/entropy':         float('nan'),
+            'train/clip_fraction':   float('nan'),
+            'train/clip_lower_frac': float('nan'),
+            'train/clip_upper_frac': float('nan'),
+            'train/ratio_mean':      float('nan'),
+            'train/ratio_std':       float('nan'),
+            'train/kl_approx':       float('nan'),
+            'train/adv_pos_frac':    float('nan'),
+            'train/adv_abs_mean':    0.0,
+            'train/kl_q_pp':         float('nan'),
+            'train/kl_q_pn':         float('nan'),
+            'train/kl_q_np':         float('nan'),
+            'train/kl_q_nn':         float('nan'),
+            'train/gen_seconds':     gen_seconds,
+            '_rewards_list':         rewards,
+            '_ratio_list':           [],
+            '_adv_list':             [],
+        }
+
     # Build per-token tensors for selected rollouts
     sel_ids_cpu        = generated_ids[top_idx]           # [N, full_len]
     completion_ids_cpu = sel_ids_cpu[:, prompt_len:]      # [N, T]
@@ -334,7 +363,7 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
 
-        # Diagnostics (per-sequence ratio for logging convenience)
+        # Diagnostics (per-sequence ratio + KL-weighted quadrant decomposition)
         with torch.no_grad():
             ratio_tok = torch.exp(new_lp - old_lp)              # [N, T]
             # Sequence-level ratio: exp of mean token log-ratio
@@ -345,10 +374,37 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
             clip_upper = (ratio_tok > 1 + args.eps_high)
             clip_frac  = ((clip_lower | clip_upper).float() * comp_mask).sum() \
                          / comp_mask.sum().clamp(min=1)
-            kl_approx  = ((ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8)))
-                          * comp_mask).sum() / comp_mask.sum().clamp(min=1)
 
-            _degen = std_r.item() < 1e-6
+            # Sampled-action KL approximation: k(r) = r - 1 - log r ≈ KL(old||new)
+            # evaluated at the generated token (standard PPO/TRL approach).
+            # Full-vocab KL would require materialising [N, T, V=151936] tensors
+            # (~4.8 GB on 16 GB), so the approximation is used here.
+            # Zero additional overhead: ratio_tok [N, T] is already in memory.
+            kl_tok     = (ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8))) \
+                         * comp_mask                             # [N, T] — masked
+            kl_per_seq = kl_tok.sum(dim=1)                      # [N]    — per-sequence
+            kl_total   = kl_per_seq.sum().clamp(min=1e-8)       # scalar — denominator
+            kl_approx  = kl_per_seq.mean() / comp_mask.sum(1).mean().clamp(min=1)
+
+            _degen   = std_r.item() < 1e-6
+            adv_sq   = advantages.squeeze(1)                    # [N]
+            # KL-weighted quadrant fractions (replaces qualitative q_* sample counts).
+            # Each value = fraction of total update KL "spent" in that quadrant:
+            #   kl_q_pp : Adv > 0, IS > 1  — correct direction, amplified      (good)
+            #   kl_q_pn : Adv > 0, IS < 1  — correct direction, dampened       (mild concern)
+            #   kl_q_np : Adv < 0, IS > 1  — wrong direction, amplified        (bad — should be 0 with perfect clip)
+            #   kl_q_nn : Adv < 0, IS < 1  — wrong direction, dampened by clip (expected)
+            if _degen:
+                kl_q_pp = kl_q_pn = kl_q_np = kl_q_nn = float('nan')
+            else:
+                kl_q_pp = kl_per_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum() / kl_total
+                kl_q_pn = kl_per_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum() / kl_total
+                kl_q_np = kl_per_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum() / kl_total
+                kl_q_nn = kl_per_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum() / kl_total
+                kl_q_pp = kl_q_pp.item()
+                kl_q_pn = kl_q_pn.item()
+                kl_q_np = kl_q_np.item()
+                kl_q_nn = kl_q_nn.item()
 
         last_metrics = {
             'train/loss':            loss.item(),
@@ -368,15 +424,12 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
             'train/adv_pos_frac':    float('nan') if _degen else
                                      (advantages > 0).float().mean().item(),
             'train/adv_abs_mean':    advantages.abs().mean().item(),
-            # 4-quadrant IS × advantage decomposition (sequence-level ratio)
-            'train/q_pp': float('nan') if _degen else
-                          ((advantages.squeeze(1) > 0) & (ratio_seq > 1.0)).float().mean().item(),
-            'train/q_pn': float('nan') if _degen else
-                          ((advantages.squeeze(1) > 0) & (ratio_seq <= 1.0)).float().mean().item(),
-            'train/q_np': float('nan') if _degen else
-                          ((advantages.squeeze(1) <= 0) & (ratio_seq > 1.0)).float().mean().item(),
-            'train/q_nn': float('nan') if _degen else
-                          ((advantages.squeeze(1) <= 0) & (ratio_seq <= 1.0)).float().mean().item(),
+            # KL-weighted quadrant decomposition (replaces qualitative q_pp/pn/np/nn).
+            # Values sum to ~1.0; kl_q_np > 0 signals the clip is failing (bad updates).
+            'train/kl_q_pp':         kl_q_pp,
+            'train/kl_q_pn':         kl_q_pn,
+            'train/kl_q_np':         kl_q_np,
+            'train/kl_q_nn':         kl_q_nn,
             'train/gen_seconds':     gen_seconds,
             '_rewards_list':         rewards,
             '_ratio_list':           ratio_seq.detach().cpu().tolist(),
@@ -466,6 +519,9 @@ def train_cppo(model, optimizer, dataset, processor,
                     f" train/clip_fraction={metrics['train/clip_fraction']:.4f}"
                     f" train/kl_approx={metrics['train/kl_approx']:.6f}"
                     f" train/ratio_mean={metrics['train/ratio_mean']:.4f}"
+                    f" train/kl_q_np={metrics['train/kl_q_np']:.4f}"
+                    f" train/kl_q_nn={metrics['train/kl_q_nn']:.4f}"
+                    f" train/kl_q_pp={metrics['train/kl_q_pp']:.4f}"
                     f" train/lr={lr:.2e}"
                 )
                 with open(log_path, 'a') as f:
@@ -487,10 +543,10 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/ratio_std':       metrics['train/ratio_std'],
                         'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
                         'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
-                        'train/q_pp':            metrics['train/q_pp'],
-                        'train/q_pn':            metrics['train/q_pn'],
-                        'train/q_np':            metrics['train/q_np'],
-                        'train/q_nn':            metrics['train/q_nn'],
+                        'train/kl_q_pp':         metrics['train/kl_q_pp'],
+                        'train/kl_q_pn':         metrics['train/kl_q_pn'],
+                        'train/kl_q_np':         metrics['train/kl_q_np'],
+                        'train/kl_q_nn':         metrics['train/kl_q_nn'],
                         'train/gen_seconds':     metrics['train/gen_seconds'],
                         'train/lr':              lr,
                         'dist/rewards': wandb.Histogram(metrics['_rewards_list']),
