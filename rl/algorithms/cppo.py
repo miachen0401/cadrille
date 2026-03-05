@@ -150,11 +150,17 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
 
     Uses the provided attention_mask (prompt + completion) rather than
     all-ones so the model doesn't attend to padding tokens beyond EOS.
+
+    use_cache=False is mandatory: with use_cache=True the model creates a
+    DynamicCache() even when past_key_values=None, making past_key_values
+    non-null; _update_causal_mask then checks attention_mask[:, -1] and
+    raises ValueError if any completion ended before max_len (right-padding).
     """
     return model(
         input_ids=full_ids.to(device),
         attention_mask=attention_mask.to(device),
         labels=None,
+        use_cache=False,
         point_clouds=g_batch['point_clouds'].to(device),
         is_pc=g_batch['is_pc'].to(device),
         is_img=g_batch['is_img'].to(device),
