@@ -32,7 +32,7 @@ top_N: 2                 # select top-2 of 4 by |advantage|
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
-max_new_tokens: 400      # official=400
+max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
 reward_workers: 4
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
 
