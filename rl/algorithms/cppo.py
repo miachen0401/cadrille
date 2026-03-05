@@ -172,13 +172,18 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
 # ---------------------------------------------------------------------------
 
 def generate_rollouts(model, single_batch: dict, G: int, args,
-                      pad_token_id: int) -> torch.Tensor:
+                      pad_token_id: int, processor=None) -> torch.Tensor:
     """Generate G completions for one prompt.
 
     Tries batched generation first (fast on H100); falls back to sequential
     on OOM and sticks to sequential for the rest of the run.
     Returns tensor of shape [G, max_len] on CPU.
     """
+    # Qwen2VL requires padding_side='left' for generate().
+    # eval_one_pass / collate may mutate it — restore unconditionally.
+    if processor is not None:
+        processor.tokenizer.padding_side = 'left'
+
     # Block video tokens — model must not emit them in CadQuery code
     bad_words = None
     if hasattr(model, 'config') and hasattr(model.config, 'video_token_id'):
@@ -257,7 +262,8 @@ def cppo_step(model, optimizer, item: dict, processor, args) -> dict:
 
     t_gen = time.perf_counter()
     generated_ids = generate_rollouts(model, single_batch, G, args,
-                                      processor.tokenizer.pad_token_id)
+                                      processor.tokenizer.pad_token_id,
+                                      processor=processor)
     gen_seconds = time.perf_counter() - t_gen
 
     code_strings = [
