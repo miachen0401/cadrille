@@ -22,7 +22,7 @@ dpo_dataset: null        # for --mode dpo
 
 # Training
 max_steps: 50000
-lr: 3.0e-5               # Adam, matches official
+lr: 3.0e-5               # AdamW, matches official
 
 # Dr. CPPO / GRPO hyperparameters
 G: 16                    # rollout completions per prompt
@@ -30,7 +30,6 @@ top_N: 4                 # select top-N by |advantage| for gradient update
 eps_high: 0.1            # PPO clip upper bound
 eps_low: 0.1             # PPO clip lower bound
 batch_updates: 3         # gradient steps per rollout (re-use same data)
-K_update: 10             # sync old→new policy every K_update steps
 max_new_tokens: 400      # max generation length
 reward_workers: 4        # parallel reward compute workers
 

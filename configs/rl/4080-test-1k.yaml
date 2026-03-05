@@ -1,0 +1,53 @@
+# RL 1000-step test run — verifies the updated algorithm is runnable on 4080.
+# Reduced max_new_tokens=64 for speed; everything else matches 4080.yaml.
+#
+# Expected timing: ~10-15 s/step → ~3-4 h total
+# Eval at step 500 + 1000 (5 samples each, ~1 min per eval pass)
+#
+# Usage: python rl/train.py --config configs/rl/4080-test-1k.yaml
+
+checkpoints_dir: ./checkpoints
+
+mode: cppo
+checkpoint_path: ./checkpoints/cadrille-sft
+
+# Data
+data_dir: ./data/deepcad_test_mesh
+hard_examples_pkl: null
+dpo_dataset: null
+
+# Training
+max_steps: 1000
+lr: 3.0e-5
+
+# CPPO — 4080 settings
+G: 4
+top_N: 2
+eps_high: 0.1
+eps_low: 0.1
+batch_updates: 1
+max_new_tokens: 64          # reduced from 256 for speed; enough to test algo
+reward_workers: 4
+sequential_generation: true
+
+# DPO (unused)
+beta: 0.3
+dpo_epochs_per_round: 10
+
+# Validation — small set, eval twice (step 500 + 1000)
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     null
+val_samples_deepcad:   5
+val_samples_fusion360: 0
+val_modalities:        pc
+eval_steps: 500
+
+# Logging — no checkpoint saves during test
+log_steps: 10
+save_steps: 999999
+save_total_limit: null
+
+# W&B
+wandb_project: cadrille-rl
+wandb_entity: null
+wandb_offline: false

@@ -1,7 +1,7 @@
-# Cadrille SFT — single RTX 4080 SUPER (16 GB), effective batch matches paper exactly
-# Paper: bs=28 acc=1 (eff=28) on H100. We use bs=2 acc=14 (eff=28) on 4080.
+# Cadrille SFT — single RTX 4080 SUPER (16 GB), effective batch matches official
+# Official: bs=15 acc=2 (eff=30) on H100. We use bs=2 acc=15 (eff=30) on 4080.
 # Usage: python train.py --config configs/sft/default.yaml
-# Run name is auto-generated: sft-s12k-lr2e-4-b2a14-pc_img-MMDD-HHMM
+# Run name is auto-generated: sft-s12k-lr2e-4-b2a15-pc_img-MMDD-HHMM
 
 # run_name: null   # leave unset for auto-naming from hyperparams
 checkpoints_dir: ./checkpoints
@@ -14,7 +14,7 @@ use_text: false
 # Training
 max_steps: 12000
 batch_size: 2
-accumulation_steps: 14        # effective batch = 28, matches paper exactly
+accumulation_steps: 15        # effective batch = 30, matches official
 learning_rate: 2.0e-4         # matches paper exactly
 warmup_steps: 1000            # ~0.8% of 12000 — paper unspecified, 1k is standard
 lr_scheduler_type: cosine     # paper unspecified; cosine is best practice for LLM SFT

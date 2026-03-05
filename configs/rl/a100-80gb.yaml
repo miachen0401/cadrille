@@ -4,9 +4,8 @@
 #
 # Memory breakdown (~55 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   Adam fp32 optimizer:       ~9.0 GB
+#   AdamW fp32 optimizer:      ~9.0 GB
 #   Activations (G=16 batch):  ~30 GB
-#   Old policy (CPU-offloaded): 0 GB GPU
 #
 # Throughput vs H100:
 #   H100:     ~8–12 steps/min → 50k steps in ~3–4 days
@@ -35,7 +34,6 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-K_update: 10
 max_new_tokens: 400
 reward_workers: 8
 sequential_generation: false  # G=16 batched fits in 80 GB

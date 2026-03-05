@@ -1,14 +1,13 @@
 # Cadrille RL fine-tuning — single RTX 4080 SUPER (16 GB)
-# Sequential generation + Adam8bit to fit in 16 GB VRAM.
+# Sequential generation (1 rollout at a time) to keep VRAM flat.
 #
-# Memory breakdown per generation call (~16 GB total, sequential):
+# Memory breakdown (~14 GB peak):
 #   Model weights (bf16):          ~4.5 GB
-#   Adam8bit optimizer states:     ~2.0 GB
-#   Activations + KV cache (×1):   ~7.0 GB  ← safe headroom
-#   Old policy (CPU-offloaded):     0.0 GB
+#   AdamW fp32 optimizer states:   ~9.0 GB
+#   Activations + KV cache (×1):   ~0.5 GB  (1 sample at a time, sequential)
 #
-# Batched generation (G=4 simultaneous) technically fits (97% VRAM) but runs
-# slower than sequential due to memory-bandwidth saturation.  Force sequential.
+# G=4 with sequential_generation: ~40 s/step (4 × ~10 s) → 50k steps ≈ 23 days.
+# Consider Colab A100 (a100.yaml) or H100 (h100.yaml) for full runs.
 #
 # Usage: python rl/train.py --config configs/rl/4080.yaml
 
@@ -27,14 +26,13 @@ dpo_dataset: null
 max_steps: 50000
 lr: 3.0e-5
 
-# CPPO hyperparameters (reduced G for 16 GB GPU)
-G: 4                     # official=16; reduced to 4 for memory (sequential generation)
+# CPPO hyperparameters — memory-safe for 16 GB (official: G=16, top_N=4, batch_updates=3)
+G: 4                     # reduced from 16; sequential_generation keeps VRAM flat
 top_N: 2                 # select top-2 of 4 by |advantage|
 eps_high: 0.1
 eps_low: 0.1
-batch_updates: 1         # official=3; reduced to 1 to avoid repeated activation peak
-K_update: 10
-max_new_tokens: 256      # official=400; reduced for memory
+batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
+max_new_tokens: 400      # official=400
 reward_workers: 4
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
 
@@ -54,8 +52,13 @@ val_modalities:        pc,img
 eval_steps: 200
 
 # Logging & checkpoints
+# save_total_limit: keep only the N most-recent checkpoints to cap disk usage.
+# Each Cadrille checkpoint ≈ 4.5 GB (bf16).  10 checkpoints = ~45 GB.
+# For a full pass@k sweep, aim for 10-20 evenly spaced points.
+# With save_steps=2000 and max_steps=50000: 25 checkpoints saved, 10 kept.
 log_steps: 10
 save_steps: 500
+save_total_limit: 10
 
 # W&B
 wandb_project: cadrille-rl

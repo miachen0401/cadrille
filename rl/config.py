@@ -55,8 +55,9 @@ def resolve_args(args, cfg: dict) -> dict:
     args.checkpoint_path = _p(args.checkpoint_path, cfg.get('checkpoint_path'), 'maksimko123/cadrille')
     args.max_steps       = _p(args.max_steps,       cfg.get('max_steps'),       50000)
     args.lr              = cfg.get('lr', 3e-5)
-    args.log_steps       = cfg.get('log_steps', 100)
-    args.save_steps      = cfg.get('save_steps', 5000)
+    args.log_steps        = cfg.get('log_steps', 100)
+    args.save_steps       = cfg.get('save_steps', 5000)
+    args.save_total_limit = cfg.get('save_total_limit', None)  # None = keep all
 
     # Validation — multi-dataset, multi-modality
     _legacy_dir     = cfg.get('val_split_dir')
@@ -85,7 +86,6 @@ def resolve_args(args, cfg: dict) -> dict:
     args.eps_high         = cfg.get('eps_high', 0.1)
     args.eps_low          = cfg.get('eps_low', 0.1)
     args.batch_updates    = cfg.get('batch_updates', 1)
-    args.K_update         = cfg.get('K_update', 10)
     args.max_new_tokens   = cfg.get('max_new_tokens', 256)
     args.reward_workers   = cfg.get('reward_workers', 4)
     args.eval_batch_size  = cfg.get('eval_batch_size', 8)

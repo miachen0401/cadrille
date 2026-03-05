@@ -2,13 +2,12 @@
 #
 # Memory breakdown (~30 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   Adam fp32 optimizer:       ~9.0 GB
+#   AdamW fp32 optimizer:      ~9.0 GB
 #   Activations (G=8 batch):   ~15 GB
-#   Old policy (CPU-offloaded): 0 GB GPU
 #
 # Throughput vs H100:
 #   H100: G=16, batch_updates=3 → ~8-12 steps/min → 50k steps in ~3-4 days
-#   A100: G=8,  batch_updates=2 → ~5-8  steps/min → 50k steps in ~5-7 days
+#   A100: G=8,  batch_updates=3 → ~5-8  steps/min → 50k steps in ~5-7 days
 #
 # Usage: python rl/train.py --config configs/rl/a100.yaml
 
@@ -31,9 +30,8 @@ G: 8
 top_N: 4
 eps_high: 0.1
 eps_low: 0.1
-batch_updates: 2
-K_update: 10
-max_new_tokens: 800
+batch_updates: 3
+max_new_tokens: 400
 reward_workers: 8
 sequential_generation: false  # G=8 batched fits in 40 GB; set true if OOM
 

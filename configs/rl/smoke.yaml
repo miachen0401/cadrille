@@ -24,7 +24,6 @@ top_N: 1
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 1
-K_update: 5
 max_new_tokens: 64           # short for smoke test
 reward_workers: 2
 sequential_generation: true
