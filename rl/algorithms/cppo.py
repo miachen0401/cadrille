@@ -14,6 +14,7 @@ import os
 import time
 import shutil
 from typing import Optional
+from collections import deque
 
 import numpy as np
 import torch
@@ -40,9 +41,9 @@ def expand_batch(batch: dict, G: int) -> dict:
     out = {}
     for k, v in batch.items():
         if isinstance(v, torch.Tensor):
-            out[k] = v.repeat(G, *([1] * (v.dim() - 1)))
+            out[k] = v.repeat_interleave(G, dim=0)
         elif isinstance(v, list):
-            out[k] = v * G
+            out[k] = [x for x in v for _ in range(G)]
         else:
             out[k] = v
     return out
@@ -179,11 +180,11 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
 
 def generate_rollouts(model, single_batch: dict, G: int, args,
                       pad_token_id: int, processor=None) -> torch.Tensor:
-    """Generate G completions for one prompt.
+    """Generate G completions per prompt.
 
     Tries batched generation first (fast on H100); falls back to sequential
     on OOM and sticks to sequential for the rest of the run.
-    Returns tensor of shape [G, max_len] on CPU.
+    Returns tensor of shape [B*G, max_len] on CPU, grouped by prompt.
     """
     # Qwen2VL requires padding_side='left' for generate().
     # eval_one_pass / collate may mutate it — restore unconditionally.
@@ -197,6 +198,7 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
 
     gen_kwargs = dict(max_new_tokens=args.max_new_tokens, do_sample=True,
                       temperature=1.0, top_p=1.0, top_k=50,
+                      early_stopping=False,
                       bad_words_ids=bad_words)
     sequential = getattr(args, 'sequential_generation', False)
     device = next(model.parameters()).device
@@ -209,7 +211,7 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
                 if v is None:
                     expanded[k] = None
                 elif isinstance(v, torch.Tensor):
-                    expanded[k] = v.repeat(G, *([1] * (v.dim() - 1))).to(device)
+                    expanded[k] = v.repeat_interleave(G, dim=0).to(device)
                 else:
                     expanded[k] = v
             with torch.no_grad():
@@ -220,14 +222,22 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
             print(f'[rollout] batched G={G} OOM — switching to sequential for rest of run')
             args.sequential_generation = True
 
-    # Sequential fallback: generate one at a time
+    # Sequential fallback: generate one prompt at a time, G rollouts each.
     single_kwargs = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
                      for k, v in ((k, single_batch.get(k)) for k in _GEN_INPUT_KEYS)}
+    batch_size = single_kwargs['input_ids'].shape[0]
     generated_ids_list = []
     with torch.no_grad():
-        for _ in range(G):
-            ids = model.generate(**single_kwargs, **gen_kwargs)
-            generated_ids_list.append(ids.cpu())
+        for i in range(batch_size):
+            one = {}
+            for k, v in single_kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    one[k] = v[i:i + 1]
+                else:
+                    one[k] = v
+            for _ in range(G):
+                ids = model.generate(**one, **gen_kwargs)
+                generated_ids_list.append(ids.cpu())
 
     max_len = max(ids.shape[1] for ids in generated_ids_list)
     padded = []
@@ -243,227 +253,327 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
 # CPPO step  (aligned with grpo_mm.py)
 # ---------------------------------------------------------------------------
 
-def cppo_step(model, optimizer, item: dict, processor, args,
+
+class IndexBuffer:
+    """Simple replay buffer for hard examples (high reward-std prompts)."""
+
+    def __init__(self, max_size: int = 4096):
+        self.max_size = max_size
+        self._buf = deque()
+
+    def __len__(self):
+        return len(self._buf)
+
+    def add_many(self, indices):
+        for idx in indices:
+            if idx is None:
+                continue
+            self._buf.append(int(idx))
+            if len(self._buf) > self.max_size:
+                self._buf.popleft()
+
+    def sample(self, n: int):
+        n = min(n, len(self._buf))
+        if n <= 0:
+            return []
+        arr = list(self._buf)
+        sel = np.random.choice(len(arr), size=n, replace=False)
+        return [arr[i] for i in sel]
+
+
+_NAN_DIAG = {
+    'train/clip_fraction':   float('nan'),
+    'train/clip_lower_frac': float('nan'),
+    'train/clip_upper_frac': float('nan'),
+    'train/ratio_mean':      float('nan'),
+    'train/ratio_std':       float('nan'),
+    'train/kl_approx':       float('nan'),
+    'train/adv_pos_frac':    float('nan'),
+    'train/kl_q_pp':         float('nan'),
+    'train/kl_q_pn':         float('nan'),
+    'train/kl_q_np':         float('nan'),
+    'train/kl_q_nn':         float('nan'),
+    '_ratio_list':           [],
+    '_adv_list':             [],
+}
+
+
+def cppo_step(model, optimizer, items, processor, args,
               compute_diag: bool = True) -> dict:
-    """One Dr. CPPO / GRPO update step.
+    """Dr. CPPO / GRPO update step over a batch of B prompts.
 
-    1. Collate prompt → batch (CPU)
-    2. Generate G completions (batched or sequential)
-    3. Compute IoU rewards → unnormalised advantages  (NO std normalisation)
-    4. Select top_N by |advantage|
-    5. Compute old-policy log probs from the *current* model (no_grad)
-       — old_log_probs stay fixed across the batch_updates inner iterations
-    6. Do batch_updates gradient steps with per-token clipped PPO loss
-    7. [Only if compute_diag=True] Compute KL-quadrant diagnostics from the
-       LAST inner iteration's new_lp vs old_lp (paper Phase-3 convention)
+    Design for B > 1 (multi-GPU cluster alignment):
+      Phase 1  — Per-prompt: generate G rollouts, compute rewards + old_lp.
+                 Each prompt is processed independently so variable prompt
+                 lengths never require cross-prompt padding.
+      Phase 2  — batch_updates inner PPO steps with gradient accumulation:
+                 zero_grad once → backward(loss/B_valid) for each valid
+                 prompt → clip → optimizer.step() once per inner step.
+                 Effective batch = B_valid × N sequences per gradient update.
+      Phase 3  — KL-quadrant diagnostics aggregated over all valid prompts,
+                 using LAST inner iteration's IS only (paper Phase-3 convention).
 
-    Note: advantages are per-SEQUENCE scalars broadcast over tokens in the loss
-    ([N,1] × [N,T]). This matches CPPO/GRPO — there is no token-level advantage.
+    With B=1 (default) the behaviour is identical to the single-prompt version.
+
+    Key properties:
+      • Per-prompt group-relative advantages: adv_i = reward_i − mean(group)
+      • Per-prompt row-wise top-N selection (not global)
+      • Advantages are per-SEQUENCE scalars [N,1] broadcast over tokens —
+        no token-level advantage in CPPO/GRPO
+      • Degenerate prompts (all G rewards identical) are skipped individually
     """
+    if isinstance(items, dict):
+        items = [items]
+
     device = next(model.parameters()).device
-    G = args.G
-    N = min(args.top_N, G)
+    G      = args.G
+    N      = min(args.top_N, G)
     eos_id = processor.tokenizer.eos_token_id
+    pad_id = processor.tokenizer.pad_token_id
 
-    collate_item = {k: v for k, v in item.items() if not k.startswith('_')}
-    batch = collate([collate_item], processor=processor, n_points=256, eval=True)
-    prompt_len  = batch['input_ids'].shape[1]
-    gt_mesh_path = item['gt_mesh_path']
-
-    single_batch = {k: batch.get(k) for k in _GEN_INPUT_KEYS}
-
+    # ------------------------------------------------------------------
+    # Phase 1: Per-prompt rollouts, rewards, and old log-probs.
+    # Generate G completions per prompt independently (one call each) so
+    # each prompt keeps its own prompt_len — no cross-prompt padding needed.
+    # Old log-probs are all computed BEFORE any gradient update.
+    # ------------------------------------------------------------------
     t_gen = time.perf_counter()
-    generated_ids = generate_rollouts(model, single_batch, G, args,
-                                      processor.tokenizer.pad_token_id,
-                                      processor=processor)
+
+    prompt_data   = []   # one entry per valid (non-degenerate) prompt
+    all_rewards   = []   # flat list for global reward stats
+    std_r_groups  = []   # per-prompt std_r for replay-buffer logic
+
+    for it in items:
+        ci  = {k: v for k, v in it.items() if not k.startswith('_')}
+        bat = collate([ci], processor=processor, n_points=256, eval=True)
+        pl  = bat['input_ids'].shape[1]   # this prompt's (padded) length
+        gt  = it['gt_mesh_path']
+
+        single = {k: bat.get(k) for k in _GEN_INPUT_KEYS}
+        gen    = generate_rollouts(model, single, G, args, pad_id, processor)
+        # gen: [G, full_len_i]  — G completions for this single prompt
+
+        codes   = [processor.decode(gen[g, pl:], skip_special_tokens=True,
+                                    clean_up_tokenization_spaces=False)
+                   for g in range(G)]
+        rewards = compute_rewards_parallel(codes, [gt] * G,
+                                           workers=args.reward_workers)
+        all_rewards.extend(rewards)
+
+        r_t    = torch.tensor(rewards, dtype=torch.float32)   # [G]
+        mean_r = r_t.mean()
+        std_r  = r_t.std()
+        std_r_groups.append(std_r.item())
+
+        # Skip degenerate prompt: all G rewards identical → zero gradient
+        if std_r.item() < 1e-6:
+            continue
+
+        adv_raw = r_t - mean_r                              # [G]  no std-norm
+        _, top_idx = torch.topk(adv_raw.abs(), N)           # [N]
+
+        sel_ids_cpu  = gen[top_idx]                         # [N, full_len_i]
+        comp_ids_cpu = sel_ids_cpu[:, pl:]                  # [N, T_i]
+        logits_to_keep = comp_ids_cpu.shape[1]
+
+        comp_mask_cpu = create_completion_mask(comp_ids_cpu, eos_id)  # [N, T_i]
+        g_bat         = expand_batch(bat, G)
+        sel_bat_cpu   = slice_batch(g_bat, top_idx)         # [N, ...]
+
+        prompt_mask_cpu    = sel_bat_cpu['attention_mask']  # [N, pl]
+        full_attn_mask_cpu = torch.cat(
+            [prompt_mask_cpu, comp_mask_cpu.long()], dim=1) # [N, pl+T_i]
+
+        adv_sel = adv_raw[top_idx].unsqueeze(1)             # [N, 1]
+
+        # Compute old log-probs from the current (pre-update) model
+        torch.cuda.empty_cache()
+        sel_ids      = sel_ids_cpu.to(device)
+        full_attn    = full_attn_mask_cpu.to(device)
+        comp_mask    = comp_mask_cpu.to(device)
+        advantages   = adv_sel.to(device)
+        sel_bat      = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                        for k, v in sel_bat_cpu.items()}
+
+        with torch.no_grad():
+            old_out = model_forward(model, sel_ids, full_attn, sel_bat, device)
+            old_lp  = compute_token_log_probs(
+                old_out.logits, sel_ids, logits_to_keep).detach()
+
+        prompt_data.append({
+            'sel_ids':       sel_ids,        # [N, full_len_i] — on GPU
+            'full_attn':     full_attn,      # [N, pl+T_i]
+            'comp_mask':     comp_mask,      # [N, T_i]
+            'advantages':    advantages,     # [N, 1]
+            'sel_bat':       sel_bat,        # model inputs on GPU
+            'old_lp':        old_lp,         # [N, T_i]
+            'logits_to_keep': logits_to_keep,
+            'mean_r':        mean_r.item(),
+            'std_r':         std_r.item(),
+        })
+
     gen_seconds = time.perf_counter() - t_gen
+    rewards_all = torch.tensor(all_rewards, dtype=torch.float32)
 
-    code_strings = [
-        processor.decode(generated_ids[i, prompt_len:], skip_special_tokens=True)
-        for i in range(G)
-    ]
-
-    rewards   = compute_rewards_parallel(
-        code_strings, [gt_mesh_path] * G, workers=args.reward_workers)
-    rewards_t = torch.tensor(rewards, dtype=torch.float32)
-    mean_r    = rewards_t.mean()
-    std_r     = rewards_t.std()
-
-    # Advantages: raw (reward - group_mean), NO std normalisation (matches ref)
-    advantages_raw = rewards_t - mean_r
-    _, top_idx = torch.topk(advantages_raw.abs(), N)
-
-    # Degenerate group: all G rollouts have identical reward → all advantages=0
-    # → zero loss, zero gradient, no learning. Skip the expensive forward passes
-    # and optimizer step entirely to save ~20 s/step.
-    if std_r.item() < 1e-6:
+    if not prompt_data:
+        # All B prompts degenerate — no gradient update
         return {
-            'train/loss':            0.0,
-            'train/mean_reward':     mean_r.item(),
-            'train/reward_std':      0.0,
-            'train/reward_max':      rewards_t.max().item(),
-            'train/reward_min':      rewards_t.min().item(),
-            'train/entropy':         float('nan'),
-            'train/clip_fraction':   float('nan'),
-            'train/clip_lower_frac': float('nan'),
-            'train/clip_upper_frac': float('nan'),
-            'train/ratio_mean':      float('nan'),
-            'train/ratio_std':       float('nan'),
-            'train/kl_approx':       float('nan'),
-            'train/adv_pos_frac':    float('nan'),
-            'train/adv_abs_mean':    0.0,
-            'train/kl_q_pp':         float('nan'),
-            'train/kl_q_pn':         float('nan'),
-            'train/kl_q_np':         float('nan'),
-            'train/kl_q_nn':         float('nan'),
-            'train/gen_seconds':     gen_seconds,
-            '_rewards_list':         rewards,
-            '_ratio_list':           [],
-            '_adv_list':             [],
+            'train/loss':         0.0,
+            'train/mean_reward':  rewards_all.mean().item(),
+            'train/reward_std':   rewards_all.std().item(),
+            'train/reward_max':   rewards_all.max().item(),
+            'train/reward_min':   rewards_all.min().item(),
+            'train/entropy':      float('nan'),
+            'train/adv_abs_mean': 0.0,
+            'train/gen_seconds':  gen_seconds,
+            '_rewards_list':      all_rewards,
+            '_reward_std_groups': std_r_groups,
+            **_NAN_DIAG,
         }
 
-    # Build per-token tensors for selected rollouts
-    sel_ids_cpu        = generated_ids[top_idx]           # [N, full_len]
-    completion_ids_cpu = sel_ids_cpu[:, prompt_len:]      # [N, T]
-    logits_to_keep     = completion_ids_cpu.shape[1]
+    B_valid = len(prompt_data)
 
-    comp_mask_cpu   = create_completion_mask(completion_ids_cpu, eos_id)  # [N, T]
-    g_batch         = expand_batch(batch, G)
-    sel_g_batch_cpu = slice_batch(g_batch, top_idx)
-
-    # Full attention mask: prompt mask (from collation) + completion mask
-    prompt_mask_cpu   = sel_g_batch_cpu['attention_mask']  # [N, prompt_len]
-    full_attn_mask_cpu = torch.cat(
-        [prompt_mask_cpu, comp_mask_cpu.long()], dim=1)   # [N, full_len]
-
-    advantages_sel = advantages_raw[top_idx].unsqueeze(1)  # [N, 1] — broadcast over tokens
-
-    # Move to GPU
-    torch.cuda.empty_cache()
-    sel_ids       = sel_ids_cpu.to(device)
-    full_attn_mask = full_attn_mask_cpu.to(device)
-    comp_mask     = comp_mask_cpu.to(device)
-    advantages    = advantages_sel.to(device)
-    sel_g_batch   = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in sel_g_batch_cpu.items()}
-
-    # Compute old log-probs from current model BEFORE any gradient update
-    # (identical to grpo_mm: old_log_probs computed at rollout time, reused
-    #  for all batch_updates inner iterations)
-    with torch.no_grad():
-        old_out  = model_forward(model, sel_ids, full_attn_mask, sel_g_batch, device)
-        old_lp   = compute_token_log_probs(old_out.logits, sel_ids, logits_to_keep).detach()
-
-    # Inner update loop — batch_updates gradient steps on the same rollout batch.
-    # Diagnostics are intentionally NOT computed here; they use only the LAST
-    # iteration's new_lp (paper Phase-3 convention) and are computed after the loop.
+    # ------------------------------------------------------------------
+    # Phase 2: batch_updates inner PPO steps with gradient accumulation.
+    # optimizer.zero_grad() once at the start of each inner step;
+    # loss is divided by B_valid before backward so gradients are averaged
+    # (not summed) over prompts — equivalent to processing B_valid*N
+    # sequences in one forward pass.
+    # optimizer.step() is called once per inner step after all B prompts.
+    # ------------------------------------------------------------------
     last_loss    = 0.0
     last_entropy = float('nan')
-    last_new_lp  = None                  # saved from final inner iteration
+    last_new_lps = None     # [B_valid] list of new_lp tensors for Phase 3
 
     for k in range(args.batch_updates):
         is_last = (k == args.batch_updates - 1)
         model.train()
-        new_out = model_forward(model, sel_ids, full_attn_mask, sel_g_batch, device)
-        new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
-
-        loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
-                            args.eps_high, args.eps_low)
-
         optimizer.zero_grad()
-        loss.backward()
-        # grad clip 0.1 — matches ref; 1.0 (previous value) was 10× too loose
+
+        step_loss     = 0.0
+        step_ent_sum  = 0.0
+        step_new_lps  = [] if is_last else None
+
+        for pd in prompt_data:
+            new_out = model_forward(model,
+                                    pd['sel_ids'], pd['full_attn'],
+                                    pd['sel_bat'], device)
+            new_lp = compute_token_log_probs(
+                new_out.logits, pd['sel_ids'], pd['logits_to_keep'])
+
+            loss = cppo_loss_fn(new_lp, pd['old_lp'], pd['advantages'],
+                                pd['comp_mask'], args.eps_high, args.eps_low)
+
+            # Divide by B_valid: gradient accumulation = average over prompts
+            (loss / B_valid).backward()
+            step_loss += loss.item()
+
+            if is_last:
+                with torch.no_grad():
+                    step_ent_sum += compute_policy_entropy(
+                        new_out.logits, pd['comp_mask'],
+                        pd['logits_to_keep']).item()
+                step_new_lps.append({
+                    'new_lp':    new_lp.detach(),
+                    'old_lp':    pd['old_lp'],
+                    'comp_mask': pd['comp_mask'],
+                    'advantages': pd['advantages'],
+                })
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
 
+        last_loss = step_loss / B_valid
         if is_last:
-            last_loss = loss.item()
-            with torch.no_grad():
-                last_entropy = compute_policy_entropy(
-                    new_out.logits, comp_mask, logits_to_keep).item()
-            last_new_lp = new_lp.detach()   # keep for post-loop diagnostics
+            last_entropy = step_ent_sum / B_valid
+            last_new_lps = step_new_lps
 
     # ------------------------------------------------------------------
-    # Phase 3: Diagnostics — computed ONCE using the last inner iteration's
-    # IS ratio (new_lp after last update vs old_lp at rollout time).
-    # Only computed on logging steps (compute_diag=True) to avoid overhead
-    # on every non-logging step.
-    # Advantages are per-SEQUENCE scalars [N, 1] broadcast over tokens in
-    # the loss — there is no token-level advantage in CPPO/GRPO.
+    # Phase 3: Diagnostics — aggregated over all valid prompts.
+    # Uses IS from the LAST inner iteration only (paper Phase-3 convention).
+    # Each prompt contributes its own [N, T_i] token-level tensors;
+    # we accumulate token counts and KL sums to get global statistics.
     # ------------------------------------------------------------------
     with torch.no_grad():
-        if compute_diag and last_new_lp is not None:
-            ratio_tok = torch.exp(last_new_lp - old_lp)         # [N, T]
-            # Sequence-level IS: arithmetic mean of per-token ratios (diagnostic proxy)
-            ratio_seq = (ratio_tok * comp_mask).sum(1) \
-                        / comp_mask.sum(1).clamp(min=1)          # [N]
+        if compute_diag and last_new_lps:
+            clip_n = clip_lo_n = clip_hi_n = n_tok = 0.0
+            kl_total = 0.0
+            kl_q_pp = kl_q_pn = kl_q_np = kl_q_nn = 0.0
+            kl_approx_sum = 0.0
+            ratio_seq_all = []
+            adv_all       = []
+            adv_pos = adv_cnt = 0
 
-            clip_lower = (ratio_tok < 1 - args.eps_low)
-            clip_upper = (ratio_tok > 1 + args.eps_high)
-            n_tok_sum  = comp_mask.sum().clamp(min=1)
-            clip_frac  = ((clip_lower | clip_upper).float() * comp_mask).sum() / n_tok_sum
+            for lp in last_new_lps:
+                new_lp    = lp['new_lp']
+                old_lp    = lp['old_lp']
+                comp_mask = lp['comp_mask']
+                adv_sq    = lp['advantages'].squeeze(1)   # [N]
 
-            # Sampled-action KL approximation: k(r) = r − 1 − log r ≥ 0
-            # Reuses ratio_tok [N, T] already in memory; zero extra overhead.
-            kl_tok     = (ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8))) \
-                         * comp_mask
-            kl_per_seq = kl_tok.sum(dim=1)                       # [N]
-            kl_total   = kl_per_seq.sum().clamp(min=1e-8)
-            kl_approx  = kl_per_seq.mean() / comp_mask.sum(1).mean().clamp(min=1)
+                ratio_tok = torch.exp(new_lp - old_lp)   # [N, T_i]
+                ratio_seq = (ratio_tok * comp_mask).sum(1) \
+                            / comp_mask.sum(1).clamp(min=1)
 
-            adv_sq = advantages.squeeze(1)                       # [N]
-            # KL-weighted quadrant fractions — sum to ~1.0.
-            # kl_q_np > 0  ⇒ clip is failing (bad-advantage sequences moving up).
-            kl_q_pp = kl_per_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum() / kl_total
-            kl_q_pn = kl_per_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum() / kl_total
-            kl_q_np = kl_per_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum() / kl_total
-            kl_q_nn = kl_per_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum() / kl_total
+                cl = (ratio_tok < 1 - args.eps_low)
+                cu = (ratio_tok > 1 + args.eps_high)
+                nt = comp_mask.sum().item()
 
+                clip_n   += ((cl | cu).float() * comp_mask).sum().item()
+                clip_lo_n += (cl.float() * comp_mask).sum().item()
+                clip_hi_n += (cu.float() * comp_mask).sum().item()
+                n_tok    += nt
+
+                kl_tok_i   = (ratio_tok - 1
+                               - torch.log(ratio_tok.clamp(min=1e-8))) * comp_mask
+                kl_seq     = kl_tok_i.sum(dim=1)          # [N]
+                kl_sum     = kl_seq.sum().item()
+                kl_total  += kl_sum
+                kl_approx_sum += (kl_seq.mean()
+                                  / comp_mask.sum(1).mean().clamp(min=1)).item()
+
+                # Quadrant attribution — will normalise by kl_total at the end
+                kl_q_pp += kl_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum().item()
+                kl_q_pn += kl_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum().item()
+                kl_q_np += kl_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum().item()
+                kl_q_nn += kl_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum().item()
+
+                ratio_seq_all.extend(ratio_seq.cpu().tolist())
+                adv_all.extend(adv_sq.cpu().tolist())
+                adv_pos += (adv_sq > 0).sum().item()
+                adv_cnt += adv_sq.numel()
+
+            kl_denom = max(kl_total, 1e-8)
+            n_tok    = max(n_tok, 1)
             diag = {
-                'train/clip_fraction':   clip_frac.item(),
-                'train/clip_lower_frac': ((clip_lower.float() * comp_mask).sum()
-                                          / n_tok_sum).item(),
-                'train/clip_upper_frac': ((clip_upper.float() * comp_mask).sum()
-                                          / n_tok_sum).item(),
-                'train/ratio_mean':      ratio_seq.mean().item(),
-                'train/ratio_std':       ratio_seq.std().item(),
-                'train/kl_approx':       kl_approx.item(),
-                'train/adv_pos_frac':    (advantages > 0).float().mean().item(),
-                'train/kl_q_pp':         kl_q_pp.item(),
-                'train/kl_q_pn':         kl_q_pn.item(),
-                'train/kl_q_np':         kl_q_np.item(),
-                'train/kl_q_nn':         kl_q_nn.item(),
-                '_ratio_list':           ratio_seq.cpu().tolist(),
-                '_adv_list':             advantages.squeeze(1).cpu().tolist(),
+                'train/clip_fraction':   clip_n   / n_tok,
+                'train/clip_lower_frac': clip_lo_n / n_tok,
+                'train/clip_upper_frac': clip_hi_n / n_tok,
+                'train/ratio_mean':      float(np.mean(ratio_seq_all)),
+                'train/ratio_std':       float(np.std(ratio_seq_all)),
+                'train/kl_approx':       kl_approx_sum / B_valid,
+                'train/adv_pos_frac':    adv_pos / max(adv_cnt, 1),
+                'train/kl_q_pp':         kl_q_pp / kl_denom,
+                'train/kl_q_pn':         kl_q_pn / kl_denom,
+                'train/kl_q_np':         kl_q_np / kl_denom,
+                'train/kl_q_nn':         kl_q_nn / kl_denom,
+                '_ratio_list':           ratio_seq_all,
+                '_adv_list':             adv_all,
             }
         else:
-            # Non-logging step: skip diagnostics, return NaN placeholders
-            diag = {
-                'train/clip_fraction':   float('nan'),
-                'train/clip_lower_frac': float('nan'),
-                'train/clip_upper_frac': float('nan'),
-                'train/ratio_mean':      float('nan'),
-                'train/ratio_std':       float('nan'),
-                'train/kl_approx':       float('nan'),
-                'train/adv_pos_frac':    float('nan'),
-                'train/kl_q_pp':         float('nan'),
-                'train/kl_q_pn':         float('nan'),
-                'train/kl_q_np':         float('nan'),
-                'train/kl_q_nn':         float('nan'),
-                '_ratio_list':           [],
-                '_adv_list':             [],
-            }
+            diag = dict(_NAN_DIAG)
 
+    all_adv = torch.cat([pd['advantages'].view(-1) for pd in prompt_data])
     return {
-        'train/loss':        last_loss,
-        'train/mean_reward': mean_r.item(),
-        'train/reward_std':  std_r.item(),
-        'train/reward_max':  rewards_t.max().item(),
-        'train/reward_min':  rewards_t.min().item(),
-        'train/entropy':     last_entropy,
-        'train/adv_abs_mean': advantages.abs().mean().item(),
-        'train/gen_seconds': gen_seconds,
-        '_rewards_list':     rewards,
+        'train/loss':         last_loss,
+        'train/mean_reward':  rewards_all.mean().item(),
+        'train/reward_std':   rewards_all.std().item(),
+        'train/reward_max':   rewards_all.max().item(),
+        'train/reward_min':   rewards_all.min().item(),
+        'train/entropy':      last_entropy,
+        'train/adv_abs_mean': all_adv.abs().mean().item(),
+        'train/gen_seconds':  gen_seconds,
+        '_rewards_list':      all_rewards,
+        '_reward_std_groups': std_r_groups,
         **diag,
     }
 
@@ -506,6 +616,14 @@ def train_cppo(model, optimizer, dataset, processor,
     if step > 0:
         print(f'Resuming from step {step}')
     indices = list(range(len(dataset)))
+    batch_size = max(1, int(getattr(args, 'batch_size', 1)))
+    use_buffer = bool(getattr(args, 'use_buffer', False))
+    buffer_sample_size = int(getattr(args, 'buffer_sample_size', batch_size))
+    buffer_expand_frac = float(getattr(args, 'buffer_expand_frac', 0.5))
+    replay_buffer = (
+        IndexBuffer(max_size=int(getattr(args, 'buffer_max_size', 4096)))
+        if use_buffer else None
+    )
 
     if val_examples and step == 0:
         print('\n[eval step=0 (pre-training baseline)]')
@@ -519,15 +637,36 @@ def train_cppo(model, optimizer, dataset, processor,
     pbar = tqdm(total=args.max_steps, desc='Dr. CPPO')
     while step < args.max_steps:
         np.random.shuffle(indices)
-        for idx in indices:
+        for start in range(0, len(indices), batch_size):
             if step >= args.max_steps:
                 break
+            base_indices = indices[start:start + batch_size]
+            train_indices = list(base_indices)
+
+            if replay_buffer is not None and len(replay_buffer) > 0:
+                train_indices.extend(replay_buffer.sample(buffer_sample_size))
+
+            batch_items = []
+            for idx in train_indices:
+                item = dict(dataset[idx])
+                item['_dataset_idx'] = int(idx)
+                batch_items.append(item)
+
             try:
                 # compute_diag=True only on steps that will be logged.
                 # step+1 because step is incremented after cppo_step returns.
                 compute_diag = ((step + 1) % args.log_steps == 0)
-                metrics = cppo_step(model, optimizer, dataset[idx], processor, args,
+                metrics = cppo_step(model, optimizer, batch_items, processor, args,
                                     compute_diag=compute_diag)
+                if replay_buffer is not None:
+                    std_list = metrics.get('_reward_std_groups', [])
+                    n_pick = int(len(std_list) * buffer_expand_frac)
+                    if n_pick > 0:
+                        std_arr = np.array(std_list)
+                        top_local = std_arr.argsort()[-n_pick:]
+                        picked = [train_indices[int(i)] for i in top_local
+                                  if int(i) < len(train_indices)]
+                        replay_buffer.add_many(picked)
             except Exception as e:
                 print(f'[step {step}] cppo_step error: {e}')
                 continue
