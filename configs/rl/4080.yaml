@@ -24,7 +24,8 @@ dpo_dataset: null
 
 # Training
 max_steps: 50000
-lr: 3.0e-5
+lr: 1.0e-5              # reduced from 3e-5: G=4 has high gradient variance vs official G=16
+                        # lr=3e-5 caused KL divergence (ratio=2.42) at step 300 → collapse
 
 # CPPO hyperparameters — memory-safe for 16 GB (official: G=16, top_N=4, batch_updates=3)
 G: 4                     # reduced from 16; sequential_generation keeps VRAM flat
@@ -34,6 +35,8 @@ eps_low: 0.1
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
 max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
 reward_workers: 4
+eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
+eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
 
 # DPO (unused in cppo mode)
