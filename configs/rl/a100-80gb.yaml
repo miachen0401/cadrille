@@ -4,7 +4,7 @@
 #
 # Memory breakdown (~55 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   Adam fp32 optimizer:       ~9.0 GB
+#   AdamW fp32 optimizer:      ~9.0 GB
 #   Activations (G=16 batch):  ~30 GB
 #
 # Throughput vs H100:

@@ -266,9 +266,9 @@ def train(args, cfg_to_save=None):
             attn_implementation='flash_attention_2',
             device_map='auto')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     if rank == 0:
-        print('Optimizer: Adam (fp32, weight_decay=0 — matches official cadrille paper Table 11)')
+        print('Optimizer: AdamW (fp32, weight_decay=0.01 — matches ref grpo_mm.py:286)')
 
     # Validation (rank-0 only: eval runs as subprocess pool on the master node)
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
