@@ -240,8 +240,17 @@ def train(args, cfg_to_save=None):
             except Exception as e:
                 print(f'Warning: wandb.init() failed ({e}). Pass --wandb-offline for local logging.')
 
+    # Load processor from the local SFT checkpoint when base_model is a remote
+    # HuggingFace repo ID (e.g. 'Qwen/Qwen2-VL-2B-Instruct') — avoids 429
+    # rate-limit errors on Colab shared IPs.  The SFT checkpoint is a complete
+    # Qwen2-VL model and ships the exact same processor config as the base model.
+    _proc_src = (args.base_model
+                 if (args.base_model and os.path.isdir(args.base_model))
+                 else args.checkpoint_path)
+    if _proc_src != args.base_model and rank == 0:
+        print(f'Processor: {args.base_model!r} not a local dir → loading from checkpoint_path')
     processor = AutoProcessor.from_pretrained(
-        args.base_model,
+        _proc_src,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')

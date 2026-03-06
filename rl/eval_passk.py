@@ -353,8 +353,16 @@ def main():
         except Exception as e:
             print(f'Warning: W&B init failed ({e})')
 
+    # Load processor from local checkpoint when base_model is a remote HF repo ID
+    # (avoids 429 rate-limit errors on Colab shared IPs).
+    _local_ckpt = args.checkpoint or args.checkpoint_sweep
+    _proc_src = (args.base_model
+                 if (args.base_model and os.path.isdir(args.base_model))
+                 else _local_ckpt)
+    if _proc_src != args.base_model:
+        print(f'Processor: {args.base_model!r} not local → loading from checkpoint')
     processor = AutoProcessor.from_pretrained(
-        args.base_model,
+        _proc_src,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')
