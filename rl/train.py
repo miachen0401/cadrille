@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 import yaml
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoProcessor
 
 from cadrille import Cadrille
@@ -164,19 +166,35 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
 
 
 def train(args, cfg_to_save=None):
-    _preflight_check(args)
-    os.makedirs(args.output_dir, exist_ok=True)
+    # ── DDP setup ────────────────────────────────────────────────────────────
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    is_distributed = world_size > 1
+    if is_distributed:
+        dist.init_process_group(backend='nccl')
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        rank = dist.get_rank()
+        torch.cuda.set_device(local_rank)
+    else:
+        local_rank = 0
+        rank = 0
 
-    if cfg_to_save:
+    if rank == 0:
+        _preflight_check(args)
+        os.makedirs(args.output_dir, exist_ok=True)
+
+    if is_distributed:
+        dist.barrier()   # all ranks wait until rank-0 preflight passes
+
+    if rank == 0 and cfg_to_save:
         cfg_path = os.path.join(args.output_dir, 'run_config.yaml')
         if not os.path.exists(cfg_path):
             with open(cfg_path, 'w') as f:
                 yaml.dump(cfg_to_save, f, default_flow_style=False, sort_keys=True)
             print(f'Config snapshot saved → {cfg_path}')
 
-    # W&B
+    # W&B (rank 0 only)
     use_wandb = False
-    if args.wandb_project:
+    if rank == 0 and args.wandb_project:
         if not _WANDB_AVAILABLE:
             print('Warning: wandb not installed.')
         else:
@@ -228,31 +246,46 @@ def train(args, cfg_to_save=None):
         max_pixels=1280 * 28 * 28,
         padding_side='left')
 
-    model = Cadrille.from_pretrained(
-        args.checkpoint_path,
-        torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2',
-        device_map='auto')
+    if is_distributed:
+        # DDP: load onto the local GPU explicitly; device_map='auto' would
+        # spread layers across all visible GPUs (model parallelism), which is
+        # incompatible with DDP.
+        model = Cadrille.from_pretrained(
+            args.checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation='flash_attention_2',
+            device_map=None).to(f'cuda:{local_rank}')
+        model.gradient_checkpointing_enable()
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        if rank == 0:
+            print(f'DDP: {world_size} ranks, local_rank={local_rank}')
+    else:
+        model = Cadrille.from_pretrained(
+            args.checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            attn_implementation='flash_attention_2',
+            device_map='auto')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    print('Optimizer: Adam (fp32, weight_decay=0 — matches official cadrille paper Table 11)')
+    if rank == 0:
+        print('Optimizer: Adam (fp32, weight_decay=0 — matches official cadrille paper Table 11)')
 
-    # Validation
+    # Validation (rank-0 only: eval runs as subprocess pool on the master node)
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
     val_examples = []
-    for split_dir, n_samples in [
-        (args.val_deepcad_dir,   args.val_samples_deepcad),
-        (args.val_fusion360_dir, args.val_samples_fusion360),
-    ]:
-        if split_dir and os.path.isdir(split_dir) and n_samples > 0:
-            val_examples += load_val_examples(split_dir, n_samples, modalities=val_modalities)
-    if not val_examples:
-        print('No validation dirs found; skipping validation.')
+    if rank == 0:
+        for split_dir, n_samples in [
+            (args.val_deepcad_dir,   args.val_samples_deepcad),
+            (args.val_fusion360_dir, args.val_samples_fusion360),
+        ]:
+            if split_dir and os.path.isdir(split_dir) and n_samples > 0:
+                val_examples += load_val_examples(split_dir, n_samples, modalities=val_modalities)
+        if not val_examples:
+            print('No validation dirs found; skipping validation.')
 
-    # Fix 2+3: Start warm eval process pool before training begins.
-    # Workers pre-import cadquery/trimesh and run at nice=10.
-    if val_examples:
-        init_eval_pool(n_workers=getattr(args, 'eval_workers', 2))
+        # Start warm eval process pool before training begins (rank 0 only).
+        if val_examples:
+            init_eval_pool(n_workers=getattr(args, 'eval_workers', 2))
 
     if args.mode == 'cppo':
         if args.data_dir:
@@ -262,12 +295,18 @@ def train(args, cfg_to_save=None):
         else:
             raise ValueError('Provide data_dir (real meshes) or hard_examples_pkl in config')
 
-        _reward_smoke_test(model, dataset, processor, args)
+        # Smoke test on rank 0 only (uses the unwrapped model for .generate())
+        if rank == 0:
+            raw_model = model.module if is_distributed else model
+            _reward_smoke_test(raw_model, dataset, processor, args)
+        if is_distributed:
+            dist.barrier()  # non-rank-0 wait for rank-0 smoke test
 
         # No separate old_model — old log-probs are computed from the current
         # model at rollout time (matching the reference grpo_mm.py design).
         train_cppo(model, optimizer, dataset, processor,
-                   val_examples, use_wandb, args)
+                   val_examples, use_wandb, args,
+                   rank=rank, world_size=world_size)
 
     elif args.mode == 'dpo':
         if not args.dpo_dataset:
@@ -279,8 +318,10 @@ def train(args, cfg_to_save=None):
     else:
         raise ValueError(f'Unknown mode: {args.mode}')
 
-    if use_wandb:
+    if use_wandb and rank == 0:
         wandb.finish()
+    if is_distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == '__main__':
