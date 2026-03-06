@@ -1,11 +1,13 @@
-# Cadrille RL fine-tuning — single H100 (80 GB)
+# Cadrille RL fine-tuning — single H100 / A100 80 GB
 # Official hyperparameters (Table 11, Cadrille paper): G=16, N=4, lr=3e-5,
 # K_updates=3, eps=0.1, optimizer=AdamW (weight_decay=0.01).
 #
-# Memory breakdown (~55 GB):
-#   Model weights (bf16):      ~4.5 GB
-#   AdamW fp32 optimizer:      ~9.0 GB
-#   Activations (G=16 batch):  ~30 GB
+# Memory breakdown (~72 GB with gradient checkpointing):
+#   Model weights (bf16):                ~4.5 GB
+#   AdamW fp32 optimizer states:         ~9.0 GB
+#   Generation KV cache (G=16, seq=1):  ~20 GB
+#   Backward activations (N=4 seqs):    ~28 GB  (gradient checkpointing halves this)
+#   Buffers / fragmentation headroom:    ~10 GB
 #   (No reference model — Dr. GRPO design saves ~4.5 GB)
 #
 # Usage: python rl/train.py --config configs/rl/h100.yaml
@@ -35,16 +37,17 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-batch_size: 2
+batch_size: 1                 # 1 prompt × G=16 rollouts per step; matches paper default
+                              # batch_size>1 multiplies peak memory by N (OOM at 80 GB)
 max_new_tokens: 1024          # must be >800 for complete CAD code; 1024 matches paper
 reward_workers: 8
 use_buffer: true
-buffer_sample_size: 2
+buffer_sample_size: 1
 buffer_expand_frac: 0.5
 buffer_max_size: 4096
 eval_workers: 2
 eval_timeout: 120.0
-sequential_generation: false  # G=16 batched fits in 80 GB on H100
+sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=1
 
 # DPO (unused)
 beta: 0.3

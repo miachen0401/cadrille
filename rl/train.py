@@ -299,6 +299,7 @@ def train(args, cfg_to_save=None):
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
             device_map='auto')
+        model.gradient_checkpointing_enable()   # reduces activation memory during backward
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     if rank == 0:
