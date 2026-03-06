@@ -255,21 +255,28 @@ def train(args, cfg_to_save=None):
         if rank == 0 and _proc_local != args.base_model:
             print(f'Processor loaded from checkpoint_path (no HF request needed)')
     except OSError:
-        # checkpoint is missing preprocessor_config.json → need HF download
+        # cadrille-sft only ships model.safetensors + config.json; no processor files.
+        # Download from base_model (one-time HF request), then save into checkpoint_path
+        # so all future runs load locally without any HF network access.
         if rank == 0:
-            print(f'Processor: {_proc_local!r} missing preprocessor_config.json '
-                  f'→ downloading from {args.base_model!r}')
-            print('  Tip: avoid 429 rate limits by running `huggingface-cli login` first')
+            print(f'Processor: {_proc_local!r} has no preprocessor_config.json '
+                  f'→ downloading from {args.base_model!r} (one-time)')
+            print('  Tip: if rate-limited, run `huggingface-cli login` first (Cell [7])')
         try:
             processor = AutoProcessor.from_pretrained(args.base_model, **_proc_kwargs)
+            if rank == 0:
+                # Save all processor files into checkpoint_path so next run is local
+                processor.save_pretrained(_proc_local)
+                print(f'  Processor files saved to {_proc_local!r} — future runs skip this step')
         except Exception as e:
             raise RuntimeError(
                 f'\nCannot load processor from checkpoint ({_proc_local!r}) '
                 f'or base model ({args.base_model!r}).\n'
-                f'HuggingFace is likely rate-limiting your IP. Fix:\n'
-                f'  1. Run: huggingface-cli login   (paste a read-only HF token)\n'
-                f'  2. Or set env var: export HF_TOKEN=hf_xxx\n'
-                f'  3. In Colab: run the HF login cell before cell [8]\n'
+                f'HuggingFace is likely rate-limiting your Colab IP. Fix:\n'
+                f'  1. Re-run Cell [7] and paste a HuggingFace token when prompted\n'
+                f'     (get a read-only token at https://huggingface.co/settings/tokens)\n'
+                f'  2. Then re-run this cell — processor files will be saved to Drive\n'
+                f'     and never downloaded again.\n'
                 f'Original error: {e}'
             ) from e
 
