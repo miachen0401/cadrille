@@ -497,6 +497,7 @@ def cppo_step(model, optimizer, items, processor, args,
         else:
             diag = dict(_NAN_DIAG)
 
+    _n_tok = comp_mask.sum().clamp(min=1)
     return {
         'train/loss':         last_loss,
         'train/mean_reward':  rewards_t.mean().item(),
@@ -505,6 +506,12 @@ def cppo_step(model, optimizer, items, processor, args,
         'train/reward_min':   rewards_t.min().item(),
         'train/entropy':      last_entropy,
         'train/adv_abs_mean': advantages.abs().mean().item(),
+        # adv_mean_seq: mean of per-sequence advantage scalars [B*N].
+        #   Should be ≈0 (reward−group_mean; slight drift from top-N selection).
+        # adv_mean_tok: token-weighted mean (advantages broadcast over comp_mask).
+        #   Also ≈0 but reveals if longer completions skew the advantage sign.
+        'train/adv_mean_seq': advantages.mean().item(),
+        'train/adv_mean_tok': ((advantages * comp_mask).sum() / _n_tok).item(),
         'train/gen_seconds':  gen_seconds,
         '_rewards_list':      rewards,
         '_reward_std_groups': std_r.tolist(),
@@ -650,6 +657,8 @@ def train_cppo(model, optimizer, dataset, processor,
                     f" train/kl_q_np={metrics['train/kl_q_np']:.4f}"
                     f" train/kl_q_nn={metrics['train/kl_q_nn']:.4f}"
                     f" train/kl_q_pp={metrics['train/kl_q_pp']:.4f}"
+                    f" train/adv_mean_seq={metrics['train/adv_mean_seq']:.4f}"
+                    f" train/adv_mean_tok={metrics['train/adv_mean_tok']:.4f}"
                     f" train/lr={lr:.2e}"
                 )
                 with open(log_path, 'a') as f:
@@ -671,6 +680,8 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/ratio_std':       metrics['train/ratio_std'],
                         'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
                         'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
+                        'train/adv_mean_seq':    metrics['train/adv_mean_seq'],
+                        'train/adv_mean_tok':    metrics['train/adv_mean_tok'],
                         'train/kl_q_pp':         metrics['train/kl_q_pp'],
                         'train/kl_q_pn':         metrics['train/kl_q_pn'],
                         'train/kl_q_np':         metrics['train/kl_q_np'],
