@@ -22,7 +22,7 @@ dpo_dataset: null        # for --mode dpo
 
 # Training
 max_steps: 50000
-lr: 3.0e-5               # Adam (no weight decay), matches official Table 11
+lr: 3.0e-5               # AdamW (weight_decay=0.01), matches ref grpo_mm.py:286
 
 # Dr. CPPO / GRPO hyperparameters
 G: 16                    # rollout completions per prompt
