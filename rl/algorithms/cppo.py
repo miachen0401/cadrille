@@ -356,6 +356,14 @@ def cppo_step(model, optimizer, items, processor, args,
         G, args, pad_id, processor)
     gen_seconds = time.perf_counter() - t_gen
 
+    # Average effective generation length across ALL B*G rollouts (CPU, cheap).
+    # Uses create_completion_mask to count tokens up to and including first EOS,
+    # so padding beyond EOS is excluded. Measures the true generation distribution
+    # before top-N selection (which would bias toward extreme advantage sequences).
+    _all_comp = generated_ids[:, prompt_len:]                        # [B*G, T]
+    _all_mask = create_completion_mask(_all_comp, eos_id)            # [B*G, T] float
+    avg_gen_len = _all_mask.sum(dim=1).float().mean().item()
+
     code_strings = [
         processor.decode(generated_ids[i, prompt_len:], skip_special_tokens=True,
                          clean_up_tokenization_spaces=False)
@@ -385,6 +393,9 @@ def cppo_step(model, optimizer, items, processor, args,
             'train/reward_min':   rewards_t.min().item(),
             'train/entropy':      float('nan'),
             'train/adv_abs_mean': 0.0,
+            'train/adv_mean_seq': 0.0,
+            'train/adv_mean_tok': 0.0,
+            'train/avg_gen_len':  avg_gen_len,
             'train/gen_seconds':  gen_seconds,
             '_rewards_list':      rewards,
             '_reward_std_groups': std_r.tolist(),
@@ -512,6 +523,7 @@ def cppo_step(model, optimizer, items, processor, args,
         #   Also ≈0 but reveals if longer completions skew the advantage sign.
         'train/adv_mean_seq': advantages.mean().item(),
         'train/adv_mean_tok': ((advantages * comp_mask).sum() / _n_tok).item(),
+        'train/avg_gen_len':  avg_gen_len,
         'train/gen_seconds':  gen_seconds,
         '_rewards_list':      rewards,
         '_reward_std_groups': std_r.tolist(),
@@ -659,6 +671,7 @@ def train_cppo(model, optimizer, dataset, processor,
                     f" train/kl_q_pp={metrics['train/kl_q_pp']:.4f}"
                     f" train/adv_mean_seq={metrics['train/adv_mean_seq']:.4f}"
                     f" train/adv_mean_tok={metrics['train/adv_mean_tok']:.4f}"
+                    f" train/avg_gen_len={metrics['train/avg_gen_len']:.1f}"
                     f" train/lr={lr:.2e}"
                 )
                 with open(log_path, 'a') as f:
@@ -682,6 +695,7 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
                         'train/adv_mean_seq':    metrics['train/adv_mean_seq'],
                         'train/adv_mean_tok':    metrics['train/adv_mean_tok'],
+                        'train/avg_gen_len':     metrics['train/avg_gen_len'],
                         'train/kl_q_pp':         metrics['train/kl_q_pp'],
                         'train/kl_q_pn':         metrics['train/kl_q_pn'],
                         'train/kl_q_np':         metrics['train/kl_q_np'],
