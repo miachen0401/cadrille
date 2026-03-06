@@ -4,14 +4,14 @@
 #
 # Memory breakdown (~55 GB):
 #   Model weights (bf16):      ~4.5 GB
-#   AdamW fp32 optimizer:      ~9.0 GB
+#   Adam fp32 optimizer:       ~9.0 GB
 #   Activations (G=16 batch):  ~30 GB
 #
 # Throughput vs H100:
 #   H100:     ~8–12 steps/min → 50k steps in ~3–4 days
 #   A100 80G: ~5–8  steps/min → 50k steps in ~4–6 days
 #
-# Usage: python rl_train.py --config configs/rl/a100-80gb.yaml
+# Usage: python rl/train.py --config configs/rl/a100-80gb.yaml
 
 checkpoints_dir: ./checkpoints
 
