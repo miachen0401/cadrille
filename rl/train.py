@@ -240,20 +240,38 @@ def train(args, cfg_to_save=None):
             except Exception as e:
                 print(f'Warning: wandb.init() failed ({e}). Pass --wandb-offline for local logging.')
 
-    # Load processor from the local SFT checkpoint when base_model is a remote
-    # HuggingFace repo ID (e.g. 'Qwen/Qwen2-VL-2B-Instruct') — avoids 429
-    # rate-limit errors on Colab shared IPs.  The SFT checkpoint is a complete
-    # Qwen2-VL model and ships the exact same processor config as the base model.
-    _proc_src = (args.base_model
-                 if (args.base_model and os.path.isdir(args.base_model))
-                 else args.checkpoint_path)
-    if _proc_src != args.base_model and rank == 0:
-        print(f'Processor: {args.base_model!r} not a local dir → loading from checkpoint_path')
-    processor = AutoProcessor.from_pretrained(
-        _proc_src,
-        min_pixels=256 * 28 * 28,
-        max_pixels=1280 * 28 * 28,
-        padding_side='left')
+    # Processor loading strategy:
+    #   1. If base_model is a local directory (pre-downloaded), use it directly.
+    #   2. Otherwise try checkpoint_path — works if checkpoint includes preprocessor_config.json.
+    #   3. If checkpoint is missing the image-processor config (cadrille-sft only ships
+    #      model weights + tokenizer), fall back to base_model HF download.
+    #   4. If HF is rate-limiting (Colab shared IPs) print a clear fix: hf login.
+    _proc_kwargs = dict(min_pixels=256 * 28 * 28, max_pixels=1280 * 28 * 28, padding_side='left')
+    _proc_local = (args.base_model
+                   if (args.base_model and os.path.isdir(args.base_model))
+                   else args.checkpoint_path)
+    try:
+        processor = AutoProcessor.from_pretrained(_proc_local, **_proc_kwargs)
+        if rank == 0 and _proc_local != args.base_model:
+            print(f'Processor loaded from checkpoint_path (no HF request needed)')
+    except OSError:
+        # checkpoint is missing preprocessor_config.json → need HF download
+        if rank == 0:
+            print(f'Processor: {_proc_local!r} missing preprocessor_config.json '
+                  f'→ downloading from {args.base_model!r}')
+            print('  Tip: avoid 429 rate limits by running `huggingface-cli login` first')
+        try:
+            processor = AutoProcessor.from_pretrained(args.base_model, **_proc_kwargs)
+        except Exception as e:
+            raise RuntimeError(
+                f'\nCannot load processor from checkpoint ({_proc_local!r}) '
+                f'or base model ({args.base_model!r}).\n'
+                f'HuggingFace is likely rate-limiting your IP. Fix:\n'
+                f'  1. Run: huggingface-cli login   (paste a read-only HF token)\n'
+                f'  2. Or set env var: export HF_TOKEN=hf_xxx\n'
+                f'  3. In Colab: run the HF login cell before cell [8]\n'
+                f'Original error: {e}'
+            ) from e
 
     if is_distributed:
         # DDP: load onto the local GPU explicitly; device_map='auto' would
