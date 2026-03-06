@@ -86,8 +86,13 @@ def resolve_args(args, cfg: dict) -> dict:
     args.eps_high         = cfg.get('eps_high', 0.1)
     args.eps_low          = cfg.get('eps_low', 0.1)
     args.batch_updates    = cfg.get('batch_updates', 1)
+    args.batch_size       = cfg.get('batch_size', 1)
     args.max_new_tokens   = cfg.get('max_new_tokens', 256)
     args.reward_workers   = cfg.get('reward_workers', 4)
+    args.use_buffer       = cfg.get('use_buffer', False)
+    args.buffer_sample_size = cfg.get('buffer_sample_size', args.batch_size)
+    args.buffer_expand_frac = cfg.get('buffer_expand_frac', 0.5)
+    args.buffer_max_size    = cfg.get('buffer_max_size', 4096)
     args.eval_workers     = cfg.get('eval_workers', 2)       # Fix 5: separate from reward_workers
     args.eval_timeout     = cfg.get('eval_timeout', 120.0)   # Fix 1: long timeout for eval
     args.eval_batch_size  = cfg.get('eval_batch_size', 8)

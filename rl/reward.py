@@ -436,6 +436,8 @@ def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> f
     iou, _ = _execute_code_in_subprocess(code_str, gt_mesh_path, timeout=timeout)
     if iou is None:
         return -10.0          # r_invalid penalty
+    if float(iou) < 0:
+        return 0.0
     return float(iou) * 10.0  # r_IoU in [0, 10]
 
 
@@ -464,6 +466,8 @@ def compute_metrics(
             code_str, gt_mesh_path, timeout=timeout, compute_chamfer=True)
     if iou is None:
         return -10.0, None
+    if float(iou) < 0:
+        return 0.0, cd
     return float(iou) * 10.0, cd
 
 
