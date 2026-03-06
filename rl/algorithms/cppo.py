@@ -99,6 +99,9 @@ def compute_token_log_probs(logits: torch.Tensor, full_ids: torch.Tensor,
     shift_logits = shift_logits[:, -logits_to_keep:, :]  # [B, T, V]
     completion_ids = full_ids[:, -logits_to_keep:]        # [B, T]
     log_probs = F.log_softmax(shift_logits, dim=-1)       # [B, T, V]
+    # Clamp IDs to [0, V-1] to prevent CUDA device-side assert if any generated
+    # token ID (e.g. a vision special token) is >= vocab_size.
+    completion_ids = completion_ids.clamp(0, shift_logits.shape[-1] - 1)
     return log_probs.gather(-1, completion_ids.unsqueeze(-1)).squeeze(-1)  # [B, T]
 
 
@@ -194,10 +197,20 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
     # DDP: .generate() is not available on the DDP wrapper; unwrap to raw model.
     gen_model = model.module if hasattr(model, 'module') else model
 
-    # Block video tokens — model must not emit them in CadQuery code
+    # Block vision tokens — model must not emit image/video tokens in CadQuery code.
+    # Both image_token_id and video_token_id must be blocked; previously only
+    # video_token_id was blocked, which could allow image tokens through and trigger
+    # a CUDA device-side assert in compute_token_log_probs (.gather OOB).
     bad_words = None
-    if hasattr(gen_model, 'config') and hasattr(gen_model.config, 'video_token_id'):
-        bad_words = [[gen_model.config.video_token_id]]
+    _cfg = getattr(gen_model, 'config', None)
+    _blocked = []
+    if _cfg is not None:
+        for _attr in ('video_token_id', 'image_token_id'):
+            _tid = getattr(_cfg, _attr, None)
+            if _tid is not None:
+                _blocked.append([_tid])
+    if _blocked:
+        bad_words = _blocked
 
     gen_kwargs = dict(max_new_tokens=args.max_new_tokens, do_sample=True,
                       temperature=1.0, top_p=1.0, top_k=50,
