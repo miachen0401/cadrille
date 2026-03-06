@@ -191,10 +191,13 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
     if processor is not None:
         processor.tokenizer.padding_side = 'left'
 
+    # DDP: .generate() is not available on the DDP wrapper; unwrap to raw model.
+    gen_model = model.module if hasattr(model, 'module') else model
+
     # Block video tokens — model must not emit them in CadQuery code
     bad_words = None
-    if hasattr(model, 'config') and hasattr(model.config, 'video_token_id'):
-        bad_words = [[model.config.video_token_id]]
+    if hasattr(gen_model, 'config') and hasattr(gen_model.config, 'video_token_id'):
+        bad_words = [[gen_model.config.video_token_id]]
 
     gen_kwargs = dict(max_new_tokens=args.max_new_tokens, do_sample=True,
                       temperature=1.0, top_p=1.0, top_k=50,
@@ -215,7 +218,7 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
                 else:
                     expanded[k] = v
             with torch.no_grad():
-                out = model.generate(**expanded, **gen_kwargs)
+                out = gen_model.generate(**expanded, **gen_kwargs)
             return out.cpu()
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
@@ -236,7 +239,7 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
                 else:
                     one[k] = v
             for _ in range(G):
-                ids = model.generate(**one, **gen_kwargs)
+                ids = gen_model.generate(**one, **gen_kwargs)
                 generated_ids_list.append(ids.cpu())
 
     max_len = max(ids.shape[1] for ids in generated_ids_list)
@@ -363,9 +366,14 @@ def cppo_step(model, optimizer, items, processor, args,
     rewards   = compute_rewards_parallel(code_strings, gt_paths,
                                          workers=args.reward_workers)
     rewards_t = torch.tensor(rewards, dtype=torch.float32).view(B, G)  # [B, G]
+    # Guard against non-finite reward values before mean/std/topk.
+    rewards_t = torch.nan_to_num(
+        rewards_t, nan=-10.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
     mean_r    = rewards_t.mean(dim=1, keepdim=True)                     # [B, 1]
     std_r     = rewards_t.std(dim=1)                                    # [B]
     adv_raw   = rewards_t - mean_r                                      # [B, G]
+    # Extra safety before topk in case any upstream op returns non-finite.
+    adv_raw   = torch.nan_to_num(adv_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
     if adv_raw.abs().max().item() < 1e-6:
         # All B prompts degenerate — advantages≈0, nothing to learn
@@ -531,15 +539,22 @@ def _rotate_checkpoints(output_dir: str, save_total_limit: Optional[int]):
 # ---------------------------------------------------------------------------
 
 def train_cppo(model, optimizer, dataset, processor,
-               val_examples, use_wandb, args):
+               val_examples, use_wandb, args, rank=0, world_size=1):
     """Main Dr. CPPO training loop.
 
     No longer requires a separate old_model — old log-probs are computed
     from the current model at rollout time (matching the reference).
+
+    DDP: each rank processes its own data shard (DistributedSampler).
+    Side effects (W&B, eval, checkpoint save) run on rank 0 only.
     """
+    import torch.distributed as _dist
+    from torch.utils.data.distributed import DistributedSampler
+
+    is_distributed = world_size > 1
     log_path = os.path.join(args.output_dir, 'log.txt')
     step = getattr(args, 'start_step', 0)
-    if step > 0:
+    if step > 0 and rank == 0:
         print(f'Resuming from step {step}')
     indices = list(range(len(dataset)))
     batch_size = max(1, int(getattr(args, 'batch_size', 1)))
@@ -551,22 +566,37 @@ def train_cppo(model, optimizer, dataset, processor,
         if use_buffer else None
     )
 
-    if val_examples and step == 0:
+    if val_examples and step == 0 and rank == 0:
         print('\n[eval step=0 (pre-training baseline)]')
         try:
-            val_metrics = run_validation(model, val_examples, processor, args)
+            raw_model = model.module if hasattr(model, 'module') else model
+            val_metrics = run_validation(raw_model, val_examples, processor, args)
             log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
         except Exception as e:
             print(f'[eval step=0] failed (skipping): {e}')
         model.train()
 
-    pbar = tqdm(total=args.max_steps, desc='Dr. CPPO')
+    # DistributedSampler gives each rank a disjoint shard of the dataset.
+    # set_epoch() re-shuffles with a different seed each epoch.
+    if is_distributed:
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    else:
+        sampler = None
+
+    pbar = tqdm(total=args.max_steps, desc='Dr. CPPO', disable=(rank != 0))
+    epoch = 0
     while step < args.max_steps:
-        np.random.shuffle(indices)
-        for start in range(0, len(indices), batch_size):
+        if is_distributed:
+            sampler.set_epoch(epoch)
+            rank_indices = list(sampler)
+        else:
+            np.random.shuffle(indices)
+            rank_indices = indices
+        epoch += 1
+        for start in range(0, len(rank_indices), batch_size):
             if step >= args.max_steps:
                 break
-            base_indices = indices[start:start + batch_size]
+            base_indices = rank_indices[start:start + batch_size]
             train_indices = list(base_indices)
 
             if replay_buffer is not None and len(replay_buffer) > 0:
@@ -604,7 +634,7 @@ def train_cppo(model, optimizer, dataset, processor,
                 reward=f"{metrics['train/mean_reward']:.2f}",
                 H=f"{metrics['train/entropy']:.2f}")
 
-            if step % args.log_steps == 0:
+            if step % args.log_steps == 0 and rank == 0:
                 lr = optimizer.param_groups[0]['lr']
                 log_line = (
                     f"step={step}"
@@ -653,20 +683,29 @@ def train_cppo(model, optimizer, dataset, processor,
                     }, step=step)
 
             if val_examples and step % args.eval_steps == 0:
-                print(f'\n[eval step={step}]')
-                val_metrics = run_validation(model, val_examples, processor, args)
-                log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
+                if is_distributed:
+                    _dist.barrier()   # sync before eval
+                if rank == 0:
+                    print(f'\n[eval step={step}]')
+                    raw_model = model.module if hasattr(model, 'module') else model
+                    val_metrics = run_validation(raw_model, val_examples, processor, args)
+                    log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
+                if is_distributed:
+                    _dist.barrier()   # non-rank-0 wait for rank-0 eval
                 model.train()
 
-            if step % args.save_steps == 0:
+            if step % args.save_steps == 0 and rank == 0:
                 ckpt_dir = os.path.join(args.output_dir, f'checkpoint-{step}')
-                model.save_pretrained(ckpt_dir)
+                save_model = model.module if hasattr(model, 'module') else model
+                save_model.save_pretrained(ckpt_dir)
                 processor.save_pretrained(ckpt_dir)
                 _rotate_checkpoints(args.output_dir,
                                     getattr(args, 'save_total_limit', None))
 
     pbar.close()
-    final_dir = os.path.join(args.output_dir, 'checkpoint-final')
-    model.save_pretrained(final_dir)
-    processor.save_pretrained(final_dir)
-    print(f'Training complete. Final checkpoint → {final_dir}')
+    if rank == 0:
+        final_dir = os.path.join(args.output_dir, 'checkpoint-final')
+        save_model = model.module if hasattr(model, 'module') else model
+        save_model.save_pretrained(final_dir)
+        processor.save_pretrained(final_dir)
+        print(f'Training complete. Final checkpoint → {final_dir}')
