@@ -37,7 +37,7 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-batch_size: 4                 # 4 prompt × G=16 rollouts per step; matches paper default
+batch_size: 6                 # 6 prompt × G=16 rollouts per step; matches paper default
                               # batch_size>1 multiplies peak memory by N (OOM at 80 GB)
 max_new_tokens: 1024          # must be >800 for complete CAD code; 1024 matches paper
 reward_workers: 8
