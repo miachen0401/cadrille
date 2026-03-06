@@ -1,66 +1,69 @@
 #!/usr/bin/env bash
-# One-time environment setup for a new machine (H100 VM, Colab, etc.)
+# scripts/setup.sh — install deps and (optionally) download data for RL training
 #
 # Usage:
-#   bash scripts/setup.sh
-#   bash scripts/setup.sh --data-from-hf    # download data from HuggingFace
+#   bash scripts/setup.sh            # install Python deps only
+#   bash scripts/setup.sh --data     # deps + download checkpoint + mesh data from HF
 #
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-echo "=== Cadrille environment setup ==="
+# ── 1. uv ──────────────────────────────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    echo "[1/4] Installing uv ..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env" 2>/dev/null || export PATH="$HOME/.local/bin:$PATH"
+else
+    echo "[1/4] uv $(uv --version) ✓"
+fi
 
-# ---------- Dependencies ----------
-echo "[1/3] Installing Python dependencies..."
-pip install -q \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 \
-    transformers>=4.50 accelerate \
-    qwen-vl-utils \
-    flash-attn --no-build-isolation \
-    cadquery trimesh open3d scipy \
-    wandb tqdm pyyaml
+# ── 2. Standard deps (pyproject.toml) ─────────────────────────────────────────
+echo "[2/4] Installing deps from pyproject.toml ..."
+uv sync --no-install-project
 
-echo "[2/3] Verifying GPU access..."
-python -c "
+# ── 3. Packages that need special build flags ──────────────────────────────────
+echo "[3/4] Installing pytorch3d, cadquery (git), flash-attn ..."
+
+# pytorch3d: git-only; --no-deps avoids re-resolving torch/numpy which are already present
+uv pip install --no-deps \
+    "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f"
+
+# cadquery: git version has fixes not yet released on PyPI
+uv pip install \
+    "git+https://github.com/CadQuery/cadquery@e99a15df3cf6a88b69101c405326305b5db8ed94"
+
+# flash-attn: needs torch CUDA headers visible at build time
+uv pip install flash-attn==2.7.2.post1 --no-build-isolation
+
+# ── GPU sanity check ──────────────────────────────────────────────────────────
+uv run python - <<'EOF'
 import torch
 n = torch.cuda.device_count()
-print(f'  {n} GPU(s) found')
+if n == 0:
+    print("  WARNING: no CUDA GPUs found")
 for i in range(n):
-    props = torch.cuda.get_device_properties(i)
-    print(f'  GPU {i}: {props.name}  {props.total_memory // 1024**3} GB')
-"
+    p = torch.cuda.get_device_properties(i)
+    print(f"  GPU {i}: {p.name}  {p.total_memory // 1024**3} GB")
+EOF
 
-# ---------- Data ----------
-echo "[3/3] Checking data..."
-if [[ ! -d "$REPO_DIR/data/cad-recode-v1.5" ]]; then
-    echo "  data/cad-recode-v1.5 not found."
-    if [[ "${1:-}" == "--data-from-hf" ]]; then
-        echo "  Downloading from HuggingFace..."
-        python -c "
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id='filaPro/cad-recode', repo_type='dataset',
-                  local_dir='./data/cad-recode-v1.5')
-"
-    else
-        echo "  → Copy your data directory to $REPO_DIR/data/"
-        echo "    or run:  bash scripts/setup.sh --data-from-hf"
-    fi
+# ── 4. Data + checkpoint (optional) ───────────────────────────────────────────
+if [[ "${1:-}" == "--data" ]]; then
+    echo "[4/4] Downloading checkpoint and mesh data from HuggingFace ..."
+    huggingface-cli download maksimko123/cadrille \
+        --repo-type model   --local-dir checkpoints/cadrille-sft
+    huggingface-cli download maksimko123/deepcad_test_mesh \
+        --repo-type dataset --local-dir data/deepcad_test_mesh
+    huggingface-cli download maksimko123/fusion360_test_mesh \
+        --repo-type dataset --local-dir data/fusion360_test_mesh
+    echo "[4/4] Data download complete."
 else
-    python -c "
-import pickle, os
-path = 'data/cad-recode-v1.5/train.pkl'
-with open(path, 'rb') as f: d = pickle.load(f)
-print(f'  train split: {len(d)} samples')
-path = 'data/cad-recode-v1.5/val.pkl'
-with open(path, 'rb') as f: d = pickle.load(f)
-print(f'  val   split: {len(d)} samples')
-"
+    echo "[4/4] Skipping data download  (re-run with --data to download from HuggingFace)"
 fi
 
 echo ""
-echo "=== Setup complete ==="
-echo "Run SFT : bash scripts/run_sft.sh"
-echo "Run RL  : bash scripts/run_rl.sh --checkpoint-path <sft-checkpoint>"
+echo "Setup complete."
+echo "  Train : uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1"
+echo "  Resume: uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1 \\"
+echo "              --checkpoint-path checkpoints/cadrille-rl-v1/checkpoint-<N>"
