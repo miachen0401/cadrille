@@ -30,55 +30,44 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 
 ### Quick Start — RL Training on a Remote VM
 
-The fastest path to running RL on Lambda, RunPod, Vast.ai, or any bare GPU box:
+**Option A: Docker (recommended)**
 
 ```bash
-# 1. Clone
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
+docker build -t cadrille .
 
-# 2. System libs (needed by CadQuery)
-apt-get install -y libgl1 libglib2.0-0
-
-# 3. Python deps
-pip install uv
-UV_SYSTEM_PYTHON=1 uv pip install torch==2.5.1 torchvision==0.20.1 \
-    --index-url https://download.pytorch.org/whl/cu124
-UV_SYSTEM_PYTHON=1 uv pip install \
-    transformers==4.50.3 accelerate==0.34.2 qwen-vl-utils==0.0.10 \
-    trimesh==4.5.3 manifold3d open3d scipy==1.14.1 \
-    wandb tqdm pyyaml cadquery-ocp==7.7.2 cadquery==2.4.0
-
-# flash-attn prebuilt wheel (torch 2.5 + CUDA 12 + Python 3.12)
-UV_SYSTEM_PYTHON=1 uv pip install \
-    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"
-
-# pytorch3d — build once (~10 min), needed for point cloud encoder
-MAX_JOBS=$(nproc) FORCE_CUDA=1 pip install \
-    git+https://github.com/facebookresearch/pytorch3d.git
-
-# 4. Download checkpoint + data (HF login avoids rate limits)
+# Download checkpoint + data once (to a local directory mounted into the container)
 huggingface-cli login
 huggingface-cli download maksimko123/cadrille \
-    --repo-type model --local-dir ./checkpoints/cadrille-sft
+    --repo-type model   --local-dir ./checkpoints/cadrille-sft
 huggingface-cli download maksimko123/deepcad_test_mesh \
     --repo-type dataset --local-dir ./data/deepcad_test_mesh
 huggingface-cli download maksimko123/fusion360_test_mesh \
     --repo-type dataset --local-dir ./data/fusion360_test_mesh
 
-# 5. Train
-wandb login
-CUDA_LAUNCH_BLOCKING=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
+# Train
+docker run --gpus all --rm \
+    -v $(pwd)/data:/workspace/data \
+    -v $(pwd)/checkpoints:/workspace/checkpoints \
+    cadrille \
+    python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
 
-# 6. Resume after crash
-CUDA_LAUNCH_BLOCKING=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1 \
-    --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-5000
+# Resume after crash / session end
+docker run --gpus all --rm \
+    -v $(pwd)/data:/workspace/data \
+    -v $(pwd)/checkpoints:/workspace/checkpoints \
+    cadrille \
+    python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1 \
+        --checkpoint-path /workspace/checkpoints/cadrille-rl-v1/checkpoint-5000
+```
 
-# 7. 8× GPU (torchrun)
-CUDA_LAUNCH_BLOCKING=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-torchrun --nproc_per_node=8 rl/train.py \
-    --config configs/rl/h100x8.yaml --run-name cadrille-rl-v1
+**Option B: Bare metal (uv)**
+
+```bash
+git clone https://github.com/miachen0401/cadrille.git && cd cadrille
+huggingface-cli login && wandb login
+bash scripts/setup.sh --data    # installs all deps + downloads checkpoint + mesh data
+uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
 ```
 
 Config by GPU:
@@ -89,27 +78,24 @@ Config by GPU:
 | ~40 GB (A100 40G) | `configs/rl/a100.yaml` |
 | ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` |
 
-> `CUDA_LAUNCH_BLOCKING=1` synchronises CUDA ops to give accurate error tracebacks. Drop it once the run is confirmed stable.
+For 8× GPU: replace `python` with `torchrun --nproc_per_node=8` and use `configs/rl/h100x8.yaml`.
 
 ---
 
 ### Installation
 
-**Option 1: pip**
+Dependencies are declared in `pyproject.toml` and managed with [uv](https://github.com/astral-sh/uv).
+Three packages (`pytorch3d`, `cadquery`-from-git, `flash-attn`) need special build flags and are handled by `scripts/setup.sh` and the Dockerfiles.
+
+**Docker** — see Quick Start above.
+
+**Bare metal**
 ```bash
-pip install -r requirements.txt
+bash scripts/setup.sh           # deps only
+bash scripts/setup.sh --data    # deps + download checkpoint + data
 ```
 
-**Option 2: Docker** (recommended for reproducibility)
-```bash
-docker build -f Dockerfile -t cadrille-research .
-docker run --gpus all -it cadrille-research bash
-```
-
-**Option 3: Google Colab**
-
-Open `colab.ipynb`. Cells [1]–[7] set up the environment; cell [8] starts RL training.
-GPU is auto-detected (H100 / A100 40 GB / A100 80 GB).
+**Google Colab** — open `colab.ipynb`. Cells [1]–[7] set up the environment; cell [8] starts RL training. GPU is auto-detected (H100 / A100 40 GB / A100 80 GB).
 
 ---
 
