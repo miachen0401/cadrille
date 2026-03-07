@@ -22,6 +22,7 @@ dependencies = [
     "manifold3d==3.0.0",
     "open3d",
     "scipy==1.14.1",
+    "scikit-image",
     # Utilities
     "wandb",
     "tqdm",

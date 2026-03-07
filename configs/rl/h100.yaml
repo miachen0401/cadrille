@@ -37,8 +37,7 @@ top_N: 4
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
-batch_size: 6                 # 6 prompt × G=16 rollouts per step; matches paper default
-                              # batch_size>1 multiplies peak memory by N (OOM at 80 GB)
+batch_size: 4                 # 1 prompt × G=16 rollouts; batch_size>1 causes OOM at 80 GB
 max_new_tokens: 600           # 600 tokens covers most CadQuery scripts; increase to 1024
                               # if the model truncates long outputs
 reward_workers: 8
@@ -67,7 +66,7 @@ eval_steps: 500
 # save_steps=500  → checkpoint every ~1 h on A100 80G; safe for Colab session timeouts.
 # save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on Drive. Increase if Drive has space.
 log_steps: 10
-save_steps: 500
+save_steps: 300
 save_total_limit: 10
 
 # W&B
