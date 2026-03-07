@@ -35,7 +35,7 @@ from cadrille import Cadrille
 from rl.config import load_yaml, resolve_args
 from rl.dataset import MeshDataset, RLDataset, DPODataset
 from rl.eval import load_val_examples
-from rl.reward import init_eval_pool
+from rl.reward import init_eval_pool, init_reward_pool
 from rl.algorithms.cppo import train_cppo
 from rl.algorithms.dpo import train_dpo
 
@@ -322,9 +322,22 @@ def train(args, cfg_to_save=None):
         if val_examples:
             init_eval_pool(n_workers=getattr(args, 'eval_workers', 2))
 
+        # Start warm reward pool — eliminates per-rollout Python startup overhead.
+        init_reward_pool(n_workers=getattr(args, 'reward_workers', 8))
+
     if args.mode == 'cppo':
         if args.data_dir:
-            dataset = MeshDataset(args.data_dir, noise_scale=0.01)
+            modality = getattr(args, 'train_modality', 'img')
+            dataset = MeshDataset(args.data_dir, noise_scale=0.01, modality=modality)
+            data_dir2 = getattr(args, 'data_dir2', None)
+            if data_dir2 and os.path.isdir(data_dir2):
+                from rl.dataset import MeshDataset as _MD
+                dataset2 = _MD(data_dir2, noise_scale=0.01, modality=modality)
+                # Combine by merging example lists directly
+                dataset.examples = dataset.examples + dataset2.examples
+                if rank == 0:
+                    print(f'Combined dataset: {len(dataset)} examples '
+                          f'({len(dataset) - len(dataset2)} + {len(dataset2)})')
         elif args.hard_examples_pkl:
             dataset = RLDataset(args.hard_examples_pkl)
         else:
