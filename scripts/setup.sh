@@ -51,12 +51,39 @@ EOF
 # ── 4. Data + checkpoint (optional) ───────────────────────────────────────────
 if [[ "${1:-}" == "--data" ]]; then
     echo "[4/4] Downloading checkpoint and mesh data from HuggingFace ..."
+
+    # SFT checkpoint — small number of files, no rate-limit issue
     huggingface-cli download maksimko123/cadrille \
-        --repo-type model   --local-dir checkpoints/cadrille-sft
-    huggingface-cli download maksimko123/deepcad_test_mesh \
-        --repo-type dataset --local-dir data/deepcad_test_mesh
-    huggingface-cli download maksimko123/fusion360_test_mesh \
-        --repo-type dataset --local-dir data/fusion360_test_mesh
+        --repo-type model --local-dir checkpoints/cadrille-sft
+
+    # Mesh datasets — downloaded as a single zip to avoid HF's 5000 req/5min
+    # rate limit. huggingface-cli download resolves every file individually before
+    # downloading; deepcad_test_mesh has 8048 files which blows past the limit.
+    # hf_hub_download fetches a single zip file (1 resolver request).
+    uv run python - <<'EOF'
+import os, zipfile
+from huggingface_hub import hf_hub_download
+
+def download_zip(repo_id, zip_name, out_dir):
+    n_existing = len([f for f in os.listdir(out_dir) if f.endswith('.stl')]) \
+                 if os.path.isdir(out_dir) else 0
+    if n_existing > 0:
+        print(f"  {out_dir}: {n_existing} STL files already present, skipping")
+        return
+    print(f"  Downloading {zip_name} from {repo_id} ...")
+    local_zip = hf_hub_download(repo_id=repo_id, filename=zip_name,
+                                repo_type="dataset", local_dir="data/_zips")
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"  Extracting → {out_dir} ...")
+    with zipfile.ZipFile(local_zip) as zf:
+        zf.extractall(out_dir)
+    n = len([f for f in os.listdir(out_dir) if f.endswith('.stl')])
+    print(f"  {out_dir}: {n} STL files extracted")
+
+download_zip("Hula0401/deepCAD_test",   "deepcad_test_mesh.zip",   "data/deepcad_test_mesh")
+download_zip("Hula0401/fusion360_test_mesh",  "fusion360_test_mesh.zip", "data/fusion360_test_mesh")
+EOF
+
     echo "[4/4] Data download complete."
 else
     echo "[4/4] Skipping data download  (re-run with --data to download from HuggingFace)"

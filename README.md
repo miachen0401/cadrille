@@ -36,23 +36,23 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 docker build -t cadrille .
 
-# Download checkpoint + datasets via the container.
-# Uses git lfs (batch protocol) — avoids HuggingFace resolver rate limits on large datasets.
-docker run --rm \
-    -e HF_TOKEN=<your_hf_token> \
-    -v $(pwd)/checkpoints:/workspace/checkpoints \
-    -v $(pwd)/data:/workspace/data \
-    cadrille \
-    bash -c "
-      hf download maksimko123/cadrille --repo-type model --local-dir /workspace/checkpoints/cadrille-sft &&
-      git config --global credential.helper store &&
-      echo 'https://user:\${HF_TOKEN}@huggingface.co' > ~/.git-credentials &&
-      cd /workspace/data &&
-      GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/deepcad_test_mesh &&
-      cd deepcad_test_mesh && git lfs pull && cd .. &&
-      GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/fusion360_test_mesh &&
-      cd fusion360_test_mesh && git lfs pull
-    "
+# Download checkpoint + data once (mounted into the container as volumes)
+# Mesh datasets are single zip files — avoids HF's 5000-file resolver rate limit
+huggingface-cli login
+huggingface-cli download maksimko123/cadrille \
+    --repo-type model --local-dir ./checkpoints/cadrille-sft
+python - <<'EOF'
+import os, zipfile
+from huggingface_hub import hf_hub_download
+for repo, name, out in [
+    ("Hula0401/deepCAD_test",  "deepcad_test_mesh.zip",  "data/deepcad_test_mesh"),
+    ("Hula0401/fusion360_test_mesh","fusion360_test_mesh.zip", "data/fusion360_test_mesh"),
+]:
+    z = hf_hub_download(repo_id=repo, filename=name, repo_type="dataset", local_dir="data/_zips")
+    os.makedirs(out, exist_ok=True)
+    zipfile.ZipFile(z).extractall(out)
+    print(f"{out}: {len(os.listdir(out))} files")
+EOF
 
 # Train
 # Note: batch_size=1 is required — higher values OOM on 80 GB during the backward pass.
@@ -121,13 +121,19 @@ bash scripts/setup.sh --data    # deps + download checkpoint + data
 #### Evaluation datasets (required)
 
 ```bash
-# DeepCAD test split — 8,046 STL meshes, used for evaluation only
-GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/deepcad_test_mesh data/deepcad_test_mesh
-cd data/deepcad_test_mesh && git lfs pull && cd ../..
-
-# Fusion360 test split — 1,725 STL meshes, used for evaluation only
-GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/fusion360_test_mesh data/fusion360_test_mesh
-cd data/fusion360_test_mesh && git lfs pull && cd ../..
+# DeepCAD test split — 8,046 STL meshes (single zip, 1 resolver request)
+python - <<'EOF'
+import os, zipfile
+from huggingface_hub import hf_hub_download
+for repo, name, out in [
+    ("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",   "data/deepcad_test_mesh"),
+    ("Hula0401/fusion360_test_mesh",  "fusion360_test_mesh.zip", "data/fusion360_test_mesh"),
+]:
+    z = hf_hub_download(repo_id=repo, filename=name, repo_type="dataset", local_dir="data/_zips")
+    os.makedirs(out, exist_ok=True)
+    zipfile.ZipFile(z).extractall(out)
+    print(f"{out}: {len(os.listdir(out))} files")
+EOF
 ```
 
 #### SFT training dataset
