@@ -36,17 +36,31 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 docker build -t cadrille .
 
-# Download checkpoint + data once (to a local directory mounted into the container)
-huggingface-cli login
-huggingface-cli download maksimko123/cadrille \
-    --repo-type model   --local-dir ./checkpoints/cadrille-sft
-huggingface-cli download maksimko123/deepcad_test_mesh \
-    --repo-type dataset --local-dir ./data/deepcad_test_mesh
-huggingface-cli download maksimko123/fusion360_test_mesh \
-    --repo-type dataset --local-dir ./data/fusion360_test_mesh
+# Download checkpoint + datasets via the container.
+# Uses git lfs (batch protocol) — avoids HuggingFace resolver rate limits on large datasets.
+docker run --rm \
+    -e HF_TOKEN=<your_hf_token> \
+    -v $(pwd)/checkpoints:/workspace/checkpoints \
+    -v $(pwd)/data:/workspace/data \
+    cadrille \
+    bash -c "
+      hf download maksimko123/cadrille --repo-type model --local-dir /workspace/checkpoints/cadrille-sft &&
+      git config --global credential.helper store &&
+      echo 'https://user:\${HF_TOKEN}@huggingface.co' > ~/.git-credentials &&
+      cd /workspace/data &&
+      GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/deepcad_test_mesh &&
+      cd deepcad_test_mesh && git lfs pull && cd .. &&
+      GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/fusion360_test_mesh &&
+      cd fusion360_test_mesh && git lfs pull
+    "
 
 # Train
+# Note: batch_size=1 is required — higher values OOM on 80 GB during the backward pass.
+#       expandable_segments reduces CUDA memory fragmentation.
 docker run --gpus all --rm \
+    -e WANDB_API_KEY=<your_wandb_key> \
+    -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    -v $(pwd):/workspace \
     -v $(pwd)/data:/workspace/data \
     -v $(pwd)/checkpoints:/workspace/checkpoints \
     cadrille \
@@ -54,6 +68,9 @@ docker run --gpus all --rm \
 
 # Resume after crash / session end
 docker run --gpus all --rm \
+    -e WANDB_API_KEY=<your_wandb_key> \
+    -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    -v $(pwd):/workspace \
     -v $(pwd)/data:/workspace/data \
     -v $(pwd)/checkpoints:/workspace/checkpoints \
     cadrille \

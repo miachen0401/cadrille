@@ -32,8 +32,8 @@ ENV PATH="/root/.local/bin:$PATH"
 COPY pyproject.toml .
 RUN uv pip install --system -e . --no-build-isolation
 
-# pytorch3d: git-only; --no-deps avoids re-resolving torch/numpy already present
-RUN uv pip install --system --no-deps \
+# pytorch3d: git-only; --no-build-isolation exposes system torch to setup.py at build time
+RUN uv pip install --system --no-deps --no-build-isolation \
     "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f"
 
 # cadquery: git version has fixes not yet on PyPI
