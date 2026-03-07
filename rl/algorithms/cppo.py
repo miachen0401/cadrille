@@ -432,7 +432,6 @@ def cppo_step(model, optimizer, items, processor, args,
         [prompt_mask_cpu, comp_mask_cpu.long()], dim=1)                  # [B*N, full_len]
     adv_sel = adv_raw.reshape(-1)[flat_idx].unsqueeze(1)                 # [B*N, 1]
 
-    torch.cuda.empty_cache()
     sel_ids     = sel_ids_cpu.to(device)
     full_attn   = full_attn_mask_cpu.to(device)
     comp_mask   = comp_mask_cpu.to(device)
@@ -470,8 +469,9 @@ def cppo_step(model, optimizer, items, processor, args,
         if is_last:
             last_loss = loss.item()
             with torch.no_grad():
-                last_entropy = compute_policy_entropy(
-                    new_out.logits, comp_mask, logits_to_keep).item()
+                if compute_diag:
+                    last_entropy = compute_policy_entropy(
+                        new_out.logits, comp_mask, logits_to_keep).item()
             last_new_lp = new_lp.detach()
 
     # ------------------------------------------------------------------
@@ -616,6 +616,7 @@ def train_cppo(model, optimizer, dataset, processor,
         sampler = None
 
     pbar = tqdm(total=args.max_steps, desc='Dr. CPPO', disable=(rank != 0))
+    last_entropy = float('nan')
     epoch = 0
     while step < args.max_steps:
         if is_distributed:
@@ -661,10 +662,13 @@ def train_cppo(model, optimizer, dataset, processor,
 
             step += 1
             pbar.update(1)
+            e = metrics['train/entropy']
+            if not (e != e):  # update only when not nan
+                last_entropy = e
             pbar.set_postfix(
                 loss=f"{metrics['train/loss']:.3f}",
                 reward=f"{metrics['train/mean_reward']:.2f}",
-                H=f"{metrics['train/entropy']:.2f}")
+                H=f"{last_entropy:.2f}" if not (last_entropy != last_entropy) else "...")
 
             if step % args.log_steps == 0 and rank == 0:
                 lr = optimizer.param_groups[0]['lr']

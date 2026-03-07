@@ -77,8 +77,12 @@ def resolve_args(args, cfg: dict) -> dict:
 
     # Data
     args.data_dir          = cfg.get('data_dir')
+    args.data_dir2         = cfg.get('data_dir2')   # optional second mesh dir (combined with data_dir)
     args.hard_examples_pkl = cfg.get('hard_examples_pkl')
     args.dpo_dataset       = cfg.get('dpo_dataset')
+
+    # Training modality: 'img' (paper default — stable) or 'pc' (unstable per paper)
+    args.train_modality   = cfg.get('train_modality', 'img')
 
     # CPPO hyperparameters (official: G=16, top_N=4, batch_updates=3, max_new_tokens=400)
     args.G                = cfg.get('G', 8)

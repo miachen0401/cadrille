@@ -1,14 +1,8 @@
 # Cadrille RL fine-tuning — single H100 / A100 80 GB
 # Official hyperparameters (Table 11, Cadrille paper): G=16, N=4, lr=3e-5,
 # K_updates=3, eps=0.1, optimizer=AdamW (weight_decay=0.01).
-#
-# Memory breakdown (~72 GB with gradient checkpointing):
-#   Model weights (bf16):                ~4.5 GB
-#   AdamW fp32 optimizer states:         ~9.0 GB
-#   Generation KV cache (G=16, seq=1):  ~20 GB
-#   Backward activations (N=4 seqs):    ~28 GB  (gradient checkpointing halves this)
-#   Buffers / fragmentation headroom:    ~10 GB
-#   (No reference model — Dr. GRPO design saves ~4.5 GB)
+# Paper trains on IMAGES only (8 H100s, effective batch=128).
+# Single-GPU adaptation: img modality, lr scaled to 1e-5 (batch 4 vs paper 16/GPU).
 #
 # Usage: python rl/train.py --config configs/rl/h100.yaml
 #
@@ -22,48 +16,52 @@ mode: cppo
 #   checkpoint_path: /content/models/cadrille-sft
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data — update paths for Colab (e.g. /content/data/deepcad_test_mesh)
-data_dir: ./data/deepcad_test_mesh
+# Data — paper uses 50k DeepCAD + 3k Fusion360 images for RL.
+# With only the test split (~8k), training loops over the same meshes — acceptable
+# for a single-GPU run but download the full train split when possible.
+# Update paths for Colab (e.g. /content/data/deepcad_test_mesh)
+data_dir: ./data/deepcad_test_mesh    # 8,046 STL meshes
+data_dir2: ./data/fusion360_test_mesh # 1,725 STL meshes → combined: 9,771 total
+train_modality: img                   # paper: images only — pc training was unstable
 hard_examples_pkl: null
 dpo_dataset: null
 
-# Training (official hyperparameters — Table 11)
+# Training (paper Table 11, lr scaled for single-GPU batch_size=4 vs paper 16/GPU)
 max_steps: 50000
-lr: 3.0e-5
+lr: 1.0e-5                    # paper: 3e-5 @ batch=16/GPU → 1e-5 @ batch=4 (linear scaling)
 
 # Dr. CPPO official settings
 G: 16
 top_N: 4
 eps_high: 0.1
 eps_low: 0.1
-batch_updates: 3
-batch_size: 4                 # 1 prompt × G=16 rollouts; batch_size>1 causes OOM at 80 GB
-max_new_tokens: 600           # 600 tokens covers most CadQuery scripts; increase to 1024
-                              # if the model truncates long outputs
-reward_workers: 8
+batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
+batch_size: 4
+max_new_tokens: 400           # scripts are 115–220 tokens; 400 is safe ceiling
+reward_workers: 16            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: true
 buffer_sample_size: 1
 buffer_expand_frac: 0.5
 buffer_max_size: 4096
 eval_workers: 2
 eval_timeout: 120.0
-sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=1
+sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=4
 
 # DPO (unused)
 beta: 0.3
 dpo_epochs_per_round: 10
 
-# Validation — 50 DeepCAD + 50 Fusion360, pc only (~5-10 min per pass on H100)
+# Validation — 50 DeepCAD + 50 Fusion360, img modality (matches training)
 # Update paths for Colab. Set val_fusion360_dir: null if data unavailable.
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
-val_modalities:        pc
-eval_steps: 500
+val_modalities:        img
+eval_steps: 100
 
 # Logging & checkpoints
-# save_steps=500  → checkpoint every ~1 h on A100 80G; safe for Colab session timeouts.
+# save_steps=300  → checkpoint every ~1 h on A100 80G; safe for Colab session timeouts.
 # save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on Drive. Increase if Drive has space.
 log_steps: 10
 save_steps: 300

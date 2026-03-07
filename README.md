@@ -118,21 +118,83 @@ bash scripts/setup.sh --data    # deps + download checkpoint + data
 
 ### Data
 
-Download the mesh datasets from HuggingFace (each is a separate repo):
+#### Evaluation datasets (required)
 
 ```bash
-# DeepCAD test split — used as RL training prompts + evaluation
-huggingface-cli download maksimko123/deepcad_test_mesh \
-    --repo-type dataset --local-dir data/deepcad_test_mesh
+# DeepCAD test split — 8,046 STL meshes, used for evaluation only
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/deepcad_test_mesh data/deepcad_test_mesh
+cd data/deepcad_test_mesh && git lfs pull && cd ../..
 
-# Fusion360 test split — cross-dataset validation
-huggingface-cli download maksimko123/fusion360_test_mesh \
-    --repo-type dataset --local-dir data/fusion360_test_mesh
+# Fusion360 test split — 1,725 STL meshes, used for evaluation only
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/maksimko123/fusion360_test_mesh data/fusion360_test_mesh
+cd data/fusion360_test_mesh && git lfs pull && cd ../..
+```
 
-# CAD-Recode v1.5 — for SFT training (~100k CadQuery scripts + STL meshes)
-huggingface-cli download filapro/cad-recode-v1.5 \
-    --repo-type dataset --local-dir data/cad-recode-v1.5
-python data/cadrecode2mesh.py   # convert .py → .stl for the SFT dataset
+#### SFT training dataset
+
+```bash
+# CAD-Recode v1.5 — ~100k CadQuery scripts + STL meshes
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/filapro/cad-recode-v1.5 data/cad-recode-v1.5
+cd data/cad-recode-v1.5 && git lfs pull && cd ../..
+python data/cadrecode2mesh.py   # convert .py → .stl
+```
+
+#### RL training datasets — gap vs paper
+
+The paper trains RL on **50k DeepCAD train-split + 3k Fusion360 train-split meshes** (images only).
+The authors have not released these as a public dataset. The table below shows the current gap and how to close it.
+
+| | Paper | Current repo | Gap |
+|---|---|---|---|
+| DeepCAD RL training | 50,000 (train split) | 0 — test split used for eval only | Large |
+| Fusion360 RL training | 3,000 (train split) | 0 — test split used for eval only | Small |
+| **Total RL training samples** | **53,000** | **0 (requires one of the options below)** | **5.4×** |
+| Training modality | Images | Images (✓ fixed) | None |
+| Test-set contamination | None | None (✓ fixed) | None |
+
+**Option A — DeepCAD from source (closest to paper, ~170k train models)**
+
+The original DeepCAD dataset is hosted by Columbia University. It contains CAD sequences in JSON format; these must be reconstructed to STL using Open Cascade Technology (OCC).
+
+```bash
+# 1. Download (~1.4 GB compressed)
+wget http://www.cs.columbia.edu/cg/deepcad/data.tar -P data/
+tar -xf data/data.tar -C data/            # extracts to data/cad_json/{train,test,val}/
+
+# 2. Convert JSON CAD sequences → STL meshes via OCC
+#    (script not yet implemented — see data/deepcad2mesh.py TODO below)
+python data/deepcad2mesh.py --split train --out data/deepcad_train_mesh
+
+# 3. Update config
+#    data_dir:  ./data/deepcad_train_mesh
+#    data_dir2: null   (Fusion360 train not yet available)
+```
+
+`data/deepcad2mesh.py` needs to be written. It must parse DeepCAD's sketch-extrude JSON format and reconstruct each model using OCC/CadQuery, then export to STL. The DeepCAD reconstruction pipeline is described in the original paper (Wu et al., ICCV 2021).
+
+**Option B — CAD-Recode v1.5 as RL training data (easiest, ~100k STL)**
+
+`cad-recode-v1.5` (already downloaded for SFT) contains ~100k STL meshes generated from synthetic CadQuery scripts. These are different shapes from the paper's DeepCAD train split but provide sufficient volume for stable RL training.
+
+```bash
+# Assumes cad-recode-v1.5 is already downloaded (see SFT section above)
+# STL files are at data/cad-recode-v1.5/**/*.stl after cadrecode2mesh.py runs
+
+# Update config:
+#   data_dir: ./data/cad-recode-v1.5
+```
+
+**Option C — Use what is already downloaded (9,771 STL, quick start)**
+
+The 8,046 DeepCAD test meshes + 1,725 Fusion360 test meshes can be used for RL training
+as long as they are **not** also used for evaluation. Set validation to a held-out subset
+or a separate split. This is adequate for verifying training stability but falls 5.4× short
+of the paper's training volume.
+
+```bash
+# Already downloaded — no extra steps needed.
+# Configs already set: data_dir + data_dir2 point to the two test-mesh dirs,
+# val_deepcad_dir / val_fusion360_dir sample disjoint 50-example subsets for eval.
 ```
 
 ---

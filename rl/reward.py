@@ -237,6 +237,108 @@ def _cache_set(key: str, value: Tuple) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Warm reward process pool  (spawn, pre-imported deps, training hot path)
+# ---------------------------------------------------------------------------
+# Eliminates per-call Python startup + cadquery/trimesh import overhead (~1-2s each).
+# Uses spawn (not fork) so CUDA context in parent is never inherited by workers.
+
+_reward_pool: Optional[ProcessPoolExecutor] = None
+
+
+def _reward_worker_init() -> None:
+    """Pre-import heavy deps once per worker at pool startup."""
+    import trimesh          # noqa: F401
+    import cadquery         # noqa: F401
+    try:
+        from scipy.spatial import cKDTree  # noqa: F401
+    except ImportError:
+        pass
+
+
+def _reward_worker_run(
+    code_str: str,
+    gt_mesh_path: str,
+    timeout: float,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Run CadQuery + IoU inside a warm worker process."""
+    import signal
+    import io
+    import warnings
+    import numpy as np
+    import trimesh
+    import cadquery as cq  # noqa: F401
+
+    def _on_alarm(signum, frame):
+        raise TimeoutError(f'CadQuery exceeded {timeout:.0f}s')
+
+    signal.signal(signal.SIGALRM, _on_alarm)
+    signal.alarm(max(1, int(timeout) + 2))
+    try:
+        # Compile first to catch SyntaxErrors/SyntaxWarnings without exec noise.
+        try:
+            code_obj = compile(code_str, '<string>', 'exec')
+        except SyntaxError:
+            signal.alarm(0)
+            return None, None
+        g = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            exec(code_obj, g)
+        compound = g['r'].val()
+        vertices, faces = compound.tessellate(0.001, 0.1)
+        pred_mesh = trimesh.Trimesh([(v.x, v.y, v.z) for v in vertices], faces)
+        assert len(pred_mesh.faces) > 2
+        buf = trimesh.exchange.stl.export_stl(pred_mesh)
+        pred_mesh = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
+        center = (pred_mesh.bounds[0] + pred_mesh.bounds[1]) / 2.0
+        pred_mesh.apply_translation(-center)
+        extent = np.max(pred_mesh.extents)
+        if extent > 1e-7:
+            pred_mesh.apply_scale(1.0 / extent)
+        pred_mesh.apply_transform(
+            trimesh.transformations.translation_matrix([0.5, 0.5, 0.5]))
+        gt_mesh = trimesh.load_mesh(gt_mesh_path)
+        iou = None
+        try:
+            intersection_volume = 0.0
+            for gt_i in gt_mesh.split():
+                for pred_i in pred_mesh.split():
+                    sect = gt_i.intersection(pred_i)
+                    intersection_volume += sect.volume if sect is not None else 0.0
+            gt_vol  = sum(m.volume for m in gt_mesh.split())
+            pred_vol = sum(m.volume for m in pred_mesh.split())
+            union_vol = gt_vol + pred_vol - intersection_volume
+            if union_vol > 0:
+                iou = float(intersection_volume / union_vol)
+        except Exception:
+            pass
+        signal.alarm(0)
+        return iou, None
+    except Exception:
+        signal.alarm(0)
+        return None, None
+
+
+def init_reward_pool(n_workers: int = 8) -> None:
+    """Spawn the warm reward process pool (call once at training startup).
+
+    Workers pre-import cadquery/trimesh so per-call overhead is just computation,
+    not Python startup + library import (~1-2s savings per rollout).
+    Idempotent: safe to call multiple times.
+    """
+    global _reward_pool
+    if _reward_pool is not None:
+        return
+    ctx = multiprocessing.get_context('spawn')
+    _reward_pool = ProcessPoolExecutor(
+        max_workers=n_workers,
+        mp_context=ctx,
+        initializer=_reward_worker_init,
+    )
+    print(f'[reward pool] Started {n_workers} warm worker(s) (spawn)', flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Fix 2+3: Warm eval process pool  (spawn, nice=10, pre-imported deps)
 # ---------------------------------------------------------------------------
 
@@ -273,6 +375,7 @@ def _eval_worker_run(
     """
     import signal
     import io
+    import warnings
     import numpy as np
     import trimesh
     import cadquery as cq  # noqa: F401 (used implicitly via exec)
@@ -286,8 +389,15 @@ def _eval_worker_run(
     signal.alarm(max(1, int(timeout) + 2))
 
     try:
+        try:
+            code_obj = compile(code_str, '<string>', 'exec')
+        except SyntaxError:
+            signal.alarm(0)
+            return None, None
         g = {}
-        exec(code_str, g)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            exec(code_obj, g)
         compound = g['r'].val()
 
         vertices, faces = compound.tessellate(0.001, 0.1)
@@ -479,11 +589,45 @@ def compute_rewards_parallel(
 ) -> List[float]:
     """Compute rewards for multiple codes in parallel.
 
-    Uses ThreadPoolExecutor: each thread spawns a subprocess, achieving
-    true parallelism even under the GIL. Thread-level concurrency is
-    sufficient because the actual computation runs in subprocesses.
+    Uses the warm reward pool if init_reward_pool() was called — eliminates
+    per-call Python startup + cadquery/trimesh import overhead (~1-2s each).
+    Falls back to ThreadPoolExecutor + fresh subprocesses if pool is unavailable
+    or if a worker crashes (BrokenProcessPool). Automatically restarts the pool
+    after a crash so future batches are warm again.
     """
+    from concurrent.futures.process import BrokenProcessPool
+
     assert len(codes) == len(gt_paths), "codes and gt_paths must have the same length"
+
+    global _reward_pool
+    if _reward_pool is not None:
+        try:
+            futures = [
+                _reward_pool.submit(_reward_worker_run, code, path, timeout)
+                for code, path in zip(codes, gt_paths)
+            ]
+            results = []
+            for f in futures:
+                try:
+                    iou, _ = f.result(timeout=timeout + 5)
+                    results.append(-10.0 if iou is None else max(0.0, float(iou) * 10.0))
+                except BrokenProcessPool:
+                    raise  # bubble up to outer handler
+                except Exception:
+                    results.append(-10.0)
+            return results
+        except BrokenProcessPool:
+            print('[reward pool] worker crashed — restarting pool, '
+                  'falling back to subprocess for this batch', flush=True)
+            try:
+                _reward_pool.shutdown(wait=False)
+            except Exception:
+                pass
+            _reward_pool = None
+            init_reward_pool(n_workers=workers)  # warm pool for next batch
+            # fall through to subprocess for this batch
+
+    # Fallback: fresh subprocess per call
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(compute_reward, code, path, timeout)

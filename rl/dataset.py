@@ -47,12 +47,20 @@ class MeshDataset:
 
     Primary dataset for RL fine-tuning on real handcrafted meshes
     (e.g. DeepCAD train, Fusion360 train).
+
+    modality='pc'  — point cloud input (paper: unstable for RL)
+    modality='img' — 4-view rendered image input (paper default for RL)
+
+    Image mode is lazy: meshes are rendered on first __getitem__ access,
+    so startup is instant regardless of dataset size.
     """
 
     def __init__(self, data_dir: str, n_points: int = 256,
-                 noise_scale: float = 0.01, size: int = None):
-        import trimesh
-        from dataset import mesh_to_point_cloud
+                 noise_scale: float = 0.01, size: int = None,
+                 modality: str = 'img'):
+        self.modality = modality
+        self.noise_scale = noise_scale
+        self.n_points = n_points
 
         stl_files = sorted(glob(os.path.join(data_dir, '**', '*.stl'), recursive=True))
         if size is not None:
@@ -60,30 +68,52 @@ class MeshDataset:
             rng.shuffle(stl_files)
             stl_files = stl_files[:size]
 
-        self.examples = []
-        print(f'Loading {len(stl_files)} meshes from {data_dir} ...')
-        for path in tqdm(stl_files, desc='mesh→pc'):
-            try:
-                mesh = trimesh.load(path)
-                pc = mesh_to_point_cloud(mesh, n_points)
-                pc = (pc - 0.5) * 2
-                if noise_scale > 0:
-                    pc = pc + np.random.randn(*pc.shape).astype(np.float32) * noise_scale
-                self.examples.append({
-                    'point_cloud': pc,
+        if modality == 'img':
+            # Lazy image mode — store paths only, render on demand.
+            # No upfront cost; rendering takes ~0.2s per mesh at access time.
+            self.examples = [
+                {
                     'description': 'Generate cadquery code',
-                    'file_name': os.path.splitext(os.path.basename(path))[0],
-                    'gt_mesh_path': path,
-                })
-            except Exception:
-                pass
-        print(f'  → loaded {len(self.examples)} valid examples')
+                    'file_name': os.path.splitext(os.path.basename(p))[0],
+                    'gt_mesh_path': p,
+                }
+                for p in stl_files
+            ]
+            print(f'MeshDataset (img): {len(self.examples)} meshes from {data_dir}')
+        else:
+            # Point-cloud mode — load and process all meshes at init.
+            import trimesh
+            from dataset import mesh_to_point_cloud
+
+            self.examples = []
+            print(f'Loading {len(stl_files)} meshes from {data_dir} ...')
+            for path in tqdm(stl_files, desc='mesh→pc'):
+                try:
+                    mesh = trimesh.load(path)
+                    pc = mesh_to_point_cloud(mesh, n_points)
+                    pc = (pc - 0.5) * 2
+                    if noise_scale > 0:
+                        pc = pc + np.random.randn(*pc.shape).astype(np.float32) * noise_scale
+                    self.examples.append({
+                        'point_cloud': pc,
+                        'description': 'Generate cadquery code',
+                        'file_name': os.path.splitext(os.path.basename(path))[0],
+                        'gt_mesh_path': path,
+                    })
+                except Exception:
+                    pass
+            print(f'  → loaded {len(self.examples)} valid examples')
 
     def __len__(self) -> int:
         return len(self.examples)
 
     def __getitem__(self, index: int) -> dict:
-        return self.examples[index]
+        ex = self.examples[index]
+        if self.modality == 'img':
+            item = dict(ex)
+            item.update(render_img(ex['gt_mesh_path']))
+            return item
+        return ex
 
 
 class RLDataset:
