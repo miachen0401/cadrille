@@ -30,70 +30,51 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 
 ### Quick Start — RL Training on a Remote VM
 
-**Option A: Docker (recommended)**
+**Option A: Bare metal (recommended)**
+
+```bash
+git clone https://github.com/miachen0401/cadrille.git && cd cadrille
+huggingface-cli login && wandb login
+
+# Install deps + download checkpoint + all mesh data (~1.8 GB total)
+# Downloads: cadrille-sft checkpoint, deepcad_train_mesh, deepcad_test_mesh, fusion360_test_mesh
+bash scripts/setup.sh --data
+
+# Train (pick config for your GPU — see table below)
+python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
+
+# Resume after crash / session timeout
+python rl/train.py --config configs/rl/h100.yaml \
+    --run-name cadrille-rl-v1 \
+    --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-5000
+```
+
+**Option B: Docker**
 
 ```bash
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 docker build -t cadrille .
 
-# Download checkpoint + data once (mounted into the container as volumes)
-# Mesh datasets are single zip files — avoids HF's 5000-file resolver rate limit
+# Download data outside the container (mounted as volumes)
 huggingface-cli login
-huggingface-cli download maksimko123/cadrille \
-    --repo-type model --local-dir ./checkpoints/cadrille-sft
-python - <<'EOF'
-import os, zipfile
-from huggingface_hub import hf_hub_download
-for repo, name, out in [
-    ("Hula0401/deepCAD_test",  "deepcad_test_mesh.zip",  "data/deepcad_test_mesh"),
-    ("Hula0401/fusion360_test_mesh","fusion360_test_mesh.zip", "data/fusion360_test_mesh"),
-]:
-    z = hf_hub_download(repo_id=repo, filename=name, repo_type="dataset", local_dir="data/_zips")
-    os.makedirs(out, exist_ok=True)
-    zipfile.ZipFile(z).extractall(out)
-    print(f"{out}: {len(os.listdir(out))} files")
-EOF
+bash scripts/setup.sh --data
 
 # Train
-# Note: batch_size=1 is required — higher values OOM on 80 GB during the backward pass.
-#       expandable_segments reduces CUDA memory fragmentation.
 docker run --gpus all --rm \
     -e WANDB_API_KEY=<your_wandb_key> \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     -v $(pwd):/workspace \
-    -v $(pwd)/data:/workspace/data \
-    -v $(pwd)/checkpoints:/workspace/checkpoints \
     cadrille \
     python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
-
-# Resume after crash / session end
-docker run --gpus all --rm \
-    -e WANDB_API_KEY=<your_wandb_key> \
-    -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    -v $(pwd):/workspace \
-    -v $(pwd)/data:/workspace/data \
-    -v $(pwd)/checkpoints:/workspace/checkpoints \
-    cadrille \
-    python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1 \
-        --checkpoint-path /workspace/checkpoints/cadrille-rl-v1/checkpoint-5000
-```
-
-**Option B: Bare metal (uv)**
-
-```bash
-git clone https://github.com/miachen0401/cadrille.git && cd cadrille
-huggingface-cli login && wandb login
-bash scripts/setup.sh --data    # installs all deps + downloads checkpoint + mesh data
-uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
 ```
 
 Config by GPU:
 
-| VRAM | Config |
-|------|--------|
-| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` |
-| ~40 GB (A100 40G) | `configs/rl/a100.yaml` |
-| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` |
+| VRAM | Config | G | Notes |
+|------|--------|---|-------|
+| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16 | Full paper hyperparameters |
+| ~40 GB (A100 40G) | `configs/rl/a100.yaml` | 8 | Adam8bit |
+| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4 | Sequential generation |
 
 For 8× GPU: replace `python` with `torchrun --nproc_per_node=8` and use `configs/rl/h100x8.yaml`.
 
@@ -118,89 +99,41 @@ bash scripts/setup.sh --data    # deps + download checkpoint + data
 
 ### Data
 
-#### Evaluation datasets (required)
+All datasets are downloaded automatically by `bash scripts/setup.sh --data`.
+Each is a single zip file on HuggingFace (avoids the 5000-file resolver rate limit).
+
+| Dataset | HuggingFace | Size | Purpose |
+|---------|-------------|------|---------|
+| `deepcad_train_mesh` | `Hula0401/deepcad_train_mesh` | ~1.1 GB | RL training (84k STLs) |
+| `deepcad_test_mesh` | `Hula0401/deepCAD_test` | ~413 MB | Eval (8k STLs) |
+| `fusion360_test_mesh` | `Hula0401/fusion360_test_mesh` | ~126 MB | Eval (1.7k STLs) |
+| `cadrille-sft` checkpoint | `maksimko123/cadrille` | ~4.5 GB | RL starting point |
+
+All STL meshes are pre-normalised to [0, 1]³. No preprocessing needed after download.
+
+#### How `deepcad_train_mesh` was created
+
+The DeepCAD dataset from Columbia University (~170k models in sketch-extrude JSON format)
+was reconstructed to STL using `tools/deepcad2mesh.py` (OCC via cadquery-ocp):
 
 ```bash
-# DeepCAD test split — 8,046 STL meshes (single zip, 1 resolver request)
-python - <<'EOF'
-import os, zipfile
-from huggingface_hub import hf_hub_download
-for repo, name, out in [
-    ("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",   "data/deepcad_test_mesh"),
-    ("Hula0401/fusion360_test_mesh",  "fusion360_test_mesh.zip", "data/fusion360_test_mesh"),
-]:
-    z = hf_hub_download(repo_id=repo, filename=name, repo_type="dataset", local_dir="data/_zips")
-    os.makedirs(out, exist_ok=True)
-    zipfile.ZipFile(z).extractall(out)
-    print(f"{out}: {len(os.listdir(out))} files")
-EOF
+wget http://www.cs.columbia.edu/cg/deepcad/data.tar -P data/
+tar -xf data/data.tar -C data/          # → data/cad_json/{train,test,val}/
+python tools/deepcad2mesh.py --split train --out data/deepcad_train_mesh --workers 16
 ```
 
-#### SFT training dataset
+**Challenges:** ~50% of models fail reconstruction (degenerate sketches, self-intersecting
+extrusions, OCC Boolean failures). Conversion of 170k models takes ~6–12 hours on 16 cores.
+The resulting 84k valid STLs are the ones we uploaded to HuggingFace — **no need to re-run
+this on a fresh VM**.
+
+#### SFT training dataset (optional — only for SFT from scratch)
 
 ```bash
 # CAD-Recode v1.5 — ~100k CadQuery scripts + STL meshes
 GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/filapro/cad-recode-v1.5 data/cad-recode-v1.5
 cd data/cad-recode-v1.5 && git lfs pull && cd ../..
-python data/cadrecode2mesh.py   # convert .py → .stl
-```
-
-#### RL training datasets — gap vs paper
-
-The paper trains RL on **50k DeepCAD train-split + 3k Fusion360 train-split meshes** (images only).
-The authors have not released these as a public dataset. The table below shows the current gap and how to close it.
-
-| | Paper | Current repo | Gap |
-|---|---|---|---|
-| DeepCAD RL training | 50,000 (train split) | 0 — test split used for eval only | Large |
-| Fusion360 RL training | 3,000 (train split) | 0 — test split used for eval only | Small |
-| **Total RL training samples** | **53,000** | **0 (requires one of the options below)** | **5.4×** |
-| Training modality | Images | Images (✓ fixed) | None |
-| Test-set contamination | None | None (✓ fixed) | None |
-
-**Option A — DeepCAD from source (closest to paper, ~170k train models)**
-
-The original DeepCAD dataset is hosted by Columbia University. It contains CAD sequences in JSON format; these must be reconstructed to STL using Open Cascade Technology (OCC).
-
-```bash
-# 1. Download (~1.4 GB compressed)
-wget http://www.cs.columbia.edu/cg/deepcad/data.tar -P data/
-tar -xf data/data.tar -C data/            # extracts to data/cad_json/{train,test,val}/
-
-# 2. Convert JSON CAD sequences → STL meshes via OCC
-#    (script not yet implemented — see data/deepcad2mesh.py TODO below)
-python data/deepcad2mesh.py --split train --out data/deepcad_train_mesh
-
-# 3. Update config
-#    data_dir:  ./data/deepcad_train_mesh
-#    data_dir2: null   (Fusion360 train not yet available)
-```
-
-`data/deepcad2mesh.py` needs to be written. It must parse DeepCAD's sketch-extrude JSON format and reconstruct each model using OCC/CadQuery, then export to STL. The DeepCAD reconstruction pipeline is described in the original paper (Wu et al., ICCV 2021).
-
-**Option B — CAD-Recode v1.5 as RL training data (easiest, ~100k STL)**
-
-`cad-recode-v1.5` (already downloaded for SFT) contains ~100k STL meshes generated from synthetic CadQuery scripts. These are different shapes from the paper's DeepCAD train split but provide sufficient volume for stable RL training.
-
-```bash
-# Assumes cad-recode-v1.5 is already downloaded (see SFT section above)
-# STL files are at data/cad-recode-v1.5/**/*.stl after cadrecode2mesh.py runs
-
-# Update config:
-#   data_dir: ./data/cad-recode-v1.5
-```
-
-**Option C — Use what is already downloaded (9,771 STL, quick start)**
-
-The 8,046 DeepCAD test meshes + 1,725 Fusion360 test meshes can be used for RL training
-as long as they are **not** also used for evaluation. Set validation to a held-out subset
-or a separate split. This is adequate for verifying training stability but falls 5.4× short
-of the paper's training volume.
-
-```bash
-# Already downloaded — no extra steps needed.
-# Configs already set: data_dir + data_dir2 point to the two test-mesh dirs,
-# val_deepcad_dir / val_fusion360_dir sample disjoint 50-example subsets for eval.
+python data/cadrecode2mesh.py   # convert .py → .stl (takes ~2 hours)
 ```
 
 ---
@@ -232,7 +165,8 @@ max_steps:    120,000  |  batch: 28  |  precision: bfloat16 + flash_attention_2
 ### RL Fine-tuning
 
 Online RL (Dr. CPPO / GRPO) starting from the cadrille SFT checkpoint.
-Reward: `r = -10` (invalid) or `IoU × 10 ∈ [0, 10]` (valid geometry).
+Reward: `r = -1` (invalid code) or `IoU ∈ [0, 1]` (valid geometry).
+Both pred and GT meshes are normalised to [−1, 1]³ before IoU computation.
 
 ```bash
 # RTX 4080 16 GB — G=4, Adam8bit, sequential generation
