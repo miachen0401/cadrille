@@ -22,14 +22,18 @@ def render_img(gt_mesh_path: str) -> dict:
     from dataset import mesh_to_image
 
     mesh = trimesh.load(gt_mesh_path)
+    # Normalize to [0,1]^3 — matches reference code (transform_real_mesh + scale/translate)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    mesh.apply_scale(2.0 / max(mesh.extents))   # → [-1, 1]
+    mesh.apply_scale(0.5)                         # → [-0.5, 0.5]
+    mesh.apply_translation([0.5, 0.5, 0.5])       # → [0, 1]
     o3d_mesh = open3d.geometry.TriangleMesh()
     o3d_mesh.vertices = open3d.utility.Vector3dVector(np.asarray(mesh.vertices))
     o3d_mesh.triangles = open3d.utility.Vector3iVector(np.asarray(mesh.faces))
     o3d_mesh.paint_uniform_color(np.array([255, 255, 136]) / 255.0)
     o3d_mesh.compute_vertex_normals()
     fronts = [[1, 1, 1], [-1, -1, -1], [-1, 1, -1], [1, -1, 1]]
-    imgs = [ImageOps.expand(mesh_to_image(o3d_mesh, camera_distance=-0.9,
-                                          front=f, img_size=128),
+    imgs = [ImageOps.expand(mesh_to_image(o3d_mesh, camera_distance=-0.9, front=f, img_size=128),
                             border=3, fill='black')
             for f in fronts]
     combined = Image.fromarray(np.vstack((

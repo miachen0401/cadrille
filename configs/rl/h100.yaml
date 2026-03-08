@@ -20,8 +20,7 @@ checkpoint_path: ./checkpoints/cadrille-sft
 # With only the test split (~8k), training loops over the same meshes — acceptable
 # for a single-GPU run but download the full train split when possible.
 # Update paths for Colab (e.g. /content/data/deepcad_test_mesh)
-data_dir: ./data/deepcad_test_mesh    # 8,046 STL meshes
-data_dir2: ./data/fusion360_test_mesh # 1,725 STL meshes → combined: 9,771 total
+data_dir: ./data/cadrille_training    # deepcad train (~161k) + fusion360 train (~8.6k) via symlinks
 train_modality: img                   # paper: images only — pc training was unstable
 hard_examples_pkl: null
 dpo_dataset: null

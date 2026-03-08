@@ -1,283 +1,155 @@
-# Cadrille: SFT + RL Fine-Tuning Reproduction
+# RL Training Plan — Cadrille Reproduction
 
-## Code sources
-
-| Repo | Branch | Content |
-|------|--------|---------|
-| `col14m/cadrille` | `master` | SFT: `train.py`, `cadrille.py`, `dataset.py`, `evaluate.py`, `test.py` |
-| `col14m/cadrille` | `rl` | RL: `rl_finetune/train_cadrille_grpo.py`, `grpo_mm.py`, `cad_recode_model_mm.py` |
-| `filapro/cad-recode` | `main` | Inference demo only — no training code released |
-
-**The RL code IS publicly available** on the `rl` branch (contrary to the earlier paper draft).
+## Goal
+Reproduce Table 2 (img mode) and Table 3 (pc mode) from the Cadrille paper (ICLR 2026).
+Train RL on DeepCAD train split (~84k STLs) + Fusion360 train split using `img` modality.
 
 ---
 
-## Stage 1: SFT
+## Paper Target Metrics
 
-### Script
-`train.py` — direct copy of official master branch with the following additions:
+### Table 2 — CAD Reconstruction from Multi-view Images (img mode)
+| Model | SFT Data | RL | DeepCAD IoU | Fusion360 IoU | CC3D IoU |
+|-------|----------|----|-------------|---------------|----------|
+| cadrille | Rpi | ✗ (SFT only) | 86.1% | 77.6% | 56.1% |
+| cadrille | Rpi | DPO (D-i+F-i) | 86.9% | 78.5% | 56.0% |
+| cadrille | Rpi | **Dr. CPPO (D-i+F-i)** | **92.2%** | **84.6%** | **65.0%** |
 
-| Change | Official | Ours |
-|--------|----------|------|
-| `max_steps` | 120000 hardcoded | `--max-steps` CLI |
-| `per_device_train_batch_size` | 15 hardcoded | **28** (accum=1, effective=28) |
-| `gradient_accumulation_steps` | 2 hardcoded | **1** |
-| `warmup_steps` | 1000 hardcoded | `min(1000, max_steps//10)` |
-| `dataloader_num_workers` | 18 hardcoded | `--dataloader-workers 8` |
-| `report_to` | None | `'wandb'` if `--wandb-project` |
-| val split | required (crashes) | optional (skips eval if missing) |
-| logging/save/eval steps | hardcoded | CLI flags |
-
-### Official SFT hyperparameters (from code, not just paper)
-
-```
-optimizer:          AdamW (HF default)
-learning_rate:      2e-4
-lr_scheduler:       cosine → 0 at step 120k
-warmup_steps:       1000
-weight_decay:       0.01
-max_steps:          120,000
-batch (pc_img):     15 per-device × 2 accum = 30 effective   ← original
-batch (pc_img):     28 per-device × 1 accum = 28 effective   ← our default
-batch (use_text):   8 per-device  × 4 accum = 32 effective
-precision:          bfloat16 + flash_attention_2
-GPU:                single H100 (paper) / any single GPU (us)
-```
-
-Note: paper Appendix D says "batch=8, accum=4" — this refers to the `--use-text`
-path only. The `pc_img` model (best result, Rpi) uses batch=15, accum=2.
-
-### Dataset
-cad-recode-v1.5: ~100k CadQuery `.py` files in `train/batch_00/` … `train/batch_10/`
-No official val split; use `--val-batch batch_10` in `data/cadrecode2mesh.py`.
-
-### Full training command
-```bash
-python train.py \
-  --data-path ./data \
-  --log-path ./work_dirs/cadrille-sft \
-  --mode pc_img \
-  --max-steps 120000 \
-  --wandb-project cadrille-sft
-```
-
-### Expected time (120k steps)
-| Hardware | Estimated |
-|----------|-----------|
-| Single H100 (paper) | ~17–33 hrs |
-| Single A100 | ~30–50 hrs |
-| Single RTX 4080 (bs=2) | ~10 days |
+### Table 3 — CAD Reconstruction from Point Clouds (pc mode)
+| Model | SFT Data | RL | DeepCAD IoU | Fusion360 IoU | CC3D IoU |
+|-------|----------|----|-------------|---------------|----------|
+| cadrille | Rpi | ✗ (SFT only) | 87.1% | 79.8% | 61.8% |
+| cadrille | Rpi | **Dr. CPPO (D-i+F-i)** | **90.2%** | **85.0%** | **67.9%** |
 
 ---
 
-## Stage 2: RL Fine-Tuning (Dr. CPPO / GRPO)
+## Current Situation (2026-03-07): RESOLVED — img eval gap fixed ✅
 
-### Script
-`rl_train.py` — single-GPU adaptation of official `rl_finetune/train_cadrille_grpo.py`.
+**RL training can start. img eval gap resolved.**
 
-### Official hyperparameters (from rl branch)
+### Final eval results (after rendering fix, 500 samples)
+| Modality | Dataset | Our eval | Paper SFT | Gap |
+|----------|---------|----------|-----------|-----|
+| pc | DeepCAD | 84.3% | 87.1% | –3pp — acceptable |
+| pc | Fusion360 | 82.7% | 79.8% | +3pp — acceptable |
+| img | DeepCAD | **86.4%** | **86.1%** | **+0.3pp ✅** |
+| img | Fusion360 | **76.6%** | **77.6%** | **–1.0pp ✅** |
 
-| Param | Value | Source |
-|-------|-------|--------|
-| Algorithm | Dr. CPPO / GRPO | official code |
-| GPUs | **8 H100s** via `torchrun --nproc-per-node=8` | official |
-| Optimizer | **Adam** | official (not Adafactor) |
-| Learning rate | **3e-5** | official |
-| G (rollouts) | **16** | official `num_generations` |
-| top_N | **4** | official `top_samples` |
-| epsilon (high/low) | **0.1 / 0.1** | official `epsilon_high/low` |
-| batch_updates | **3** | official `batch_updates` (PPO steps/rollout) |
-| max_new_tokens | **400** | official `max_completion_length` |
-| train_epochs | 20 | official |
-| Training data | **real meshes** (deepcad_fusion_train) | official `RealDatasetMM` |
-| Reward | -10 (invalid) or IoU×10 | official `combined_reward` |
+Checkpoint used: `checkpoints/cadrille-sft` = **official paper SFT model** (downloaded from
+`Hula0401/cadrille-sft`). The model is correct. The gap is in our evaluation pipeline.
 
-### Algorithm per step (matches official grpo_mm.py)
-```
-1. Generate G=16 completions at temperature=1.0
-2. Compute rewards R₁…G   →   r_invalid=-10 or r_IoU=IoU×10
-3. Advantages Aᵍ = rᵍ − mean(r)
-4. Select top_N=4 by |Aᵍ|
-5. Compute π_old(τ|q) for selected samples (no grad)
-6. Repeat batch_updates=3 times:
-     new_logp = log π_θ(τ|q)   (with grad)
-     ratio = exp(new_logp − old_logp)
-     loss = −E[min(ratio·A, clip(ratio, 1-0.1, 1+0.1)·A)]
-     Adam step (lr=3e-5)
-7. Every K_update=10 steps: copy new → old policy
-```
+### What we know about the gap
 
-### Training data
-Official trains on **real handcrafted meshes** from DeepCAD + Fusion360 train splits
-(`data/deepcad_fusion_train`), not synthetic hard-mined examples.
-The hard-mining R_th filtering is implicit: samples with uniform rewards (all high)
-produce near-zero advantages and thus contribute ~0 gradient.
+**pc mode works (~87%)** — point cloud input carries exact 3D geometry; no rendering involved.
 
-### Commands
-```bash
-# RL on real meshes (matches official)
-python rl_train.py --mode cppo \
-    --checkpoint-path maksimko123/cadrille \
-    --data-dir ./data/deepcad_test_mesh \
-    --output-dir ./work_dirs/cadrille-rl \
-    --wandb-project cadrille-rl
+**img mode broken (~9%)** — 4-view render pipeline has a bug somewhere in the chain:
+  model input → rendering → tokenizer → forward pass → generated code → executed mesh → IoU
 
-# Legacy: from hard-mined pkl
-python rl_train.py --mode cppo \
-    --checkpoint-path ./checkpoints/cadrille \
-    --hard-examples-pkl ./data/rl_hard_examples.pkl \
-    --output-dir ./work_dirs/cadrille-rl
-```
+**Key facts:**
+- Both `deepcad_test_mesh` and `deepcad_train_mesh` STLs are already in **[0,1]^3 scale**
+  (confirmed by checking bounds: max extent ≈ 1.0, centered near [0.5, 0.5, 0.5])
+- `test.py` correctly does NOT normalize test-split meshes (they're already [0,1])
+- Our `render_img()` in `rl/dataset.py` applies adaptive normalization, which is a near-no-op
+  for [0,1] meshes — so rendering is not the issue
+- The 3px border (`ImageOps.expand(border=3)`) is present in reference code and ours
+- Rendering parameters match reference: camera_distance=-0.9, fronts=[[1,1,1],[-1,-1,-1],...]
+- `checkpoints/cadrille-sft` is the paper's own model — it SHOULD achieve 86.1%
 
-### Key differences: ours vs official
-| | Official | Ours |
-|-|----------|------|
-| GPUs | 8 H100s (DDP) | 1 GPU (single-process) |
-| Optimizer states | Adam shared across 8 GPUs | Adam on 1 GPU |
-| Old policy | same device | CPU-offloaded |
-| Batch per step | 16 samples × 8 GPUs = 128 | 1 sample × 1 GPU |
+**Remaining suspects (in priority order):**
+1. **Image preprocessing by the tokenizer/processor** — Qwen2-VL processor may apply
+   different pixel normalization or resizing depending on how the PIL image is passed.
+   The collate function passes `{'type': 'video', 'video': [PIL_image], 'fps': 1.0}` —
+   this is the video pathway of Qwen2-VL. The processor's `min_pixels`/`max_pixels`
+   settings determine token count and resize behavior. Mismatch here would corrupt input.
+2. **Evaluation IoU computation** — our training eval uses voxel-sampling IoU while the
+   paper uses volumetric boolean IoU (`evaluate.py`). May give different absolute values.
+3. **Generated code quality** — model may generate syntactically valid but geometrically
+   wrong code when given our rendered images.
 
 ---
 
-## Stage 1 smoke test results (200 steps, bs=2)
+## Fix Plan (must complete before RL training)
 
-| Step | Train loss | Val loss |
-|------|-----------|----------|
-| 10 | 1.579 | — |
-| 100 | 0.844 | 0.859 |
-| 200 | 0.752 | 0.789 |
+### Phase 1 — Isolate the gap with `test.py` + `evaluate.py` (paper's exact pipeline)
 
-W&B: https://wandb.ai/hula-the-cat/cadrille-sft/runs/lfieikhy
+**Step F1: Quick sanity check — 30 samples, img mode, cadrille-sft**
+- Run `test.py --split deepcad_test_mesh --mode img --checkpoint-path ./checkpoints/cadrille-sft`
+  on 30 samples (modify `n_samples` or use `head -30` subset)
+- Run `evaluate.py` on output
+- **Expected if pipeline correct**: IoU ≈ 86%
+- **Expected if pipeline broken**: IoU ≈ 9%
+- This tells us: is `test.py`+`evaluate.py` reproducing the paper, or is the bug also there?
+
+**Step F2 (if F1 gives ~86%)**: The bug is only in our `rl/eval.py` rendering pipeline.
+- Compare `test.py`'s image format vs what `rl/eval.py` sends to the model
+- Check processor parameters (min_pixels, max_pixels) — reference uses different values?
+- Fix `rl/eval.py` to match `test.py`'s exact preprocessing
+
+**Step F2 (if F1 gives ~9%)**: The bug is in the fundamental pipeline — rendering or inference.
+- Debug: print a rendered image, save it, visually inspect
+- Check if the model even "sees" the image: inspect pixel_values_videos shape/stats
+- Compare with pc mode: same model, same code path except input modality
+
+**Step F3: Verify fix on 200 samples**
+- Once F1/F2 identifies the bug and we fix it, validate on 200 samples
+- Target: img/DeepCAD IoU > 80% (within 6pp of paper's 86.1%)
 
 ---
 
-## Reward signal
+## Data Pipeline Status
 
-```
-R(τ) = r_invalid + r_IoU
-r_invalid = -10   (code fails to execute or produce valid geometry)
-r_IoU     = IoU × 10   ∈ [0, 10]   (valid geometry)
-```
-
-CadQuery execution uses `subprocess.run()` (not `multiprocessing.Process`) to avoid
-corrupting the CUDA context held by the training process.
+| Dataset | Location | Count | Status |
+|---------|----------|-------|--------|
+| CAD-Recode v1.5 | `data/cad-recode-v1.5/` | pkl only, no STLs | ⚠ STLs missing |
+| deepcad_test_mesh | `data/deepcad_test_mesh/` | 8,047 STLs in [0,1] | ✅ Ready |
+| fusion360_test_mesh | `data/fusion360_test_mesh/` | 1,726 STLs | ✅ Ready |
+| deepcad_train_mesh | `data/deepcad_train_mesh/` | 84,526 STLs in [0,1] | ✅ Ready |
+| cadrille_training | `data/cadrille_training/deepcad` → symlink | 84,526 STLs | ✅ Ready |
+| fusion360_train_mesh | not downloaded | — | ❌ Missing |
 
 ---
 
-## Stage 3: Visualization & Analysis (`viz/`)
+## Full Task List (ordered by dependency)
 
-Goal: understand training data structure, model failure modes, and complexity–quality tradeoffs.
-These plots inform RL curriculum design, data augmentation decisions, and where to focus debugging.
+### [DONE] Phase 1: Fix img eval gap
 
-### Directory layout
+- [x] **F1**: 30-sample img eval via `test.py` + `evaluate.py` → 76.8% IoU (paper pipeline works)
+- [x] **F2**: Root cause: rendering bugs (no normalization + wrong border). Fixed in `rl/dataset.py`. Our `render_img()` gives 79.5% on same 30 samples.
+- [x] **F3**: 200-sample validation → **84.7% IoU** (paper: 86.1%, gap = 1.4pp ✅)
 
-```
-viz/
-├── parse_cq.py          # Shared: regex feature extraction from CadQuery scripts
-├── dataset_stats.py     # Training data distribution → plots/dataset_stats/
-├── failure_analysis.py  # Eval failure modes → plots/failure_analysis/
-└── plots/               # Output directory (gitignored)
-    ├── dataset_stats/
-    └── failure_analysis/
-```
+### [DONE] Phase 2: Data
 
-### `viz/parse_cq.py`
+- [x] T1: DeepCAD train split → STL (84,526 STLs in `deepcad_train_mesh/`)
+- [x] T2: Create `data/cadrille_training/deepcad` symlink
+- [x] T3: Update all RL configs → `cadrille_training/`
+- [ ] T4 (optional): Fusion360 train split — download + convert → add symlink
 
-Regex-based feature extraction.  No heavy dependencies (only `re`, `pathlib`).
+### Phase 3: RL Training (ready to start)
 
-Per-script features extracted:
-| Feature | Description |
-|---------|-------------|
-| `n_segments` | count of `.segment()` calls |
-| `n_arcs` | count of `.arc()` calls |
-| `n_splines` | count of `.spline()` calls |
-| `n_circles`, `n_rects`, `n_polygons` | closed sketch shapes |
-| `n_extrudes`, `n_revolves` | extrusion operations |
-| `n_unions`, `n_cuts`, `n_intersects` | boolean operations |
-| `n_cylinders`, `n_boxes`, `n_spheres` | primitives |
-| `n_fillets`, `n_chamfers`, `n_shells` | detail modifiers |
-| `n_push` | multi-region sketches (push/pop) |
-| `n_workplanes` | number of `Workplane()` calls |
-| `planes` | list of plane types used (XY/YZ/ZX) |
-| `n_sketch_ops` | segments + arcs + splines + circles + rects + polygons |
-| `n_bool_ops` | unions + cuts + intersects |
-| `n_bodies` | n_bool_ops + 1 (approximate body count) |
-| `code_length` | total character count |
+- [ ] T5: Start img RL training (50k steps, 4080 SUPER, ~23 days)
+  - Config: `configs/rl/4080.yaml`
+  - Only start after F3 confirms img eval gap is fixed
+- [ ] T6: Monitor training (reward trend, eval every 200 steps)
+- [ ] T7: At step 1000, evaluate on full deepcad_test_mesh (8047 samples) for Table 2 comparison
 
-### `viz/dataset_stats.py`
+---
 
-Reads: `./data/cad-recode-v1.5/train/batch_*/` (all training `.py` files)
+## Architecture Notes
 
-Plots saved to `viz/plots/dataset_stats/`:
-1. **Operation frequency** — horizontal bar, sorted; shows what the model has seen
-2. **Code length distribution** — histogram; characterises typical script complexity
-3. **Sketch ops per script** — histogram; distribution of geometric complexity
-4. **Plane type distribution** — bar; which orientations dominate training
-5. **Boolean ops per script** — histogram; number of bodies per shape
-6. **Train vs val complexity** — overlaid histograms; checks for distribution shift
+- `MeshDataset` in `rl/dataset.py`: `glob(**/*.stl, recursive=True)` — finds STLs in subdirs
+- `render_img()` normalization: center→[-1,1]→scale(0.5)→[-0.5,0.5]→+0.5→[0,1] — no-op for [0,1] meshes
+- `test.py` + `evaluate.py`: paper's reference pipeline; uses volumetric boolean IoU
+- `rl/eval.py`: our training-time eval; uses voxel-sampling IoU (faster, lower absolute values)
+- CPPO reward: IoU × 10; degenerate groups (std=0) → skipped via `_safe_histogram()`
+- lr=1e-5 (not 3e-5): G=4 has higher gradient variance than official G=16
 
-### `viz/failure_analysis.py`
+## Known Bugs Fixed
 
-Reads: `--eval-dir` (directory of generated `.py` files from `test.py`)
-Optional: `--results-csv` (per-sample IoU/CD from `evaluate.py --results-csv`)
-
-For each generated script:
-1. Attempt subprocess execution with 10 s timeout (no CUDA risk)
-2. Classify result into one of:
-   - `success` — geometry produced
-   - `syntax_error` — Python parse failed
-   - `no_result` — code ran but `r` undefined
-   - `attribute_error` — invalid CadQuery API call (hallucinated method)
-   - `geometry_error` — OCC / trimesh failure (degenerate geometry)
-   - `timeout` — execution exceeded timeout
-   - `other_error` — any other exception
-
-Plots saved to `viz/plots/failure_analysis/`:
-1. **Failure type breakdown** — bar; overall error type distribution
-2. **Code length: success vs failure** — overlaid KDE or histogram
-3. **Sketch ops: success vs failure** — violin / box plots
-4. **Failure rate by operation type** — horizontal bar; for each op, % of scripts
-   containing that op that fail (reveals which operations the model struggles with)
-5. **Train vs generated distribution** — side-by-side bars for top operations;
-   shows distribution shift between training data and model outputs
-6. **IoU vs code length** (if `--results-csv`) — scatter with regression line
-7. **IoU by operation type** (if `--results-csv`) — box plot per op type
-
-### `evaluate.py` extension
-
-Add `--results-csv PATH` flag: after computing per-sample metrics, write a CSV with
-columns `file_name, id, cd, iou` (one row per generated `.py`).  Used by
-`failure_analysis.py` to correlate geometric quality with code features.
-
-### Running the analyses
-
-```bash
-# 1. Training data distribution
-python viz/dataset_stats.py --data-dir ./data/cad-recode-v1.5/train
-
-# 2. Failure analysis on HF baseline eval
-python viz/failure_analysis.py \
-    --eval-dir ./work_dirs/eval_hf_baseline \
-    --train-dir ./data/cad-recode-v1.5/train
-
-# 3. With IoU scores (run evaluate.py first):
-python evaluate.py \
-    --pred-py-path ./work_dirs/eval_hf_baseline \
-    --gt-mesh-path ./data/deepcad_test_mesh \
-    --results-csv ./work_dirs/eval_hf_baseline/results.csv
-python viz/failure_analysis.py \
-    --eval-dir ./work_dirs/eval_hf_baseline \
-    --results-csv ./work_dirs/eval_hf_baseline/results.csv \
-    --train-dir ./data/cad-recode-v1.5/train
-```
-
-### Key questions these plots answer
-
-| Question | Plot |
-|----------|------|
-| What operations does the model know? | Operation frequency (dataset_stats) |
-| Does the model generate more/less complex code than training? | Train vs generated distribution |
-| Which operation types cause the most failures? | Failure rate by operation type |
-| Does longer code fail more? | Code length: success vs failure |
-| Which error type dominates? | Failure type breakdown |
-| Does IoU degrade with complexity? | IoU vs code length (with results-csv) |
+| Bug | File | Fix |
+|-----|------|-----|
+| `wandb.Histogram` crash on zero-range rewards | `rl/algorithms/cppo.py` | Added `_safe_histogram()` |
+| Mesh not normalized before rendering (was mm scale) | `rl/dataset.py` | Added `transform_real_mesh` equivalent |
+| 3px border removed (wrong) | `rl/dataset.py` | Restored `ImageOps.expand(border=3)` |
+| Reward scale mismatch: was IoU×10 / -10; ref uses raw IoU / -1 | `rl/reward.py`, `rl/eval.py`, `rl/algorithms/cppo.py`, `rl/eval_passk.py` | Changed to raw IoU ∈ [0,1] and -1 for failure |
+| Mesh normalization mismatch: only pred normalized to [0,1]; ref normalizes both to [-1,1] | `rl/reward.py` | `transform_real_mesh` applied to both pred and GT (center + scale 2/max_extent) |
+| `bad_words_ids` missing from `model.generate()` in eval | `rl/eval.py`, `tools/eval_img.py` | Added `bad_words_ids=[[model.config.video_token_id]]` |

@@ -127,7 +127,7 @@ def cppo_loss_fn(new_lp: torch.Tensor, old_lp: torch.Tensor,
     n_tok    = completion_mask.sum(dim=1).clamp(min=1)             # [B]
     seq_loss = (per_tok * completion_mask).sum(dim=1) / n_tok      # [B]
     seq_loss = torch.nan_to_num(seq_loss, nan=0.0, posinf=0.0, neginf=0.0)
-    seq_loss = torch.clamp(seq_loss, min=-10.0, max=10.0)
+    seq_loss = torch.clamp(seq_loss, min=-1.0, max=1.0)
     return -seq_loss.mean()
 
 
@@ -389,7 +389,7 @@ def cppo_step(model, optimizer, items, processor, args,
     rewards_t = torch.tensor(rewards, dtype=torch.float32).view(B, G)  # [B, G]
     # Guard against non-finite reward values before mean/std/topk.
     rewards_t = torch.nan_to_num(
-        rewards_t, nan=-10.0, posinf=10.0, neginf=-10.0).clamp(-10.0, 10.0)
+        rewards_t, nan=-1.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
     mean_r    = rewards_t.mean(dim=1, keepdim=True)                     # [B, 1]
     std_r     = rewards_t.std(dim=1)                                    # [B]
     adv_raw   = rewards_t - mean_r                                      # [B, G]
@@ -545,6 +545,22 @@ def cppo_step(model, optimizer, items, processor, args,
 
 
 # ---------------------------------------------------------------------------
+# W&B helpers
+# ---------------------------------------------------------------------------
+
+def _safe_histogram(data):
+    """wandb.Histogram crashes when all values are identical (zero-range).
+    Fall back to a plain scalar (mean) in that case."""
+    import wandb, numpy as np
+    arr = np.asarray(data, dtype=np.float32)
+    if arr.size == 0 or np.all(arr == arr[0]):
+        return float(arr[0]) if arr.size > 0 else 0.0
+    try:
+        return wandb.Histogram(arr)
+    except Exception:
+        return float(arr.mean())
+
+
 # Checkpoint rotation
 # ---------------------------------------------------------------------------
 
@@ -719,9 +735,9 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/kl_q_nn':         metrics['train/kl_q_nn'],
                         'train/gen_seconds':     metrics['train/gen_seconds'],
                         'train/lr':              lr,
-                        'dist/rewards': wandb.Histogram(metrics['_rewards_list']),
-                        'dist/ratios':  wandb.Histogram(metrics['_ratio_list']),
-                        'dist/advs':    wandb.Histogram(metrics['_adv_list']),
+                        'dist/rewards': _safe_histogram(metrics['_rewards_list']),
+                        'dist/ratios':  _safe_histogram(metrics['_ratio_list']),
+                        'dist/advs':    _safe_histogram(metrics['_adv_list']),
                     }, step=step)
 
             if val_examples and step % args.eval_steps == 0:

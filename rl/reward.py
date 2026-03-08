@@ -18,9 +18,8 @@ Uses subprocess.run() for training because:
   2. The CUDA context in the main training process is not corrupted by fork()
 
 Reward formula (from paper):
-    R(τ) = r_IoU + r_invalid
-    r_IoU    = IoU × 10    (range [0, 10])
-    r_invalid = -10 (invalid code) or 0 (valid code)
+    R(τ) = IoU        if code is valid    (range [0, 1])
+    R(τ) = -1         if code is invalid
 """
 
 import os
@@ -111,17 +110,16 @@ _WORKER_SCRIPT = textwrap.dedent('''\
         buf = trimesh.exchange.stl.export_stl(pred_mesh)
         pred_mesh = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
 
-        # Normalize: center → scale to unit extent → translate to [0.5, 0.5, 0.5]
-        # Matches evaluate.py:run_cd_single() exactly.
-        center = (pred_mesh.bounds[0] + pred_mesh.bounds[1]) / 2.0
-        pred_mesh.apply_translation(-center)
-        extent = np.max(pred_mesh.extents)
-        if extent > 1e-7:
-            pred_mesh.apply_scale(1.0 / extent)
-        pred_mesh.apply_transform(
-            trimesh.transformations.translation_matrix([0.5, 0.5, 0.5]))
+        def transform_real_mesh(mesh):
+            """Center and scale mesh to [-1, 1]^3 (matches ref transform_real_mesh)."""
+            mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+            extent = np.max(mesh.extents)
+            if extent > 1e-7:
+                mesh.apply_scale(2.0 / extent)
+            return mesh
 
-        gt_mesh = trimesh.load_mesh(gt_mesh_path)
+        pred_mesh = transform_real_mesh(pred_mesh)
+        gt_mesh = transform_real_mesh(trimesh.load_mesh(gt_mesh_path))
         iou = compute_iou(gt_mesh, pred_mesh)
         cd  = compute_cd(gt_mesh, pred_mesh) if compute_chamfer else None
         return iou, cd
@@ -142,7 +140,7 @@ _WORKER_SCRIPT = textwrap.dedent('''\
 
 # Module-level cache: written once per process lifetime
 _worker_path: Optional[str] = None
-# Log first N worker errors to help diagnose reward = -10 issues
+# Log first N worker errors to help diagnose reward = -1 issues
 _error_log_count = 0
 _MAX_ERROR_LOGS = 5
 
@@ -290,14 +288,16 @@ def _reward_worker_run(
         assert len(pred_mesh.faces) > 2
         buf = trimesh.exchange.stl.export_stl(pred_mesh)
         pred_mesh = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
-        center = (pred_mesh.bounds[0] + pred_mesh.bounds[1]) / 2.0
-        pred_mesh.apply_translation(-center)
-        extent = np.max(pred_mesh.extents)
-        if extent > 1e-7:
-            pred_mesh.apply_scale(1.0 / extent)
-        pred_mesh.apply_transform(
-            trimesh.transformations.translation_matrix([0.5, 0.5, 0.5]))
-        gt_mesh = trimesh.load_mesh(gt_mesh_path)
+
+        def _transform(mesh):
+            mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+            ext = np.max(mesh.extents)
+            if ext > 1e-7:
+                mesh.apply_scale(2.0 / ext)
+            return mesh
+
+        pred_mesh = _transform(pred_mesh)
+        gt_mesh   = _transform(trimesh.load_mesh(gt_mesh_path))
         iou = None
         try:
             intersection_volume = 0.0
@@ -407,15 +407,15 @@ def _eval_worker_run(
         buf = trimesh.exchange.stl.export_stl(pred_mesh)
         pred_mesh = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
 
-        center = (pred_mesh.bounds[0] + pred_mesh.bounds[1]) / 2.0
-        pred_mesh.apply_translation(-center)
-        extent = np.max(pred_mesh.extents)
-        if extent > 1e-7:
-            pred_mesh.apply_scale(1.0 / extent)
-        pred_mesh.apply_transform(
-            trimesh.transformations.translation_matrix([0.5, 0.5, 0.5]))
+        def _transform(mesh):
+            mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+            ext = np.max(mesh.extents)
+            if ext > 1e-7:
+                mesh.apply_scale(2.0 / ext)
+            return mesh
 
-        gt_mesh = trimesh.load_mesh(gt_mesh_path)
+        pred_mesh = _transform(pred_mesh)
+        gt_mesh   = _transform(trimesh.load_mesh(gt_mesh_path))
 
         # IoU
         iou = None
@@ -536,19 +536,14 @@ def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
 def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> float:
     """Compute IoU-based reward for a single generated code string.
 
-    Formula:
-        R(τ) = r_IoU + r_invalid
-        r_IoU    = IoU × 10   (range [0, 10])
-        r_invalid = -10 if code is invalid, 0 otherwise
-
-    Returns a scalar in [-10, 10].
+    Returns IoU in [0, 1] on success, or -1.0 on invalid/failed code.
     """
     iou, _ = _execute_code_in_subprocess(code_str, gt_mesh_path, timeout=timeout)
     if iou is None:
-        return -10.0          # r_invalid penalty
+        return -1.0
     if float(iou) < 0:
         return 0.0
-    return float(iou) * 10.0  # r_IoU in [0, 10]
+    return float(iou)
 
 
 def compute_metrics(
@@ -566,8 +561,8 @@ def compute_metrics(
 
     Returns:
         (iou_reward, cd)
-        iou_reward: float in [-10, 10]  (same scale as compute_reward)
-        cd:         float or None       (None if code is invalid)
+        iou_reward: float in [0, 1] on success, -1.0 on failure
+        cd:         float or None  (None if code is invalid)
     """
     if use_pool:
         iou, cd = _execute_in_eval_pool(code_str, gt_mesh_path, timeout, compute_chamfer=True)
@@ -575,10 +570,10 @@ def compute_metrics(
         iou, cd = _execute_code_in_subprocess(
             code_str, gt_mesh_path, timeout=timeout, compute_chamfer=True)
     if iou is None:
-        return -10.0, None
+        return -1.0, None
     if float(iou) < 0:
         return 0.0, cd
-    return float(iou) * 10.0, cd
+    return float(iou), cd
 
 
 def compute_rewards_parallel(
@@ -610,11 +605,11 @@ def compute_rewards_parallel(
             for f in futures:
                 try:
                     iou, _ = f.result(timeout=timeout + 5)
-                    results.append(-10.0 if iou is None else max(0.0, float(iou) * 10.0))
+                    results.append(-1.0 if iou is None else max(0.0, float(iou)))
                 except BrokenProcessPool:
                     raise  # bubble up to outer handler
                 except Exception:
-                    results.append(-10.0)
+                    results.append(-1.0)
             return results
         except BrokenProcessPool:
             print('[reward pool] worker crashed — restarting pool, '
