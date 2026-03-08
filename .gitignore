@@ -19,3 +19,9 @@ data/data.tar/
 work_dirs
 wandb/
 ref_code/
+logs/
+DeepCAD/
+data/deepcad_test_mini30/
+data/data.tar
+.bash_history
+.claude/
