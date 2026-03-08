@@ -28,24 +28,29 @@ Each entry records the exact commit, script, dataset, sample count, and metrics.
 
 ### img mode — `checkpoints/cadrille-sft` (official paper SFT model)
 
-| Date | Commit | Script | Dataset | N | DeepCAD IoU | Fusion360 IoU | CC3D IoU | Notes |
-|------|--------|--------|---------|---|-------------|---------------|----------|-------|
-| 2026-03-07 | `7aeaa26` | `test.py` + `evaluate.py` | deepcad_test_mini30 | 30 | 76.8% | — | — | F1: paper's reference pipeline; small-sample variance explains gap to 86.1% |
-| 2026-03-07 | `7aeaa26` | `debug_f2_img.py` + `evaluate.py` | deepcad_test_mini30 | 30 | 79.5% | — | — | F2: our `render_img()` path; matches F1 — rendering fix confirmed correct |
-| 2026-03-07 | `7aeaa26` | `debug_f3_img.py` + `evaluate.py` | deepcad_test_mesh | 200 | 84.7% | — | — | F3: 200-sample validation |
-| 2026-03-07 | `7aeaa26` | `debug_partial_eval.py` + `evaluate.py` | deepcad_test_mesh | 500 | **86.4%** | — | — | IR=1.6%, median CD=0.181 |
-| 2026-03-07 | `7aeaa26` | `debug_partial_eval.py` + `evaluate.py` | fusion360_test_mesh | 500 | — | **76.6%** | — | IR=2.4%, median CD=0.205 |
+Evaluated with `tools/eval_img.py` + `evaluate.py` (paper's reference pipeline).
+
+| Date | Commit | Dataset | N | DeepCAD IoU | Fusion360 IoU | CC3D IoU | Notes |
+|------|--------|---------|---|-------------|---------------|----------|-------|
+| 2026-03-07 | `7aeaa26` | deepcad_test_mesh | 500 | **86.4%** | — | — | IR=1.6%, median CD=0.181 |
+| 2026-03-07 | `7aeaa26` | fusion360_test_mesh | 500 | — | **76.6%** | — | IR=2.4%, median CD=0.205 |
 
 ### pc mode — `checkpoints/cadrille-sft` (official paper SFT model)
 
-| Date | Commit | Script | Dataset | N | DeepCAD IoU | Fusion360 IoU | CC3D IoU | Notes |
-|------|--------|--------|---------|---|-------------|---------------|----------|-------|
-| 2026-03-07 | `7aeaa26` | `rl/eval.py` (training eval) | deepcad_test_mesh | 200 | 84.3% | — | — | From Run 3 pre-training baseline; voxel-sampling IoU (same absolute scale) |
-| 2026-03-07 | `7aeaa26` | `rl/eval.py` (training eval) | fusion360_test_mesh | 200 | — | 82.7% | — | From Run 3 pre-training baseline |
+Evaluated with `rl/eval.py` (training-time eval; volumetric boolean IoU, both meshes normalized to [-1,1]³).
+
+| Date | Commit | Dataset | N | DeepCAD IoU | Fusion360 IoU | CC3D IoU | Notes |
+|------|--------|---------|---|-------------|---------------|----------|-------|
+| 2026-03-08 | `ceeb33d` | deepcad_test_mesh | 200 | **84.5%** | — | — | RL run step=0 baseline |
+| 2026-03-08 | `ceeb33d` | fusion360_test_mesh | 200 | — | **78.0%** | — | RL run step=0 baseline |
 
 ### CC3D
 
-Not yet evaluated. **Dataset requires a license agreement** from CVI² lab (cvi2.uni.lu/cc3d-dataset/) — not on HuggingFace, not documented in the paper's `data/README.md`. Contact shapify3d@uni.lu to request access. Once obtained, place STLs at `data/cc3d_test_mesh/` and run `debug_partial_eval.py` with that split added.
+Not yet evaluated. **Dataset requires a license agreement** from CVI² lab (cvi2.uni.lu/cc3d-dataset/).
+Contact shapify3d@uni.lu. Once obtained, place STLs at `data/cc3d_test_mesh/` and run:
+```
+python3 tools/eval_img.py --splits cc3d
+```
 
 ---
 
@@ -55,18 +60,26 @@ Not yet evaluated. **Dataset requires a license agreement** from CVI² lab (cvi2
 |---------|-----------|------------|---|-----|-------|
 | DeepCAD | 86.1% | **86.4%** | 500 | **+0.3pp** ✅ | Matches paper |
 | Fusion360 | 77.6% | **76.6%** | 500 | –1.0pp ✅ | Within variance |
-| CC3D | 56.1% | — | — | unknown | Dataset requires license from CVI² lab |
+| CC3D | 56.1% | — | — | unknown | Requires license from CVI² lab |
+
+---
+
+## RL Training Runs
+
+| Run | Commit | Config | Start | W&B | Status |
+|-----|--------|--------|-------|-----|--------|
+| `rl-s50k-lr1e-5-G4-cppo-0308-0025` | `ceeb33d` | `configs/rl/4080.yaml` | 2026-03-08 | [qh088ege](https://wandb.ai/hula-the-cat/cadrille-rl/runs/qh088ege) | 🟢 Running |
+
+**Config:** G=4, lr=1e-5, img mode, DeepCAD train (84k STLs), max_steps=50k, ~54 s/step on RTX 4080 SUPER.
 
 ---
 
 ## Eval Pipeline Notes
 
-- **`test.py` + `evaluate.py`**: paper's reference pipeline; uses `CadRecodeDataset` for rendering
-- **`debug_f{1,2,3}_img.py` / `debug_full_eval.py`**: our pipeline; uses `render_img()` from `rl/dataset.py`
-- **`rl/eval.py`**: training-time eval called from `rl/train.py`; same volumetric boolean IoU as `evaluate.py`
-- All img evals use: `checkpoints/cadrille-sft`, `min_pixels=200704`, `max_pixels=1003520`, `max_new_tokens=768`, `batch_size=8`, greedy decode
-- `evaluate.py` normalizes pred mesh: center → unit extent → translate to [0.5,0.5,0.5]
-- GT meshes in `deepcad_test_mesh` and `fusion360_test_mesh` are pre-normalized to [0,1]³
+- **`tools/eval_img.py` + `evaluate.py`**: primary benchmark pipeline; uses `render_img()` from `rl/dataset.py`, calls paper's `evaluate.py` for volumetric boolean IoU + Chamfer Distance. GT meshes already in [0,1]³; pred normalized to [0,1]³ by `evaluate.py`.
+- **`rl/eval.py`**: training-time eval called every `eval_steps` from `rl/train.py`; normalizes both pred and GT to [-1,1]³ before IoU computation. **pc metric is reliable; img metric is unreliable** (mixed pc+img batches cause attention issues — img items get heavy left-padding to match long img prompt lengths, distorting generation).
+- All img evals use: `min_pixels=200704`, `max_pixels=1003520`, `max_new_tokens=768`, greedy decode, `bad_words_ids=[[video_token_id]]`.
+- GT meshes in `deepcad_test_mesh` and `fusion360_test_mesh` are pre-normalized to [0,1]³.
 
 ---
 
@@ -74,6 +87,10 @@ Not yet evaluated. **Dataset requires a license agreement** from CVI² lab (cvi2
 
 | Date | Issue | Fix | Commit |
 |------|-------|-----|--------|
-| 2026-03-07 | `render_img()` missing mesh normalization → images mostly white → img IoU = 9.1% | Added center+scale+translate to [0,1]³ in `rl/dataset.py` | `7aeaa26` + patch |
-| 2026-03-07 | `render_img()` border incorrectly removed → image 256×256 instead of 268×268 | Restored `ImageOps.expand(border=3)` in `rl/dataset.py` | `7aeaa26` + patch |
-| 2026-03-07 | `wandb.Histogram` crash when reward_std=0 | Added `_safe_histogram()` in `rl/algorithms/cppo.py` | `7aeaa26` + patch |
+| 2026-03-07 | `render_img()` missing mesh normalization → images mostly white → img IoU = 9.1% | Added center+scale+translate to [0,1]³ in `rl/dataset.py` | `ceeb33d` |
+| 2026-03-07 | `render_img()` border removed → image 256×256 instead of 268×268 | Restored `ImageOps.expand(border=3)` in `rl/dataset.py` | `ceeb33d` |
+| 2026-03-07 | `wandb.Histogram` crash when reward_std=0 | Added `_safe_histogram()` in `rl/algorithms/cppo.py` | `ceeb33d` |
+| 2026-03-08 | Reward scale mismatch vs paper (IoU×10 / -10 instead of raw IoU / -1) | Updated `rl/reward.py`, `rl/eval.py`, `rl/algorithms/cppo.py`, `rl/eval_passk.py` | `ceeb33d` |
+| 2026-03-08 | Mesh normalization mismatch: only pred normalized; ref normalizes both to [-1,1] | `transform_real_mesh` applied to both pred and GT in all worker paths | `ceeb33d` |
+| 2026-03-08 | `bad_words_ids` missing from eval `model.generate()` calls | Added to `rl/eval.py` and `tools/eval_img.py` | `ceeb33d` |
+| 2026-03-08 | img eval unreliable in mixed pc+img batches (heavy left-padding distorts img attention) | Known issue; use `tools/eval_img.py` for reliable img benchmarking | open |
