@@ -80,9 +80,17 @@ def download_zip(repo_id, zip_name, out_dir):
     n = len([f for f in os.listdir(out_dir) if f.endswith('.stl')])
     print(f"  {out_dir}: {n} STL files extracted")
 
-download_zip("Hula0401/deepCAD_test",   "deepcad_test_mesh.zip",   "data/deepcad_test_mesh")
-download_zip("Hula0401/fusion360_test_mesh",  "fusion360_test_mesh.zip", "data/fusion360_test_mesh")
+download_zip("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",    "data/deepcad_test_mesh")
+download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip",  "data/fusion360_test_mesh")
+download_zip("Hula0401/deepcad_train_mesh",  "deepcad_train_mesh.zip",   "data/deepcad_train_mesh")
 EOF
+
+    # cadrille_training symlink → deepcad_train_mesh (used by RL configs as data_dir)
+    if [[ ! -L "data/cadrille_training" ]]; then
+        mkdir -p data/cadrille_training
+        ln -sfn "$(pwd)/data/deepcad_train_mesh" "data/cadrille_training/deepcad"
+        echo "  data/cadrille_training/deepcad → deepcad_train_mesh symlink created"
+    fi
 
     echo "[4/4] Data download complete."
 else
