@@ -10,6 +10,7 @@ mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data — mini dataset (100 meshes)
+train_modality: img      # paper default: image input for RL
 data_dir: ./data/deepcad_test_mini
 hard_examples_pkl: null
 dpo_dataset: null

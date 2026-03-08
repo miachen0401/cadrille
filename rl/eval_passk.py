@@ -227,7 +227,7 @@ def eval_passk(
     per_example_ious: List[List[Optional[float]]] = [[] for _ in range(n)]
     for fut, ex_idx, _ in pending_futures:
         iou_reward, _cd = fut.result()
-        iou = iou_reward / 10.0 if iou_reward > -10.0 else None
+        iou = iou_reward if iou_reward > -1.0 else None
         per_example_ious[ex_idx].append(iou)
 
     score_pool.shutdown(wait=False)

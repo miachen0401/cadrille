@@ -16,7 +16,8 @@ mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft/checkpoint-best
 
 # Data — real GT meshes (matches official deepcad_fusion_train)
-data_dir: ./data/deepcad_test_mesh
+train_modality: img      # paper default: image input for RL
+data_dir: ./data/cadrille_training
 hard_examples_pkl: null  # legacy: from rl/mine.py
 dpo_dataset: null        # for --mode dpo
 

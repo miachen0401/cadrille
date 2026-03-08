@@ -2,6 +2,7 @@
 .npm
 .local
 .env
+.conda
 .cache
 *.pdf
 checkpoints/
@@ -11,6 +12,10 @@ data/text2cad
 data/deepcad_test_mesh
 data/deepcad_test_mini
 data/fusion360_test_mesh
+data/deepcad_train_mesh/
+data/cadrille_training/
+data/cad_json/
+data/data.tar/
 work_dirs
 wandb/
 ref_code/

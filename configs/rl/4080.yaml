@@ -18,7 +18,8 @@ mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
-data_dir: ./data/deepcad_test_mesh
+data_dir: ./data/cadrille_training
+train_modality: img      # paper default: img mode (train_mode='img' in train_cadrille_grpo.py)
 hard_examples_pkl: null
 dpo_dataset: null
 
@@ -49,8 +50,8 @@ dpo_epochs_per_round: 10
 # img modality is cheap during val (no rollout expansion, no grad).
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
-val_samples_deepcad:   25
-val_samples_fusion360: 25
+val_samples_deepcad:   200
+val_samples_fusion360: 200
 val_modalities:        pc,img
 eval_steps: 200
 

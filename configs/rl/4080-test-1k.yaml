@@ -12,6 +12,7 @@ mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
+train_modality: img      # paper default: image input for RL
 data_dir: ./data/deepcad_test_mesh
 hard_examples_pkl: null
 dpo_dataset: null

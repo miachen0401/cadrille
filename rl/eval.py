@@ -149,7 +149,8 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
             do_sample=False,
             temperature=None,
             top_p=None,
-            top_k=None)
+            top_k=None,
+            bad_words_ids=[[model.config.video_token_id]])
 
         prompt_len = batch['input_ids'].shape[1]
         for j in range(len(chunk)):
@@ -177,10 +178,10 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
             label = ex.get('_dataset_label', 'DeepCAD test')
             key   = (mod, label)
             buckets[key]['total'] += 1
-            if iou_reward <= -10.0:
+            if iou_reward <= -1.0:
                 buckets[key]['failures'] += 1
             else:
-                buckets[key]['ious'].append(iou_reward / 10.0)
+                buckets[key]['ious'].append(iou_reward)
                 if cd is not None:
                     buckets[key]['cds'].append(cd)
 
