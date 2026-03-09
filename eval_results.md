@@ -93,4 +93,4 @@ python3 tools/eval_img.py --splits cc3d
 | 2026-03-08 | Reward scale mismatch vs paper (IoU×10 / -10 instead of raw IoU / -1) | Updated `rl/reward.py`, `rl/eval.py`, `rl/algorithms/cppo.py`, `rl/eval_passk.py` | `ceeb33d` |
 | 2026-03-08 | Mesh normalization mismatch: only pred normalized; ref normalizes both to [-1,1] | `transform_real_mesh` applied to both pred and GT in all worker paths | `ceeb33d` |
 | 2026-03-08 | `bad_words_ids` missing from eval `model.generate()` calls | Added to `rl/eval.py` and `tools/eval_img.py` | `ceeb33d` |
-| 2026-03-08 | img eval unreliable in mixed pc+img batches (heavy left-padding distorts img attention) | Known issue; use `tools/eval_img.py` for reliable img benchmarking | open |
+| 2026-03-08 | img eval unreliable in mixed pc+img batches (heavy left-padding distorts img attention) | Sort examples by modality before batching in `rl/eval.py:eval_one_pass` | `HEAD` |

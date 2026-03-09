@@ -125,7 +125,13 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
     model.eval()
 
     # ── 1. Batched inference ──────────────────────────────────────────────────
-    all_codes = []
+    # Sort by modality so pc and img examples are never mixed in the same batch.
+    # Mixed batches cause heavy left-padding on pc examples to match the longer
+    # img prompts (video tokens), which distorts img generation quality.
+    examples = sorted(examples, key=lambda e: e.get('_modality', 'pc'))
+
+    all_codes = [''] * len(examples)
+    sorted_indices = list(range(len(examples)))
     n = len(examples)
     for i in range(0, n, eval_batch_size):
         chunk = examples[i:i + eval_batch_size]
@@ -155,7 +161,7 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
         prompt_len = batch['input_ids'].shape[1]
         for j in range(len(chunk)):
             code = processor.decode(generated_ids[j, prompt_len:], skip_special_tokens=True)
-            all_codes.append(code)
+            all_codes[i + j] = code
 
     # ── 2. Parallel reward computation ───────────────────────────────────────
     buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
