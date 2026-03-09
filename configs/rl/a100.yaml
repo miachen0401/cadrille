@@ -16,10 +16,10 @@ checkpoints_dir: ./checkpoints
 mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data
+# Data — hard-mined examples from Hula0401/mine_CAD (6,861 examples at R_th=0.75)
 train_modality: img      # paper default: image input for RL
-data_dir: ./data/cadrille_training
-hard_examples_pkl: null
+data_dir: null
+hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
 # Training
@@ -33,7 +33,7 @@ eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3
 max_new_tokens: 1024
-rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
+rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 8
 eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
 eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)

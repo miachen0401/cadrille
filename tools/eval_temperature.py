@@ -178,6 +178,8 @@ def main():
                         max_new_tokens=args.max_new_tokens,
                         do_sample=do_sample,
                         temperature=temp if do_sample else 1.0,
+                        top_k=50,
+                        top_p=1.0,
                         bad_words_ids=[[model.config.video_token_id]],
                     )
                 except Exception:

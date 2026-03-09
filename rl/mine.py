@@ -249,7 +249,8 @@ def main():
 
                 if is_hard:
                     hard_examples.append({"gt_mesh_path": stl_path,
-                                          "file_name": file_name})
+                                          "file_name": file_name,
+                                          "is_pc": (args.modality == "pc")})
 
                 record = {
                     "gt_mesh_path": stl_path,
