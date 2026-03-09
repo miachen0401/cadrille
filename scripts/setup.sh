@@ -26,8 +26,8 @@ uv sync --no-install-project
 # ── 3. Packages that need special build flags ──────────────────────────────────
 echo "[3/4] Installing pytorch3d, cadquery (git), flash-attn ..."
 
-# pytorch3d: git-only; --no-deps avoids re-resolving torch/numpy which are already present
-uv pip install --no-deps \
+# pytorch3d: git-only; --no-build-isolation lets its setup.py see the already-installed torch
+uv pip install --no-deps --no-build-isolation \
     "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f"
 
 # cadquery: git version has fixes not yet released on PyPI
