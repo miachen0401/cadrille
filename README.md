@@ -32,26 +32,30 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 
 ```bash
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
-huggingface-cli login && wandb login
 
-# 1. Install deps + SFT checkpoint + test mesh data (~5 GB total)
+# 1. Install deps (uv, torch, huggingface_hub, wandb, pytorch3d, cadquery, flash-attn)
+bash scripts/setup.sh
+
+# 2. Login — huggingface-cli and wandb are now available via uv run
+uv run huggingface-cli login
+uv run wandb login
+
+# 3. Download SFT checkpoint + test mesh data (~5 GB total)
 bash scripts/setup.sh --data
 
-# 2. Download pre-mined hard examples (6,861 STLs + index, ~29 MB)
+# 4. Download pre-mined hard examples (6,861 STLs + index, ~29 MB)
 uv run python3 - <<'EOF'
 from huggingface_hub import hf_hub_download
 import os, zipfile, pickle
 
 os.makedirs("data/mined", exist_ok=True)
 
-# Download and extract STLs (deepcad/ and fusion360/ subdirs inside zip)
 z = hf_hub_download("Hula0401/mine_CAD", "combined_hard_stls.zip",
                      repo_type="dataset", local_dir="data/mined")
 with zipfile.ZipFile(z) as zf:
     zf.extractall("data/mined")
 print("STLs extracted → data/mined/deepcad/ + data/mined/fusion360/")
 
-# Download index pkl and rewrite with local paths
 pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
                        repo_type="dataset", local_dir="data/mined/hf")
 with open(pkl, "rb") as f:
@@ -63,12 +67,14 @@ with open("data/mined/combined_hard.pkl", "wb") as f:
 print(f"data/mined/combined_hard.pkl ready: {len(rows)} examples")
 EOF
 
-# 3. Train — pick config for your GPU
+# 5. Train — use screen/tmux so training survives SSH disconnects
+screen -S rl    # or: tmux new -s rl
 PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
+# Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r rl
 
 # Resume after crash / session timeout
 PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \
-    --checkpoint-path ./checkpoints/<run-name>/checkpoint-5000
+    --checkpoint-path ./checkpoints/<run-name>/checkpoint-<N>
 ```
 
 **GPU configs:**
