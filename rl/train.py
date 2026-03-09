@@ -103,10 +103,17 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     device = next(model.parameters()).device
     model.eval()
 
+    # Pick the N smallest meshes — simplest geometry → highest expected IoU.
+    # If IoU is still low on these, the pipeline is clearly broken.
+    smoke_indices = sorted(
+        range(len(dataset.examples)),
+        key=lambda i: os.path.getsize(dataset.examples[i]['gt_mesh_path'])
+    )[:n]
+
     ious = []
     n_failed = 0
-    for i in range(min(n, len(dataset))):
-        example = dataset[i]
+    for i, idx in enumerate(smoke_indices):
+        example = dataset[idx]
         collate_item = {k: v for k, v in example.items() if k != 'gt_mesh_path'}
         batch = collate([collate_item], processor=processor, n_points=256, eval=True)
 
