@@ -61,6 +61,7 @@ docs/                # design documents and paper notes
 ```
 
 **Rules:**
+- **Always add new dataset paths to `.gitignore` before downloading data.** Datasets are never committed.
 - No debug scripts in the repo root or rl/. One-off scripts → delete after use.
 - If a script is worth keeping, put it in `tools/` with a full argparse docstring and add it to `tools/README.md`.
 - No scratch notebooks committed (use `colab.ipynb` only for the public demo).

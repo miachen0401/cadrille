@@ -345,5 +345,234 @@ Both bugs are fixed in current `rl/dataset.py`. The pipeline now gives 84.7% on 
 - [x] F1: Paper pipeline sanity check → 76.8%
 - [x] F2: Our render_img() path (30 samples) → 79.5%
 - [x] F3: Our render_img() path (200 samples) → 84.7% ✅ PASS
-- [ ] T5: Start img RL training (ask user before starting)
+- [x] T5: img RL training started → see Run 7 below
 - [ ] T6: Fusion360 train split — download STEP + convert → add to cadrille_training/
+
+---
+
+## 2026-03-08 (continued): Hard Example Mining
+
+### Context
+Paper confirmed: RL training uses hard-mined subset only (mean IoU < 0.75 over K rollouts).
+Expected: ~12k hard from 84k DeepCAD, ~7k hard from 30k Fusion360.
+Full scan (114k STLs × 7s) = ~9 days on single 4080 → using max_samples budget instead.
+
+### Actions
+- [x] Killed training Run 7 (step ~200, PID 45051) — switching to mined data
+- [x] Fusion360 train pipeline: 2GB download → 30,820 STLs → zip (62MB) → uploaded to `Hula0401/fusion360_train_mesh`
+- [x] `data/cadrille_training/fusion360` symlink created
+- [x] `rl/mine.py` rewritten: MeshDataset STL input, R_th=0.75 (was 7.5 in old ×10 scale), checkpointing every 500, --resume support
+- [x] `.gitignore` updated: added `data/fusion360_train_mesh/`, comment rule
+- [x] `CLAUDE.md` updated: always gitignore before download
+- [~] **Mining DeepCAD** — PID 46532, `logs/mine_deepcad.log`
+  - K=1, R_th=0.75, max_samples=20000, img mode, max_new_tokens=400
+  - ~5s/example → ~28h for 20k samples → checkpoint every 500
+  - **2026-03-08 06:10**: 275/20000 processed, ~5s/ea. First checkpoint at 500 (~35min away)
+  - GPU usage: 10.3 GB / 16 GB (no room for training simultaneously)
+  - Training Run 8 (PID 56080) killed before OOM — will restart after mining
+- [ ] Mining Fusion360 — runs after DeepCAD mining finishes (same script, max_samples=8000)
+- [ ] Merge pkls → `data/mined/combined_hard.pkl`
+- [ ] Upload to `Hula0401/mine_CAD`
+- [ ] Restart training (Run 8) with `hard_examples_pkl: ./data/mined/combined_hard.pkl`
+
+### Next eval plan (after Run 8 step 1000+)
+- `tools/eval_img.py` on 500 DeepCAD + 500 Fusion360 samples
+- Compare to SFT baseline: DeepCAD 86.4%, Fusion360 76.6%
+
+---
+
+## 2026-03-08: Reward Alignment + Repo Cleanup + RL Training Launch
+
+### Reward Alignment (commit `ceeb33d`)
+
+All files updated to match paper reference (`ref_code/cadrille-rl/rl_finetune/utils.py`):
+
+| File | Change |
+|------|--------|
+| `rl/reward.py` | Both pred+GT normalized with `transform_real_mesh` (center+scale to [-1,1]); reward scale raw IoU∈[0,1] / -1.0 (was ×10 / -10) |
+| `rl/eval.py` | Added `bad_words_ids=[[model.config.video_token_id]]`; fixed failure threshold -1.0; removed /10 scaling |
+| `rl/algorithms/cppo.py` | Clamp rewards to [-1,1] (was [-10,10]); `_safe_histogram()` preserved |
+| `rl/eval_passk.py` | IoU threshold -1.0, no /10 scaling |
+| `tools/eval_img.py` | Created from debug script; added bad_words_ids |
+
+### Repo Structure Cleanup (commit `8067fbe`)
+
+- Moved `data/deepcad2mesh.py` → `tools/deepcad2mesh.py`
+- Moved `direction.md`, `reward_model_design.md` → `docs/`
+- Created `tools/README.md`
+- Added CLAUDE.md repo structure rules
+- Updated `.gitignore`: logs/, DeepCAD/, data/data.tar, .bash_history, .claude/
+
+### Setup + README for Fresh VM (commit `9583d0b`)
+
+- `scripts/setup.sh --data`: added `deepcad_train_mesh` download + `cadrille_training/deepcad` symlink
+- `README.md`: fixed reward formula, rewrote Data section, reorganized Quick Start
+
+### Step 0 SFT Baselines (via RL eval at step=0)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| pc/DeepCAD IoU | 84.5% | Reliable |
+| pc/Fusion360 IoU | 78.0% | Reliable |
+| img/DeepCAD IoU | 9.7% | ⚠ Unreliable — mixed-batch left-padding bug |
+| img/Fusion360 IoU | 10.5% | ⚠ Unreliable |
+
+### deepcad_train_mesh Zip
+
+- Created `/workspace/data/deepcad_train_mesh.zip` (242 MB, compresslevel=1, 84,526 STLs)
+- HF upload to `Hula0401/deepcad_train_mesh` **pending**
+
+### Run 7 — Current (img mode, reward-aligned)
+
+| Field | Value |
+|---|---|
+| Run name | `rl-s50k-lr1e-5-G4-cppo-0308-0025` |
+| PID | 45051 |
+| W&B | https://wandb.ai/hula-the-cat/cadrille-rl/runs/qh088ege |
+| Commit | `ceeb33d` (reward-aligned) |
+| Data | `data/cadrille_training/deepcad` → `deepcad_train_mesh` (84,526 STLs) |
+| Modality | img |
+| val samples | 200 DeepCAD + 200 Fusion360 |
+| Pre-training baseline | pc/DeepCAD=84.5%, pc/Fusion360=78.0%; img unreliable |
+| Status | 🟢 Running — step 200+ @ ~51 s/step |
+| Reward max | 0.86 (step 152 and 200) |
+| Entropy | H≈0.22–0.49, oscillating ~0.35 — stable, not collapsing |
+| Log | `logs/rl-0308-0025.log` |
+| Notes | Rewards in [-1,1], correct normalization. img eval metric unreliable in mixed batches. |
+
+### Known Issues (open)
+
+| Issue | Status |
+|-------|--------|
+| img eval in mixed pc+img batches: heavy left-padding distorts attention → 9.7% instead of ~86% | Open — use `tools/eval_img.py` for benchmarks |
+| HF upload of `deepcad_train_mesh.zip` pending | Run manually when convenient |
+- [2026-03-08 06:14] daemon state=MINING_DEEPCAD | dc=499/20000 hard=0 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=46532
+- [2026-03-08 06:21] daemon state=MINING_DEEPCAD | dc=590/20000 hard=0 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 06:32] daemon state=MINING_DEEPCAD | dc=747/20000 hard=0 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 06:43] daemon state=MINING_DEEPCAD | dc=911/20000 hard=0 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 06:54] daemon state=MINING_DEEPCAD | dc=1082/20000 hard=111 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 07:05] daemon state=MINING_DEEPCAD | dc=1247/20000 hard=111 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 07:16] daemon state=MINING_DEEPCAD | dc=1411/20000 hard=111 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 07:27] daemon state=MINING_DEEPCAD | dc=1573/20000 hard=111 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 07:38] daemon state=MINING_DEEPCAD | dc=1738/20000 hard=219 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 07:49] daemon state=MINING_DEEPCAD | dc=1911/20000 hard=219 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:00] daemon state=MINING_DEEPCAD | dc=2088/20000 hard=325 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:11] daemon state=MINING_DEEPCAD | dc=2257/20000 hard=325 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:22] daemon state=MINING_DEEPCAD | dc=2424/20000 hard=325 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:33] daemon state=MINING_DEEPCAD | dc=2601/20000 hard=416 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:44] daemon state=MINING_DEEPCAD | dc=2767/20000 hard=416 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 08:55] daemon state=MINING_DEEPCAD | dc=2931/20000 hard=416 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 09:06] daemon state=MINING_DEEPCAD | dc=3077/20000 hard=515 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 09:17] daemon state=MINING_DEEPCAD | dc=3244/20000 hard=515 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 09:27] daemon state=MINING_DEEPCAD | dc=3403/20000 hard=515 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 09:38] daemon state=MINING_DEEPCAD | dc=3569/20000 hard=515 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 09:49] daemon state=MINING_DEEPCAD | dc=3751/20000 hard=630 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:00] daemon state=MINING_DEEPCAD | dc=3922/20000 hard=630 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:11] daemon state=MINING_DEEPCAD | dc=4091/20000 hard=720 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:22] daemon state=MINING_DEEPCAD | dc=4259/20000 hard=720 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:33] daemon state=MINING_DEEPCAD | dc=4431/20000 hard=720 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:44] daemon state=MINING_DEEPCAD | dc=4597/20000 hard=838 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 10:55] daemon state=MINING_DEEPCAD | dc=4775/20000 hard=838 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 11:06] daemon state=MINING_DEEPCAD | dc=4944/20000 hard=838 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 11:17] daemon state=MINING_DEEPCAD | dc=5113/20000 hard=932 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 11:28] daemon state=MINING_DEEPCAD | dc=5286/20000 hard=932 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 11:39] daemon state=MINING_DEEPCAD | dc=5453/20000 hard=932 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 11:50] daemon state=MINING_DEEPCAD | dc=5627/20000 hard=1027 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:01] daemon state=MINING_DEEPCAD | dc=5793/20000 hard=1027 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:12] daemon state=MINING_DEEPCAD | dc=5971/20000 hard=1027 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:23] daemon state=MINING_DEEPCAD | dc=6138/20000 hard=1133 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:34] daemon state=MINING_DEEPCAD | dc=6309/20000 hard=1133 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:45] daemon state=MINING_DEEPCAD | dc=6468/20000 hard=1133 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 12:56] daemon state=MINING_DEEPCAD | dc=6640/20000 hard=1237 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 13:07] daemon state=MINING_DEEPCAD | dc=6809/20000 hard=1237 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 13:18] daemon state=MINING_DEEPCAD | dc=6977/20000 hard=1237 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 13:29] daemon state=MINING_DEEPCAD | dc=7144/20000 hard=1346 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=69066
+- [2026-03-08 13:37] daemon state=MINING_DEEPCAD | dc=7266/20000 hard=1346 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 13:48] daemon state=MINING_DEEPCAD | dc=7622/20000 hard=1346 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 13:59] daemon state=MINING_DEEPCAD | dc=7974/20000 hard=1452 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 14:10] daemon state=MINING_DEEPCAD | dc=8334/20000 hard=1564 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 14:21] daemon state=MINING_DEEPCAD | dc=8690/20000 hard=1564 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 14:32] daemon state=MINING_DEEPCAD | dc=9018/20000 hard=1660 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 14:42] daemon state=MINING_DEEPCAD | dc=9346/20000 hard=1764 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 14:53] daemon state=MINING_DEEPCAD | dc=9662/20000 hard=1764 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:04] daemon state=MINING_DEEPCAD | dc=9970/20000 hard=1872 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:15] daemon state=MINING_DEEPCAD | dc=10266/20000 hard=1981 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:26] daemon state=MINING_DEEPCAD | dc=10558/20000 hard=1981 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:37] daemon state=MINING_DEEPCAD | dc=10862/20000 hard=2085 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:48] daemon state=MINING_DEEPCAD | dc=11166/20000 hard=2085 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 15:59] daemon state=MINING_DEEPCAD | dc=11470/20000 hard=2190 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 16:10] daemon state=MINING_DEEPCAD | dc=11750/20000 hard=2299 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 16:21] daemon state=MINING_DEEPCAD | dc=12090/20000 hard=2299 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 16:32] daemon state=MINING_DEEPCAD | dc=12446/20000 hard=2417 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 16:43] daemon state=MINING_DEEPCAD | dc=12794/20000 hard=2531 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 16:54] daemon state=MINING_DEEPCAD | dc=13154/20000 hard=2531 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 17:05] daemon state=MINING_DEEPCAD | dc=13518/20000 hard=2633 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 17:16] daemon state=MINING_DEEPCAD | dc=13870/20000 hard=2742 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 17:27] daemon state=MINING_DEEPCAD | dc=14214/20000 hard=2859 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 17:38] daemon state=MINING_DEEPCAD | dc=14578/20000 hard=2859 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 17:49] daemon state=MINING_DEEPCAD | dc=14934/20000 hard=2972 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:00] daemon state=MINING_DEEPCAD | dc=15290/20000 hard=3094 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:11] daemon state=MINING_DEEPCAD | dc=15626/20000 hard=3094 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:22] daemon state=MINING_DEEPCAD | dc=15986/20000 hard=3198 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:33] daemon state=MINING_DEEPCAD | dc=16358/20000 hard=3322 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:44] daemon state=MINING_DEEPCAD | dc=16718/20000 hard=3428 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 18:55] daemon state=MINING_DEEPCAD | dc=17074/20000 hard=3428 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 19:06] daemon state=MINING_DEEPCAD | dc=17418/20000 hard=3537 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 19:17] daemon state=MINING_DEEPCAD | dc=17782/20000 hard=3661 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 19:28] daemon state=MINING_DEEPCAD | dc=18158/20000 hard=3661 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 19:39] daemon state=MINING_DEEPCAD | dc=18502/20000 hard=3752 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 19:50] daemon state=MINING_DEEPCAD | dc=18866/20000 hard=3846 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:01] daemon state=MINING_DEEPCAD | dc=19210/20000 hard=3961 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:12] daemon state=MINING_DEEPCAD | dc=19550/20000 hard=3961 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:23] daemon state=MINING_DEEPCAD | dc=19898/20000 hard=4075 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:34] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:45] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 20:56] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 21:07] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 21:18] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 21:29] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 21:40] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 21:51] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:02] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:13] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:24] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:35] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:46] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 22:57] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 23:08] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 23:19] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 23:30] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 23:41] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-08 23:52] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:03] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:13] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:24] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:35] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:46] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 00:57] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 01:08] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 01:19] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 01:30] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 01:41] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 01:52] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:03] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:14] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:25] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:36] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:47] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 02:58] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:09] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:20] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:31] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:42] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:53] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=23516
+- [2026-03-09 03:58] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=0/8000 hard=0 | state=MINING_DEEPCAD mine_pid=None
+- [2026-03-09 04:02] daemon state=MINING_DEEPCAD | dc=20167/20000 hard=4173 | f3=52/8000 hard=0 | state=MINING_DEEPCAD mine_pid=25130
+- [2026-03-09 04:02] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=68/8000 hard=0 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 04:10] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=264/8000 hard=0 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 04:21] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=540/8000 hard=184 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 04:32] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=832/8000 hard=184 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 04:43] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=1112/8000 hard=359 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 04:54] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=1392/8000 hard=359 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 05:05] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=1672/8000 hard=517 | state=MINING_FUSION360 mine_pid=25130
+- [2026-03-09 05:16] daemon state=MINING_FUSION360 | dc=20167/20000 hard=4173 | f3=1952/8000 hard=517 | state=MINING_FUSION360 mine_pid=25130

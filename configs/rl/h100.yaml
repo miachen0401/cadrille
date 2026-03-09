@@ -37,6 +37,7 @@ eps_low: 0.1
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
 max_new_tokens: 400           # scripts are 115–220 tokens; 400 is safe ceiling
+rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
 reward_workers: 16            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: true
 buffer_sample_size: 1
