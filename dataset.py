@@ -2,6 +2,8 @@ import os
 import pickle
 import open3d
 import trimesh
+
+open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Error)
 import skimage
 import numpy as np
 from PIL import Image, ImageOps
@@ -19,8 +21,32 @@ def mesh_to_point_cloud(mesh, n_points, n_pre_points=8192):
     return np.asarray(vertices)
 
 
+_offscreen_renderer: "open3d.visualization.rendering.OffscreenRenderer | None" = None
+
+def _get_offscreen_renderer(width: int = 500, height: int = 500):
+    """Return a per-process singleton OffscreenRenderer (creates it once, silently)."""
+    global _offscreen_renderer
+    if _offscreen_renderer is None:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        saved_out, saved_err = os.dup(1), os.dup(2)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        try:
+            _offscreen_renderer = open3d.visualization.rendering.OffscreenRenderer(width, height)
+            _offscreen_renderer.render_to_image()  # force Filament to fully initialize while fds are suppressed
+        finally:
+            os.dup2(saved_out, 1)
+            os.dup2(saved_err, 2)
+            os.close(saved_out)
+            os.close(saved_err)
+            os.close(devnull_fd)
+    return _offscreen_renderer
+
+
 def mesh_to_image(mesh, camera_distance=-1.8, front=[1, 1, 1], width=500, height=500, img_size=128):
-    renderer = open3d.visualization.rendering.OffscreenRenderer(width, height)
+    renderer = _get_offscreen_renderer(width, height)
+    renderer.scene.clear_geometry()
+
     mat = open3d.visualization.rendering.MaterialRecord()
     mat.shader = "defaultLit"
     renderer.scene.add_geometry("mesh", mesh, mat)
