@@ -92,10 +92,40 @@ watch -n3 nvidia-smi                 # GPU utilisation
 
 ```bash
 docker build -t cadrille .
-bash scripts/setup.sh --data   # download data outside container
 
+# Download data on host (mounted into container via -v)
+docker run --rm -v $(pwd):/workspace \
+    -e HUGGING_FACE_HUB_TOKEN=<hf_token> \
+    cadrille python3 -u - <<'EOF'
+from huggingface_hub import hf_hub_download
+import os, zipfile, pickle
+
+# SFT checkpoint
+os.system("huggingface-cli download maksimko123/cadrille --repo-type model --local-dir checkpoints/cadrille-sft")
+
+# Test meshes
+for repo, fname, out in [
+    ("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",   "data/deepcad_test_mesh"),
+    ("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip", "data/fusion360_test_mesh"),
+]:
+    z = hf_hub_download(repo, fname, repo_type="dataset", local_dir="data/_zips")
+    os.makedirs(out, exist_ok=True)
+    with zipfile.ZipFile(z) as zf: zf.extractall(out)
+
+# Hard examples
+os.makedirs("data/mined", exist_ok=True)
+z = hf_hub_download("Hula0401/mine_CAD", "combined_hard_stls.zip", repo_type="dataset", local_dir="data/mined")
+with zipfile.ZipFile(z) as zf: zf.extractall("data/mined")
+pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl", repo_type="dataset", local_dir="data/mined/hf")
+with open(pkl, "rb") as f: rows = pickle.load(f)
+for r in rows: r["gt_mesh_path"] = f"./data/mined/{r['dataset']}/{r['file_name']}.stl"
+with open("data/mined/combined_hard.pkl", "wb") as f: pickle.dump(rows, f)
+print(f"Ready: {len(rows)} hard examples")
+EOF
+
+# Train
 docker run --gpus all --rm \
-    -e WANDB_API_KEY=<key> \
+    -e WANDB_API_KEY=<wandb_key> \
     -e PYTHONUNBUFFERED=1 \
     -v $(pwd):/workspace \
     cadrille \
