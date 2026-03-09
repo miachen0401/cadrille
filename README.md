@@ -36,9 +36,10 @@ git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 # 1. Install deps (uv, torch, huggingface_hub, wandb, pytorch3d, cadquery, flash-attn)
 bash scripts/setup.sh
 
-# 2. Login — huggingface-cli and wandb are now available via uv run
-uv run huggingface-cli login
-uv run wandb login
+# 2. Set credentials — copy the example and fill in your tokens
+cp .env.example .env   # then edit .env with your HF_TOKEN and WANDB_API_KEY
+source .env            # loads HF_TOKEN and WANDB_API_KEY into the shell
+# Alternative: interactive login (uv run huggingface-cli login && uv run wandb login)
 
 # 3. Download SFT checkpoint + test mesh data (~5 GB total)
 bash scripts/setup.sh --data
