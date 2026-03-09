@@ -387,8 +387,10 @@ def cppo_step(model, optimizer, items, processor, args,
     ]
     gt_paths = [it['gt_mesh_path'] for it in items for _ in range(G)]  # blocked order
 
+    t_rew = time.perf_counter()
     rewards   = compute_rewards_parallel(code_strings, gt_paths,
                                          workers=args.reward_workers)
+    rew_seconds = time.perf_counter() - t_rew
     rewards_t = torch.tensor(rewards, dtype=torch.float32).view(B, G)  # [B, G]
     # Guard against non-finite reward values before mean/std/topk.
     rewards_t = torch.nan_to_num(
@@ -413,6 +415,8 @@ def cppo_step(model, optimizer, items, processor, args,
             'train/adv_mean_tok': 0.0,
             'train/avg_gen_len':  avg_gen_len,
             'train/gen_seconds':  gen_seconds,
+            'train/rew_seconds':  rew_seconds,
+            'train/grad_seconds': 0.0,
             '_rewards_list':      rewards,
             '_reward_std_groups': std_r.tolist(),
             **_NAN_DIAG,
@@ -456,6 +460,7 @@ def cppo_step(model, optimizer, items, processor, args,
     last_entropy = float('nan')
     last_new_lp  = None
 
+    t_grad = time.perf_counter()
     for k in range(args.batch_updates):
         is_last = (k == args.batch_updates - 1)
         model.train()
@@ -524,6 +529,7 @@ def cppo_step(model, optimizer, items, processor, args,
         else:
             diag = dict(_NAN_DIAG)
 
+    grad_seconds = time.perf_counter() - t_grad
     _n_tok = comp_mask.sum().clamp(min=1)
     return {
         'train/loss':         last_loss,
@@ -541,6 +547,8 @@ def cppo_step(model, optimizer, items, processor, args,
         'train/adv_mean_tok': ((advantages * comp_mask).sum() / _n_tok).item(),
         'train/avg_gen_len':  avg_gen_len,
         'train/gen_seconds':  gen_seconds,
+        'train/rew_seconds':  rew_seconds,
+        'train/grad_seconds': grad_seconds,
         '_rewards_list':      rewards,
         '_reward_std_groups': std_r.tolist(),
         **diag,
@@ -737,6 +745,8 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/kl_q_np':         metrics['train/kl_q_np'],
                         'train/kl_q_nn':         metrics['train/kl_q_nn'],
                         'train/gen_seconds':     metrics['train/gen_seconds'],
+                        'train/rew_seconds':     metrics['train/rew_seconds'],
+                        'train/grad_seconds':    metrics['train/grad_seconds'],
                         'train/lr':              lr,
                         'dist/rewards': _safe_histogram(metrics['_rewards_list']),
                         'dist/ratios':  _safe_histogram(metrics['_ratio_list']),
