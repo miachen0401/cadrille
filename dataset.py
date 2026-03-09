@@ -4,6 +4,26 @@ import open3d
 import trimesh
 
 open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Error)
+
+
+def _ensure_display():
+    """Start a headless Xvfb display if no DISPLAY is set (needed for open3d Visualizer)."""
+    if os.environ.get('DISPLAY'):
+        return
+    import subprocess, time
+    for disp in range(99, 110):
+        lock = f'/tmp/.X{disp}-lock'
+        if os.path.exists(lock):
+            os.environ['DISPLAY'] = f':{disp}'
+            return
+        try:
+            subprocess.Popen(['Xvfb', f':{disp}', '-screen', '0', '1024x768x24'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1.0)
+            os.environ['DISPLAY'] = f':{disp}'
+            return
+        except FileNotFoundError:
+            break  # Xvfb not installed — fall through silently
 import skimage
 import numpy as np
 from PIL import Image, ImageOps
@@ -21,44 +41,37 @@ def mesh_to_point_cloud(mesh, n_points, n_pre_points=8192):
     return np.asarray(vertices)
 
 
-_offscreen_renderer: "open3d.visualization.rendering.OffscreenRenderer | None" = None
-
-def _get_offscreen_renderer(width: int = 500, height: int = 500):
-    """Return a per-process singleton OffscreenRenderer (creates it once, silently)."""
-    global _offscreen_renderer
-    if _offscreen_renderer is None:
-        devnull_fd = os.open(os.devnull, os.O_WRONLY)
-        saved_out, saved_err = os.dup(1), os.dup(2)
-        os.dup2(devnull_fd, 1)
-        os.dup2(devnull_fd, 2)
-        try:
-            _offscreen_renderer = open3d.visualization.rendering.OffscreenRenderer(width, height)
-            _offscreen_renderer.render_to_image()  # force Filament to fully initialize while fds are suppressed
-        finally:
-            os.dup2(saved_out, 1)
-            os.dup2(saved_err, 2)
-            os.close(saved_out)
-            os.close(saved_err)
-            os.close(devnull_fd)
-    return _offscreen_renderer
-
-
 def mesh_to_image(mesh, camera_distance=-1.8, front=[1, 1, 1], width=500, height=500, img_size=128):
-    renderer = _get_offscreen_renderer(width, height)
-    renderer.scene.clear_geometry()
+    _ensure_display()
+    vis = open3d.visualization.Visualizer()
+    vis.create_window(width=width, height=height, visible=False)
+    vis.add_geometry(mesh)
 
-    mat = open3d.visualization.rendering.MaterialRecord()
-    mat.shader = "defaultLit"
-    renderer.scene.add_geometry("mesh", mesh, mat)
+    lookat = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+    front_array = np.array(front, dtype=np.float32)
+    up = np.array([0, 1, 0], dtype=np.float32)
 
-    lookat = np.array([0.5, 0.5, 0.5])
-    front_n = np.array(front, dtype=float)
-    front_n /= np.linalg.norm(front_n)
-    eye = lookat + front_n * camera_distance
-    up = np.array([0.0, 1.0, 0.0])
+    eye = lookat + front_array * camera_distance
+    right = np.cross(up, front_array)
+    right /= np.linalg.norm(right)
+    true_up = np.cross(front_array, right)
+    rotation_matrix = np.column_stack((right, true_up, front_array)).T
+    extrinsic = np.eye(4)
+    extrinsic[:3, :3] = rotation_matrix
+    extrinsic[:3, 3] = -rotation_matrix @ eye
 
-    renderer.setup_camera(60.0, lookat, eye, up)
-    image = np.asarray(renderer.render_to_image())
+    view_control = vis.get_view_control()
+    camera_params = view_control.convert_to_pinhole_camera_parameters()
+    camera_params.extrinsic = extrinsic
+    view_control.convert_from_pinhole_camera_parameters(camera_params)
+
+    vis.poll_events()
+    vis.update_renderer()
+    image = vis.capture_screen_float_buffer(do_render=True)
+    vis.destroy_window()
+
+    image = np.asarray(image)
+    image = (image * 255).astype(np.uint8)
 
     image = skimage.transform.resize(
         image,
