@@ -149,6 +149,13 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
         key=lambda i: os.path.getsize(dataset.examples[i]['gt_mesh_path'])
     )[:n]
 
+    # Pick the N smallest meshes — simplest geometry → highest expected IoU.
+    # If IoU is still low on these, the pipeline is clearly broken.
+    smoke_indices = sorted(
+        range(len(dataset.examples)),
+        key=lambda i: os.path.getsize(dataset.examples[i]['gt_mesh_path'])
+    )[:n]
+
     ious = []
     n_failed = 0
     for i, idx in enumerate(smoke_indices):
