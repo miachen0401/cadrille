@@ -104,7 +104,8 @@ Each is a single zip file on HuggingFace (avoids the 5000-file resolver rate lim
 
 | Dataset | HuggingFace | Size | Purpose |
 |---------|-------------|------|---------|
-| `deepcad_train_mesh` | `Hula0401/deepcad_train_mesh` | ~1.1 GB | RL training (84k STLs) |
+| `deepcad_train_mesh` | `Hula0401/deepcad_train_mesh` | ~242 MB | RL training — DeepCAD (84k STLs) |
+| `fusion360_train_mesh` | `Hula0401/fusion360_train_mesh` | ~TBD | RL training — Fusion360 (6.9k STLs) |
 | `deepcad_test_mesh` | `Hula0401/deepCAD_test` | ~413 MB | Eval (8k STLs) |
 | `fusion360_test_mesh` | `Hula0401/fusion360_test_mesh` | ~126 MB | Eval (1.7k STLs) |
 | `cadrille-sft` checkpoint | `maksimko123/cadrille` | ~4.5 GB | RL starting point |

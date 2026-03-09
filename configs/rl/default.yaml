@@ -33,6 +33,7 @@ eps_low: 0.1             # PPO clip lower bound
 batch_updates: 3         # gradient steps per rollout (re-use same data)
 batch_size: 1            # prompt batch size for each GRPO rollout step
 max_new_tokens: 1024     # CAD code requires >800 tokens; 1024 matches paper
+rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
 reward_workers: 4        # parallel reward compute workers
 # Optional replay buffer (ref-style hard-example curriculum)
 use_buffer: false

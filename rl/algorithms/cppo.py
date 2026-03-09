@@ -212,8 +212,11 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
     if _blocked:
         bad_words = _blocked
 
-    gen_kwargs = dict(max_new_tokens=args.max_new_tokens, do_sample=True,
-                      temperature=1.0, top_p=1.0, top_k=50,
+    rollout_temp = getattr(args, 'rollout_temperature', 1.0)
+    gen_kwargs = dict(max_new_tokens=args.max_new_tokens,
+                      do_sample=(rollout_temp > 0),
+                      temperature=rollout_temp if rollout_temp > 0 else 1.0,
+                      top_p=1.0, top_k=50,
                       early_stopping=False,
                       bad_words_ids=bad_words)
     sequential = getattr(args, 'sequential_generation', False)

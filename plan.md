@@ -2,7 +2,7 @@
 
 ## Goal
 Reproduce Table 2 (img mode) and Table 3 (pc mode) from the Cadrille paper (ICLR 2026).
-Train RL on DeepCAD train split (~84k STLs) + Fusion360 train split using `img` modality.
+Target: DeepCAD IoU 92.2% (img), 90.2% (pc) via Dr. CPPO on DeepCAD + Fusion360 train.
 
 ---
 
@@ -12,144 +12,118 @@ Train RL on DeepCAD train split (~84k STLs) + Fusion360 train split using `img` 
 | Model | SFT Data | RL | DeepCAD IoU | Fusion360 IoU | CC3D IoU |
 |-------|----------|----|-------------|---------------|----------|
 | cadrille | Rpi | ✗ (SFT only) | 86.1% | 77.6% | 56.1% |
-| cadrille | Rpi | DPO (D-i+F-i) | 86.9% | 78.5% | 56.0% |
 | cadrille | Rpi | **Dr. CPPO (D-i+F-i)** | **92.2%** | **84.6%** | **65.0%** |
 
 ### Table 3 — CAD Reconstruction from Point Clouds (pc mode)
 | Model | SFT Data | RL | DeepCAD IoU | Fusion360 IoU | CC3D IoU |
 |-------|----------|----|-------------|---------------|----------|
-| cadrille | Rpi | ✗ (SFT only) | 87.1% | 79.8% | 61.8% |
 | cadrille | Rpi | **Dr. CPPO (D-i+F-i)** | **90.2%** | **85.0%** | **67.9%** |
 
 ---
 
-## Current Situation (2026-03-07): RESOLVED — img eval gap fixed ✅
+## Data Pipeline (DONE ✅)
 
-**RL training can start. img eval gap resolved.**
-
-### Final eval results (after rendering fix, 500 samples)
-| Modality | Dataset | Our eval | Paper SFT | Gap |
-|----------|---------|----------|-----------|-----|
-| pc | DeepCAD | 84.3% | 87.1% | –3pp — acceptable |
-| pc | Fusion360 | 82.7% | 79.8% | +3pp — acceptable |
-| img | DeepCAD | **86.4%** | **86.1%** | **+0.3pp ✅** |
-| img | Fusion360 | **76.6%** | **77.6%** | **–1.0pp ✅** |
-
-Checkpoint used: `checkpoints/cadrille-sft` = **official paper SFT model** (downloaded from
-`Hula0401/cadrille-sft`). The model is correct. The gap is in our evaluation pipeline.
-
-### What we know about the gap
-
-**pc mode works (~87%)** — point cloud input carries exact 3D geometry; no rendering involved.
-
-**img mode broken (~9%)** — 4-view render pipeline has a bug somewhere in the chain:
-  model input → rendering → tokenizer → forward pass → generated code → executed mesh → IoU
-
-**Key facts:**
-- Both `deepcad_test_mesh` and `deepcad_train_mesh` STLs are already in **[0,1]^3 scale**
-  (confirmed by checking bounds: max extent ≈ 1.0, centered near [0.5, 0.5, 0.5])
-- `test.py` correctly does NOT normalize test-split meshes (they're already [0,1])
-- Our `render_img()` in `rl/dataset.py` applies adaptive normalization, which is a near-no-op
-  for [0,1] meshes — so rendering is not the issue
-- The 3px border (`ImageOps.expand(border=3)`) is present in reference code and ours
-- Rendering parameters match reference: camera_distance=-0.9, fronts=[[1,1,1],[-1,-1,-1],...]
-- `checkpoints/cadrille-sft` is the paper's own model — it SHOULD achieve 86.1%
-
-**Remaining suspects (in priority order):**
-1. **Image preprocessing by the tokenizer/processor** — Qwen2-VL processor may apply
-   different pixel normalization or resizing depending on how the PIL image is passed.
-   The collate function passes `{'type': 'video', 'video': [PIL_image], 'fps': 1.0}` —
-   this is the video pathway of Qwen2-VL. The processor's `min_pixels`/`max_pixels`
-   settings determine token count and resize behavior. Mismatch here would corrupt input.
-2. **Evaluation IoU computation** — our training eval uses voxel-sampling IoU while the
-   paper uses volumetric boolean IoU (`evaluate.py`). May give different absolute values.
-3. **Generated code quality** — model may generate syntactically valid but geometrically
-   wrong code when given our rendered images.
+| Dataset | Location | Count | HuggingFace | Status |
+|---------|----------|-------|-------------|--------|
+| deepcad_train_mesh | `data/cadrille_training/deepcad` | 84,526 STLs | `Hula0401/deepcad_train_mesh` | ✅ |
+| fusion360_train_mesh | `data/cadrille_training/fusion360` | 30,820 STLs | `Hula0401/fusion360_train_mesh` | ✅ |
+| deepcad_test_mesh | `data/deepcad_test_mesh` | 8,047 STLs | `Hula0401/deepCAD_test` | ✅ |
+| fusion360_test_mesh | `data/fusion360_test_mesh` | 1,726 STLs | `Hula0401/fusion360_test_mesh` | ✅ |
+| cadrille-sft checkpoint | `checkpoints/cadrille-sft` | — | `maksimko123/cadrille` | ✅ |
 
 ---
 
-## Fix Plan (must complete before RL training)
+## Paper Data Selection (CRITICAL — confirmed from paper)
 
-### Phase 1 — Isolate the gap with `test.py` + `evaluate.py` (paper's exact pipeline)
+> "Only use examples where mean reward over K=3 SFT rollouts < R_th=7.5 (= IoU 0.75 in raw scale)"
 
-**Step F1: Quick sanity check — 30 samples, img mode, cadrille-sft**
-- Run `test.py --split deepcad_test_mesh --mode img --checkpoint-path ./checkpoints/cadrille-sft`
-  on 30 samples (modify `n_samples` or use `head -30` subset)
-- Run `evaluate.py` on output
-- **Expected if pipeline correct**: IoU ≈ 86%
-- **Expected if pipeline broken**: IoU ≈ 9%
-- This tells us: is `test.py`+`evaluate.py` reproducing the paper, or is the bug also there?
+| Dataset | Raw | After mining (paper) | Expected ours |
+|---------|-----|---------------------|---------------|
+| DeepCAD train | ~160k | **~50k** hard examples | 84k → ~12k (img, IoU<0.75) |
+| Fusion360 train | 6,900 designs | **~3k** hard examples | 30k STLs → ~7k |
+| **Total** | | **~53k** | **~19k** |
 
-**Step F2 (if F1 gives ~86%)**: The bug is only in our `rl/eval.py` rendering pipeline.
-- Compare `test.py`'s image format vs what `rl/eval.py` sends to the model
-- Check processor parameters (min_pixels, max_pixels) — reference uses different values?
-- Fix `rl/eval.py` to match `test.py`'s exact preprocessing
-
-**Step F2 (if F1 gives ~9%)**: The bug is in the fundamental pipeline — rendering or inference.
-- Debug: print a rendered image, save it, visually inspect
-- Check if the model even "sees" the image: inspect pixel_values_videos shape/stats
-- Compare with pc mode: same model, same code path except input modality
-
-**Step F3: Verify fix on 200 samples**
-- Once F1/F2 identifies the bug and we fix it, validate on 200 samples
-- Target: img/DeepCAD IoU > 80% (within 6pp of paper's 86.1%)
+Mining output → `data/mined/` → upload to `Hula0401/mine_CAD`
 
 ---
 
-## Data Pipeline Status
+## Phase 3: Hard Example Mining (CURRENT)
 
-| Dataset | Location | Count | Status |
-|---------|----------|-------|--------|
-| CAD-Recode v1.5 | `data/cad-recode-v1.5/` | pkl only, no STLs | ⚠ STLs missing |
-| deepcad_test_mesh | `data/deepcad_test_mesh/` | 8,047 STLs in [0,1] | ✅ Ready |
-| fusion360_test_mesh | `data/fusion360_test_mesh/` | 1,726 STLs | ✅ Ready |
-| deepcad_train_mesh | `data/deepcad_train_mesh/` | 84,526 STLs in [0,1] | ✅ Ready |
-| cadrille_training | `data/cadrille_training/deepcad` → symlink | 84,526 STLs | ✅ Ready |
-| fusion360_train_mesh | not downloaded | — | ❌ Missing |
+### Status
+- [x] Training Run 7 killed (step ~200, PID 45051)
+- [x] Fusion360 train data ready (30,820 STLs)
+- [x] `cadrille_training/fusion360` symlink created
+- [x] `rl/mine.py` rewritten: MeshDataset, R_th=0.75, checkpointing, resume
+- [~] **Mining DeepCAD** — PID TBD, log `logs/mine_deepcad.log`
+  - Config: K=1, R_th=0.75, max_new_tokens=400, img mode
+  - Input: 84,526 STLs → expected ~12k hard examples
+  - Speed: ~7s/example → ~164 hours full scan OR use --max-samples 20000 (~39h)
+- [ ] **Mining Fusion360** — run after DeepCAD mining completes (or in sequence)
+  - Input: 30,820 STLs → expected ~7k hard examples
+  - Speed: ~7s/example → ~60h full scan OR --max-samples 8000 (~16h)
+- [ ] Merge DeepCAD + Fusion360 pkl → `data/mined/combined_hard.pkl`
+- [ ] Upload to `Hula0401/mine_CAD`
+- [ ] Update configs: `hard_examples_pkl: ./data/mined/combined_hard.pkl`
+
+### Mining constraints on RTX 4080
+Full scan of 115k STLs with K=1 ≈ 9 days. Strategy:
+- Run overnight, collect as many as possible
+- Checkpoint every 500 examples (resumable with --resume)
+- Target: 20k DeepCAD + 8k Fusion360 scanned → ~4k hard examples
+- Upload partial results, retrain, re-mine in background
 
 ---
 
-## Full Task List (ordered by dependency)
+## Phase 4: RL Training (Run 8 — after mining)
 
-### [DONE] Phase 1: Fix img eval gap
+Config changes vs Run 7:
+- `data_dir: null` (unused)
+- `hard_examples_pkl: ./data/mined/combined_hard.pkl`
+- Both DeepCAD + Fusion360 hard examples
+- Same hyperparams: G=4, lr=1e-5, img mode
 
-- [x] **F1**: 30-sample img eval via `test.py` + `evaluate.py` → 76.8% IoU (paper pipeline works)
-- [x] **F2**: Root cause: rendering bugs (no normalization + wrong border). Fixed in `rl/dataset.py`. Our `render_img()` gives 79.5% on same 30 samples.
-- [x] **F3**: 200-sample validation → **84.7% IoU** (paper: 86.1%, gap = 1.4pp ✅)
+Monitoring checklist (check every ~2h):
+- [ ] Reward trend rising? (target: mean > 0.5 by step 500)
+- [ ] Entropy stable? (H > 0.1 — if drops to 0 → collapse, stop)
+- [ ] Eval IoU improving? (check step 200, 400, 600 evals)
+- [ ] Disk usage < 900 GB? (checkpoints ~4.5 GB each, save_total_limit=10)
+- [ ] Training log fresh? (grep last timestamp)
 
-### [DONE] Phase 2: Data
+---
 
-- [x] T1: DeepCAD train split → STL (84,526 STLs in `deepcad_train_mesh/`)
-- [x] T2: Create `data/cadrille_training/deepcad` symlink
-- [x] T3: Update all RL configs → `cadrille_training/`
-- [ ] T4 (optional): Fusion360 train split — download + convert → add symlink
+## Phase 5: Evaluation (after Run 8 hits step 1000+)
 
-### Phase 3: RL Training (ready to start)
+```bash
+python tools/eval_img.py \
+    --checkpoint ./checkpoints/cadrille-rl-run8/checkpoint-1000 \
+    --split deepcad_test_mesh --n-samples 500
+```
 
-- [ ] T5: Start img RL training (50k steps, 4080 SUPER, ~23 days)
-  - Config: `configs/rl/4080.yaml`
-  - Only start after F3 confirms img eval gap is fixed
-- [ ] T6: Monitor training (reward trend, eval every 200 steps)
-- [ ] T7: At step 1000, evaluate on full deepcad_test_mesh (8047 samples) for Table 2 comparison
+Compare to:
+- Paper SFT baseline: DeepCAD 86.1%, Fusion360 77.6%
+- Paper RL target: DeepCAD 92.2%, Fusion360 84.6%
+- Our SFT baseline: DeepCAD 86.4%, Fusion360 76.6%
 
 ---
 
 ## Architecture Notes
 
-- `MeshDataset` in `rl/dataset.py`: `glob(**/*.stl, recursive=True)` — finds STLs in subdirs
-- `render_img()` normalization: center→[-1,1]→scale(0.5)→[-0.5,0.5]→+0.5→[0,1] — no-op for [0,1] meshes
-- `test.py` + `evaluate.py`: paper's reference pipeline; uses volumetric boolean IoU
-- `rl/eval.py`: our training-time eval; uses voxel-sampling IoU (faster, lower absolute values)
-- CPPO reward: IoU × 10; degenerate groups (std=0) → skipped via `_safe_histogram()`
-- lr=1e-5 (not 3e-5): G=4 has higher gradient variance than official G=16
+- Reward: raw IoU ∈ [0,1] / -1 for failure (both pred+GT normalized to [-1,1]³)
+- CPPO reward clamp: [-1, 1]; degenerate groups (std=0) skipped
+- `MeshDataset`: `glob(**/*.stl, recursive=True)` — picks up subdirs automatically
+- `RLDataset`: loads from pkl `{gt_mesh_path, file_name}` — used when `hard_examples_pkl` set
+- img eval in mixed pc+img batches unreliable → use `tools/eval_img.py` for benchmarks
+- cadrille_training/ combines deepcad/ + fusion360/ via symlinks (MeshDataset recurses)
 
-## Known Bugs Fixed
+---
 
-| Bug | File | Fix |
-|-----|------|-----|
-| `wandb.Histogram` crash on zero-range rewards | `rl/algorithms/cppo.py` | Added `_safe_histogram()` |
-| Mesh not normalized before rendering (was mm scale) | `rl/dataset.py` | Added `transform_real_mesh` equivalent |
-| 3px border removed (wrong) | `rl/dataset.py` | Restored `ImageOps.expand(border=3)` |
-| Reward scale mismatch: was IoU×10 / -10; ref uses raw IoU / -1 | `rl/reward.py`, `rl/eval.py`, `rl/algorithms/cppo.py`, `rl/eval_passk.py` | Changed to raw IoU ∈ [0,1] and -1 for failure |
-| Mesh normalization mismatch: only pred normalized to [0,1]; ref normalizes both to [-1,1] | `rl/reward.py` | `transform_real_mesh` applied to both pred and GT (center + scale 2/max_extent) |
-| `bad_words_ids` missing from `model.generate()` in eval | `rl/eval.py`, `tools/eval_img.py` | Added `bad_words_ids=[[model.config.video_token_id]]` |
+## Known Issues / Fixed Bugs
+
+| Bug | Fix | Commit |
+|-----|-----|--------|
+| Reward scale ×10 vs raw IoU | Changed to raw IoU / -1 | ceeb33d |
+| Mesh normalization pred-only | Both pred+GT → [-1,1]³ | ceeb33d |
+| bad_words_ids missing | Added to all generate() calls | ceeb33d |
+| img eval unreliable in mixed batches | Use tools/eval_img.py | open |
+| mine.py uses CadRecodeDataset (pkl) | Rewrote to use MeshDataset (raw STL) | current |
+| mine.py R_th=7.5 (old ×10 scale) | Fixed to R_th=0.75 (raw IoU scale) | current |
