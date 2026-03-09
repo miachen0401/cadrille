@@ -41,34 +41,10 @@ cp .env.example .env   # then edit .env with your HF_TOKEN and WANDB_API_KEY
 source .env            # loads HF_TOKEN and WANDB_API_KEY into the shell
 # Alternative: interactive login (uv run huggingface-cli login && uv run wandb login)
 
-# 3. Download SFT checkpoint + test mesh data (~5 GB total)
+# 3. Download SFT checkpoint + test meshes + hard examples (~5 GB total)
 bash scripts/setup.sh --data
 
-# 4. Download pre-mined hard examples (6,861 STLs + index, ~29 MB)
-uv run python3 - <<'EOF'
-from huggingface_hub import hf_hub_download
-import os, zipfile, pickle
-
-os.makedirs("data/mined", exist_ok=True)
-
-z = hf_hub_download("Hula0401/mine_CAD", "combined_hard_stls.zip",
-                     repo_type="dataset", local_dir="data/mined")
-with zipfile.ZipFile(z) as zf:
-    zf.extractall("data/mined")
-print("STLs extracted → data/mined/deepcad/ + data/mined/fusion360/")
-
-pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
-                       repo_type="dataset", local_dir="data/mined/hf")
-with open(pkl, "rb") as f:
-    rows = pickle.load(f)
-for r in rows:
-    r["gt_mesh_path"] = f"./data/mined/{r['dataset']}/{r['file_name']}.stl"
-with open("data/mined/combined_hard.pkl", "wb") as f:
-    pickle.dump(rows, f)
-print(f"data/mined/combined_hard.pkl ready: {len(rows)} examples")
-EOF
-
-# 5. Train — use screen/tmux so training survives SSH disconnects
+# 4. Train — use screen/tmux so training survives SSH disconnects
 screen -S rl    # or: tmux new -s rl
 PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
 # Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r rl
