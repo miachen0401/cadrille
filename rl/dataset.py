@@ -137,7 +137,7 @@ class RLDataset:
             'file_name': ex['file_name'],
             'gt_mesh_path': ex['gt_mesh_path'],
         }
-        if ex.get('is_pc', True):
+        if ex.get('is_pc', False) and 'point_cloud' in ex:
             item['point_cloud'] = ex['point_cloud']
         else:
             item.update(render_img(ex['gt_mesh_path']))

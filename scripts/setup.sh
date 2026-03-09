@@ -82,21 +82,7 @@ def download_zip(repo_id, zip_name, out_dir):
 
 download_zip("Hula0401/deepCAD_test",          "deepcad_test_mesh.zip",      "data/deepcad_test_mesh")
 download_zip("Hula0401/fusion360_test_mesh",   "fusion360_test_mesh.zip",    "data/fusion360_test_mesh")
-download_zip("Hula0401/deepcad_train_mesh",    "deepcad_train_mesh.zip",     "data/deepcad_train_mesh")
-download_zip("Hula0401/fusion360_train_mesh",  "fusion360_train_mesh.zip",   "data/fusion360_train_mesh")
 EOF
-
-    # cadrille_training/ — combined training dir used by RL configs as data_dir
-    # MeshDataset globs **/*.stl recursively, so subdirs work fine.
-    mkdir -p data/cadrille_training
-    if [[ ! -L "data/cadrille_training/deepcad" ]]; then
-        ln -sfn "$(pwd)/data/deepcad_train_mesh" "data/cadrille_training/deepcad"
-        echo "  data/cadrille_training/deepcad → deepcad_train_mesh symlink created"
-    fi
-    if [[ ! -L "data/cadrille_training/fusion360" ]]; then
-        ln -sfn "$(pwd)/data/fusion360_train_mesh" "data/cadrille_training/fusion360"
-        echo "  data/cadrille_training/fusion360 → fusion360_train_mesh symlink created"
-    fi
 
     echo "[4/4] Data download complete."
 else
@@ -105,6 +91,7 @@ fi
 
 echo ""
 echo "Setup complete."
-echo "  Train : uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1"
-echo "  Resume: uv run python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1 \\"
-echo "              --checkpoint-path checkpoints/cadrille-rl-v1/checkpoint-<N>"
+echo "  Next: download hard examples — see README Quick Start step 2"
+echo "  Train : PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml"
+echo "  Resume: PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \\"
+echo "              --checkpoint-path checkpoints/<run-name>/checkpoint-<N>"

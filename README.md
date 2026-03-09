@@ -28,55 +28,79 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 
 ---
 
-### Quick Start — RL Training on a Remote VM
-
-**Option A: Bare metal (recommended)**
+### Quick Start — RL Training on a New VM
 
 ```bash
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 huggingface-cli login && wandb login
 
-# Install deps + download checkpoint + all mesh data (~1.8 GB total)
-# Downloads: cadrille-sft checkpoint, deepcad_train_mesh, deepcad_test_mesh, fusion360_test_mesh
+# 1. Install deps + SFT checkpoint + test mesh data (~5 GB total)
 bash scripts/setup.sh --data
 
-# Train (pick config for your GPU — see table below)
-python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
+# 2. Download pre-mined hard examples (6,861 STLs + index, ~29 MB)
+uv run python3 - <<'EOF'
+from huggingface_hub import hf_hub_download
+import os, zipfile, pickle
+
+os.makedirs("data/mined", exist_ok=True)
+
+# Download and extract STLs (deepcad/ and fusion360/ subdirs inside zip)
+z = hf_hub_download("Hula0401/mine_CAD", "combined_hard_stls.zip",
+                     repo_type="dataset", local_dir="data/mined")
+with zipfile.ZipFile(z) as zf:
+    zf.extractall("data/mined")
+print("STLs extracted → data/mined/deepcad/ + data/mined/fusion360/")
+
+# Download index pkl and rewrite with local paths
+pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
+                       repo_type="dataset", local_dir="data/mined/hf")
+with open(pkl, "rb") as f:
+    rows = pickle.load(f)
+for r in rows:
+    r["gt_mesh_path"] = f"./data/mined/{r['dataset']}/{r['file_name']}.stl"
+with open("data/mined/combined_hard.pkl", "wb") as f:
+    pickle.dump(rows, f)
+print(f"data/mined/combined_hard.pkl ready: {len(rows)} examples")
+EOF
+
+# 3. Train — pick config for your GPU
+PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
 
 # Resume after crash / session timeout
-python rl/train.py --config configs/rl/h100.yaml \
-    --run-name cadrille-rl-v1 \
-    --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-5000
+PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \
+    --checkpoint-path ./checkpoints/<run-name>/checkpoint-5000
+```
+
+**GPU configs:**
+
+| VRAM | Config | G | Notes |
+|------|--------|---|-------|
+| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16 | Full paper hyperparameters |
+| ~40 GB (A100 40G) | `configs/rl/a100.yaml` | 8 | AdamW8bit |
+| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4 | Sequential generation |
+
+For 8× GPU: `torchrun --nproc_per_node=8 rl/train.py --config configs/rl/h100x8.yaml`
+
+**Monitor:**
+```bash
+tail -f logs/<run-name>.log          # live training log
+watch -n3 nvidia-smi                 # GPU utilisation
+# W&B dashboard: https://wandb.ai/hula-the-cat/cadrille-rl
 ```
 
 **Option B: Docker**
 
 ```bash
-git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 docker build -t cadrille .
+bash scripts/setup.sh --data   # download data outside container
 
-# Download data outside the container (mounted as volumes)
-huggingface-cli login
-bash scripts/setup.sh --data
-
-# Train
 docker run --gpus all --rm \
-    -e WANDB_API_KEY=<your_wandb_key> \
-    -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    -e WANDB_API_KEY=<key> \
+    -e PYTHONUNBUFFERED=1 \
     -v $(pwd):/workspace \
     cadrille \
-    python rl/train.py --config configs/rl/h100.yaml --run-name cadrille-rl-v1
+    python3 -u rl/train.py --config configs/rl/h100.yaml
 ```
-
-Config by GPU:
-
-| VRAM | Config | G | Notes |
-|------|--------|---|-------|
-| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16 | Full paper hyperparameters |
-| ~40 GB (A100 40G) | `configs/rl/a100.yaml` | 8 | Adam8bit |
-| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4 | Sequential generation |
-
-For 8× GPU: replace `python` with `torchrun --nproc_per_node=8` and use `configs/rl/h100x8.yaml`.
 
 ---
 

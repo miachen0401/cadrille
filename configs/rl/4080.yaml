@@ -18,9 +18,9 @@ mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
-data_dir: ./data/cadrille_training
+data_dir: null
 train_modality: img      # paper default: img mode (train_mode='img' in train_cadrille_grpo.py)
-hard_examples_pkl: null
+hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
 # Training
@@ -35,7 +35,7 @@ eps_high: 0.1
 eps_low: 0.1
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
 max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
-rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
+rollout_temperature: 0.3    # sampling temp for G rollouts; chosen by temp sweep (best pass@4)
 reward_workers: 4
 eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
 eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
