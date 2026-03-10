@@ -19,7 +19,7 @@ checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
 data_dir: null
-train_modality: pc       # img mode unavailable on this machine (EGL/open3d segfault in CUDA process)
+train_modality: img
 hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
@@ -53,7 +53,7 @@ val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
-val_modalities:        pc
+val_modalities:        pc,img
 eval_steps: 500
 
 # Logging & checkpoints
