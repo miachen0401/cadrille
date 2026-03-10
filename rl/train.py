@@ -103,8 +103,22 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     device = next(model.parameters()).device
     model.eval()
 
-    for i in range(min(n, len(dataset))):
-        example = dataset[i]
+    # Pick the N smallest meshes — simplest geometry → highest expected IoU.
+    # If IoU is still low on these, the pipeline is clearly broken.
+    # Skip missing paths so a single stale entry in the pkl never aborts startup.
+    valid_indices = [
+        i for i in range(len(dataset.examples))
+        if os.path.exists(dataset.examples[i]['gt_mesh_path'])
+    ]
+    smoke_indices = sorted(
+        valid_indices,
+        key=lambda i: os.path.getsize(dataset.examples[i]['gt_mesh_path'])
+    )[:n]
+
+    ious = []
+    n_failed = 0
+    for i, idx in enumerate(smoke_indices):
+        example = dataset[idx]
         collate_item = {k: v for k, v in example.items() if k != 'gt_mesh_path'}
         batch = collate([collate_item], processor=processor, n_points=256, eval=True)
 
@@ -131,7 +145,6 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
 
         print(f'\n─── example {i+1}: {example.get("file_name", "?")} ───')
         print(f'  generated ({len(code)} chars):')
-        # Print first 400 chars of generated code, indented
         for line in code[:400].splitlines():
             print(f'    {line}')
         if len(code) > 400:
@@ -150,10 +163,15 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
         if proc.stdout.strip():
             data = _json.loads(proc.stdout.strip())
             if data.get('iou') is not None:
-                print(f'  → IoU = {data["iou"]:.4f}  reward = {data["iou"]*10:.2f}  ✓')
+                iou = data['iou']
+                ious.append(iou)
+                bar = '█' * int(iou * 20)
+                print(f'  → IoU = {iou:.4f}  reward = {iou:.4f}  [{bar:<20}]  ✓')
             else:
+                n_failed += 1
                 print(f'  → FAILED  error: {data.get("error", "?")}')
         else:
+            n_failed += 1
             print(f'  → FAILED  returncode={proc.returncode}')
 
         if proc.stderr.strip():
@@ -161,7 +179,20 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
             for line in proc.stderr.strip()[-400:].splitlines():
                 print(f'    {line}')
 
-    print(f'\n{"="*60}\n')
+    # ── Summary ──────────────────────────────────────────────────────────────
+    avg_iou = sum(ious) / len(ious) if ious else 0.0
+    n_valid = len(ious)
+    if avg_iou >= 0.5:
+        verdict = '✅ OK  (rendering + reward pipeline look healthy)'
+    elif avg_iou >= 0.2:
+        verdict = '⚠️  LOW  (expected ≥0.5 for SFT baseline — check rendering/reward)'
+    else:
+        verdict = '❌ BROKEN  (avg IoU < 0.2 — check rendering, checkpoint, reward scale)'
+
+    print(f'\n{"="*60}')
+    print(f'[smoke test] {n_valid}/{n} valid  {n_failed}/{n} failed')
+    print(f'             avg IoU = {avg_iou:.4f}  {verdict}')
+    print(f'{"="*60}\n')
     model.train()
 
 
@@ -339,7 +370,8 @@ def train(args, cfg_to_save=None):
                     print(f'Combined dataset: {len(dataset)} examples '
                           f'({len(dataset) - len(dataset2)} + {len(dataset2)})')
         elif args.hard_examples_pkl:
-            dataset = RLDataset(args.hard_examples_pkl)
+            modality = getattr(args, 'train_modality', 'img')
+            dataset = RLDataset(args.hard_examples_pkl, modality=modality)
         else:
             raise ValueError('Provide data_dir (real meshes) or hard_examples_pkl in config')
 

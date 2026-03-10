@@ -1,23 +1,28 @@
-# RL smoke test — 10 steps, tiny data, no real validation
-# Designed for fast CI/CD testing (< 5 min including model load).
+# RL smoke test — 20 steps on 100 verified GT pairs (IoU=1.0 for GT code)
 #
-# Usage:
-#   python rl/train.py --config configs/rl/smoke.yaml --run-name smoke-test
+# Purpose: quickly verify reward pipeline, eval loop, and training dynamics
+# before committing to a full training run.
+#
+# Build smoke dataset first:
+#   python3 tools/create_smoke_dataset.py --n 100 --no-verify
+#
+# Then run:
+#   python3 rl/train.py --config configs/rl/smoke.yaml
 
-checkpoints_dir: ./checkpoints
+checkpoints_dir: ./checkpoints/smoke
 
 mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data — mini dataset (100 meshes)
-train_modality: img      # paper default: image input for RL
-data_dir: ./data/deepcad_test_mini
-hard_examples_pkl: null
+# Smoke data: 100 simple GT pairs where GT code → IoU=1.0
+data_dir: null
+train_modality: pc        # pc is faster than img (no rendering overhead)
+hard_examples_pkl: ./data/smoke_train/smoke_train.pkl
 dpo_dataset: null
 
-# Training — 10 steps only
-max_steps: 10
-lr: 3.0e-5
+# Training — 20 steps to exercise reward, gradient, and eval paths
+max_steps: 20
+lr: 1.0e-5
 
 # CPPO — minimal G for speed
 G: 2
@@ -25,30 +30,31 @@ top_N: 1
 eps_high: 0.1
 eps_low: 0.1
 batch_updates: 1
-max_new_tokens: 64           # short for smoke test
-rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
-reward_workers: 2
-eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
-eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
+max_new_tokens: 512         # long enough for real CadQuery code
+rollout_temperature: 0.3
+reward_workers: 4
+eval_workers: 2
+eval_timeout: 60.0
 sequential_generation: true
 
 # DPO (unused)
 beta: 0.3
-dpo_epochs_per_round: 10
+dpo_epochs_per_round: 1
 
-# Validation — 5 samples, pc only
-val_deepcad_dir:       ./data/deepcad_test_mini
+# Validation: 10 deepcad test meshes, pc only (fast eval, no rendering)
+val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     null
-val_samples_deepcad:   5
+val_samples_deepcad:   10
 val_samples_fusion360: 0
 val_modalities:        pc
-eval_steps: 999999           # disable mid-training eval for smoke test
+eval_steps: 10              # evaluate at step 10 and 20
 
 # Logging
 log_steps: 1
-save_steps: 999999           # no checkpoint saves during smoke test
+save_steps: 999999          # no checkpoints during smoke test
+save_total_limit: 1
 
-# W&B
+# W&B — offline so smoke tests don't pollute the real project dashboard
 wandb_project: cadrille-rl
 wandb_entity: null
-wandb_offline: true          # always offline for smoke test
+wandb_offline: true

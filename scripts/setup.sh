@@ -53,7 +53,7 @@ if [[ "${1:-}" == "--data" ]]; then
     echo "[4/4] Downloading checkpoint and mesh data from HuggingFace ..."
 
     # SFT checkpoint — small number of files, no rate-limit issue
-    huggingface-cli download maksimko123/cadrille \
+    uv run huggingface-cli download maksimko123/cadrille \
         --repo-type model --local-dir checkpoints/cadrille-sft
 
     # Mesh datasets + hard examples — all downloaded as single zips to avoid HF's

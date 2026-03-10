@@ -121,11 +121,17 @@ class MeshDataset:
 
 
 class RLDataset:
-    """Loads hard-mined examples from rl/mine.py output pkl."""
+    """Loads hard-mined examples from rl/mine.py output pkl.
 
-    def __init__(self, pkl_path: str):
+    modality='img' (default): renders 4-view image on every __getitem__ call.
+    modality='pc': generates point cloud on every __getitem__ call (lazy, no upfront cost).
+    """
+
+    def __init__(self, pkl_path: str, modality: str = 'img', n_points: int = 256):
         with open(pkl_path, 'rb') as f:
             self.examples = pickle.load(f)
+        self.modality = modality
+        self.n_points = n_points
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -137,8 +143,13 @@ class RLDataset:
             'file_name': ex['file_name'],
             'gt_mesh_path': ex['gt_mesh_path'],
         }
-        if ex.get('is_pc', False) and 'point_cloud' in ex:
-            item['point_cloud'] = ex['point_cloud']
+        if self.modality == 'pc':
+            import trimesh
+            from dataset import mesh_to_point_cloud
+            mesh = trimesh.load(ex['gt_mesh_path'])
+            pc = mesh_to_point_cloud(mesh, self.n_points)
+            pc = (pc - 0.5) * 2
+            item['point_cloud'] = pc
         else:
             item.update(render_img(ex['gt_mesh_path']))
         return item

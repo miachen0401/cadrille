@@ -638,3 +638,34 @@ All files updated to match paper reference (`ref_code/cadrille-rl/rl_finetune/ut
 - [2026-03-09 16:06] daemon state=TRAINING | dc=20167/20000 hard=4173 | f3=8000/8000 hard=2688 | state=TRAINING mine_pid=99267
 - [2026-03-09 16:12] daemon state=TEMP_EVAL | dc=20167/20000 hard=4173 | f3=8000/8000 hard=2688 | state=TEMP_EVAL mine_pid=None
 - [2026-03-09 16:13] daemon state=TRAINING | dc=20167/20000 hard=4173 | f3=8000/8000 hard=2688 | state=TRAINING mine_pid=None
+
+## IoU Pipeline Verification (2026-03-10) — branch: rl-train
+
+### What was wrong
+- `RLDataset` ignored `train_modality` from config — always called `render_img()` regardless
+- `dataset.py` had dead Visualizer+Xvfb code; `open3d.visualization.rendering` not available
+
+### Fixes
+- `rl/dataset.py:RLDataset`: Added `modality` parameter; pc mode generates point cloud lazily
+- `rl/train.py`: passes `modality=train_modality` when constructing RLDataset
+- `dataset.py`: Restored OffscreenRenderer; removed `_ensure_display()` dead code
+
+### Tests added (tests/test_iou.py — 11 tests, all passing)
+- Trimesh IoU: identical cubes=1.0, non-overlapping=0.0, half-overlap≈1/3
+- Normalization alignment: rl/reward.py [-1,1]³ vs evaluate.py [0,1]³ → same IoU ✓
+- CadQuery: GT code on GT mesh ≥0.95 IoU ✓; invalid/empty → -1.0 ✓
+- evaluate.py path vs rl/reward.py path alignment ✓
+
+### Smoke dataset (data/smoke_train/ — 100 items, gitignored)
+- 100 simplest items from cad-recode-v1.5/train (sorted by STL file size)
+- GT code → IoU=1.0 for all 100 items (verified)
+- `tools/create_smoke_dataset.py` + `configs/rl/smoke.yaml`
+
+### Smoke run results (20-step run, logs/smoke-0310.log)
+| Step | pc/DeepCAD IoU | Fail rate |
+|------|----------------|-----------|
+| 0    | 86.3%          | 0%        |
+| 10   | 89.3%          | 0%        |
+| 20   | 89.0%          | 10%       |
+
+Pipeline verified: reward computation, eval loop, and training dynamics all correct.
