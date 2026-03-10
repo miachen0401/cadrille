@@ -365,7 +365,8 @@ def train(args, cfg_to_save=None):
                     print(f'Combined dataset: {len(dataset)} examples '
                           f'({len(dataset) - len(dataset2)} + {len(dataset2)})')
         elif args.hard_examples_pkl:
-            dataset = RLDataset(args.hard_examples_pkl)
+            modality = getattr(args, 'train_modality', 'img')
+            dataset = RLDataset(args.hard_examples_pkl, modality=modality)
         else:
             raise ValueError('Provide data_dir (real meshes) or hard_examples_pkl in config')
 

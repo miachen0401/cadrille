@@ -2,31 +2,11 @@ import os
 import pickle
 import open3d
 import trimesh
-
-open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Error)
-
-
-def _ensure_display():
-    """Start a headless Xvfb display if no DISPLAY is set (needed for open3d Visualizer)."""
-    if os.environ.get('DISPLAY'):
-        return
-    import subprocess, time
-    for disp in range(99, 110):
-        lock = f'/tmp/.X{disp}-lock'
-        if os.path.exists(lock):
-            os.environ['DISPLAY'] = f':{disp}'
-            return
-        try:
-            subprocess.Popen(['Xvfb', f':{disp}', '-screen', '0', '1024x768x24'],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1.0)
-            os.environ['DISPLAY'] = f':{disp}'
-            return
-        except FileNotFoundError:
-            break  # Xvfb not installed — fall through silently
 import skimage
 import numpy as np
 from PIL import Image, ImageOps
+
+open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Error)
 
 import torch
 from torch.utils.data import Dataset
@@ -42,37 +22,21 @@ def mesh_to_point_cloud(mesh, n_points, n_pre_points=8192):
 
 
 def mesh_to_image(mesh, camera_distance=-1.8, front=[1, 1, 1], width=500, height=500, img_size=128):
-    _ensure_display()
-    vis = open3d.visualization.Visualizer()
-    vis.create_window(width=width, height=height, visible=False)
-    vis.add_geometry(mesh)
-
-    lookat = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-    front_array = np.array(front, dtype=np.float32)
-    up = np.array([0, 1, 0], dtype=np.float32)
-
+    lookat = np.array([0.5, 0.5, 0.5], dtype=np.float64)
+    front_array = np.array(front, dtype=np.float64)
+    front_array = front_array / np.linalg.norm(front_array)
     eye = lookat + front_array * camera_distance
-    right = np.cross(up, front_array)
-    right /= np.linalg.norm(right)
-    true_up = np.cross(front_array, right)
-    rotation_matrix = np.column_stack((right, true_up, front_array)).T
-    extrinsic = np.eye(4)
-    extrinsic[:3, :3] = rotation_matrix
-    extrinsic[:3, 3] = -rotation_matrix @ eye
+    up = np.array([0, 1, 0], dtype=np.float64)
 
-    view_control = vis.get_view_control()
-    camera_params = view_control.convert_to_pinhole_camera_parameters()
-    camera_params.extrinsic = extrinsic
-    view_control.convert_from_pinhole_camera_parameters(camera_params)
+    renderer = open3d.visualization.rendering.OffscreenRenderer(width, height)
+    mat = open3d.visualization.rendering.MaterialRecord()
+    mat.shader = "defaultLit"
+    renderer.scene.add_geometry("mesh", mesh, mat)
+    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])
+    renderer.setup_camera(60.0, lookat.tolist(), eye.tolist(), up.tolist())
 
-    vis.poll_events()
-    vis.update_renderer()
-    image = vis.capture_screen_float_buffer(do_render=True)
-    vis.destroy_window()
-
-    image = np.asarray(image)
-    image = (image * 255).astype(np.uint8)
-
+    img = renderer.render_to_image()
+    image = np.asarray(img)[..., :3]  # drop alpha if RGBA
     image = skimage.transform.resize(
         image,
         output_shape=(img_size, img_size),
