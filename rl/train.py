@@ -102,6 +102,9 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     print(f'{"="*60}')
     device = next(model.parameters()).device
     model.eval()
+    had_gc = getattr(model, 'is_gradient_checkpointing', False)
+    if had_gc:
+        model.gradient_checkpointing_disable()
 
     # Pick the N smallest meshes — simplest geometry → highest expected IoU.
     # If IoU is still low on these, the pipeline is clearly broken.
@@ -121,6 +124,10 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
         example = dataset[idx]
         collate_item = {k: v for k, v in example.items() if k != 'gt_mesh_path'}
         batch = collate([collate_item], processor=processor, n_points=256, eval=True)
+
+        # Reset stale rope_deltas so get_rope_index() fires fresh (same fix as eval.py).
+        if hasattr(model, 'rope_deltas'):
+            model.rope_deltas = None
 
         generated_ids = model.generate(
             input_ids=batch['input_ids'].to(device),
@@ -193,6 +200,8 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     print(f'[smoke test] {n_valid}/{n} valid  {n_failed}/{n} failed')
     print(f'             avg IoU = {avg_iou:.4f}  {verdict}')
     print(f'{"="*60}\n')
+    if had_gc:
+        model.gradient_checkpointing_enable()
     model.train()
 
 

@@ -32,7 +32,8 @@
 
 - **`train_modality` must always be `img`** in all RL configs (4080, a100, h100, smoke). Never switch to `pc` mode to work around rendering issues — fix the rendering instead.
 - **`val_modalities` must always include `img`** (e.g. `pc,img`). Never drop img from validation.
-- The EGL/CUDA conflict on 4080 is solved by pre-rendering PNG cache before model loading (`pre_render_img_cache` in `rl/train.py`). Do not revert this.
+- Rendering uses the custom conda open3d (`0.18.0+8e434558a`) via `Visualizer(visible=False)` — no EGL or Xvfb needed. The PyPI open3d requires EGL and **must not be installed** (`pip install open3d` breaks rendering).
+- Run `tools/prerender_dataset.py` to pre-render STLs to `{stem}_render.png` PNGs; `render_img()` loads the PNG if it exists, otherwise falls back to on-the-fly rendering.
 
 ## Training Visualization
 
