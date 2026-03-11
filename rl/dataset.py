@@ -15,7 +15,17 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 
 def render_img(gt_mesh_path: str) -> dict:
-    """Render 4-view image grid from a mesh path (image-mode examples)."""
+    """Render 4-view image grid from a mesh path (image-mode examples).
+
+    Loads from pre-rendered PNG cache if available ({stem}_render.png),
+    otherwise renders on-the-fly via open3d Visualizer (~1 s per mesh).
+    Run tools/prerender_dataset.py once to populate the cache.
+    """
+    png_path = gt_mesh_path[:-4] + '_render.png'
+    if os.path.exists(png_path):
+        from PIL import Image
+        return {'video': [Image.open(png_path).convert('RGB')]}
+
     import trimesh
     import open3d
     from PIL import Image, ImageOps

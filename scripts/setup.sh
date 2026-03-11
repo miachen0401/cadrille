@@ -62,12 +62,16 @@ if [[ "${1:-}" == "--data" ]]; then
 import os, zipfile, pickle
 from huggingface_hub import hf_hub_download
 
-def download_zip(repo_id, zip_name, out_dir, repo_type="dataset"):
-    n_existing = len([f for f in os.listdir(out_dir) if f.endswith('.stl')]) \
-                 if os.path.isdir(out_dir) else 0
-    if n_existing > 0:
-        print(f"  {out_dir}: {n_existing} STL files already present, skipping")
-        return
+def download_zip(repo_id, zip_name, out_dir, repo_type="dataset", skip_if_ext='.stl'):
+    """Download a zip from HuggingFace and extract to out_dir.
+    Skips if out_dir already contains files with skip_if_ext.
+    Use skip_if_ext='_render.png' for render zips (checks PNG presence).
+    """
+    if os.path.isdir(out_dir):
+        n_existing = len([f for f in os.listdir(out_dir) if f.endswith(skip_if_ext)])
+        if n_existing > 0:
+            print(f"  {out_dir}: {n_existing} {skip_if_ext} files already present, skipping {zip_name}")
+            return
     print(f"  Downloading {zip_name} from {repo_id} ...")
     local_zip = hf_hub_download(repo_id=repo_id, filename=zip_name,
                                 repo_type=repo_type, local_dir="data/_zips")
@@ -75,19 +79,24 @@ def download_zip(repo_id, zip_name, out_dir, repo_type="dataset"):
     print(f"  Extracting → {out_dir} ...")
     with zipfile.ZipFile(local_zip) as zf:
         zf.extractall(out_dir)
-    n = len([f for f in os.listdir(out_dir) if f.endswith('.stl')])
-    print(f"  {out_dir}: {n} STL files extracted")
+    n_stl = len([f for f in os.listdir(out_dir) if f.endswith('.stl')])
+    n_png = len([f for f in os.listdir(out_dir) if f.endswith('.png')])
+    print(f"  {out_dir}: {n_stl} STLs, {n_png} PNGs")
 
-# Test meshes
-download_zip("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",   "data/deepcad_test_mesh")
-download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip", "data/fusion360_test_mesh")
+# Test meshes (STLs + pre-rendered PNGs)
+download_zip("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",      "data/deepcad_test_mesh")
+download_zip("Hula0401/deepCAD_test",        "deepcad_test_renders.zip",   "data/deepcad_test_mesh",   skip_if_ext='_render.png')
+download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip",    "data/fusion360_test_mesh")
+download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_renders.zip", "data/fusion360_test_mesh", skip_if_ext='_render.png')
 
 # Hard examples (training set for RL)
 if os.path.exists("data/mined/combined_hard.pkl"):
     print("  data/mined/combined_hard.pkl already present, skipping")
 else:
     os.makedirs("data/mined", exist_ok=True)
-    download_zip("Hula0401/mine_CAD", "combined_hard_stls.zip", "data/mined")
+    download_zip("Hula0401/mine_CAD", "combined_hard_stls.zip",      "data/mined")
+    download_zip("Hula0401/mine_CAD", "deepcad_hard_renders.zip",    "data/mined/deepcad",   skip_if_ext='_render.png')
+    download_zip("Hula0401/mine_CAD", "fusion360_hard_renders.zip",  "data/mined/fusion360", skip_if_ext='_render.png')
     pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
                           repo_type="dataset", local_dir="data/mined/hf")
     with open(pkl, "rb") as f:
