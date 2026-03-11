@@ -1,9 +1,14 @@
 """Validation and logging utilities for RL training."""
 
 import os
+import sys
 import random
+import shutil
+import subprocess
+import csv
 import numpy as np
 import torch
+from collections import defaultdict
 
 from cadrille import Cadrille, collate
 from rl.dataset import render_img
@@ -14,6 +19,8 @@ try:
     _WANDB_AVAILABLE = True
 except ImportError:
     _WANDB_AVAILABLE = False
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------------------
@@ -124,98 +131,237 @@ def eval_one_pass(model, examples: list, processor, max_new_tokens: int,
     device = next(model.parameters()).device
     model.eval()
 
-    # ── 1. Batched inference ──────────────────────────────────────────────────
-    # Sort by modality so pc and img examples are never mixed in the same batch.
-    # Mixed batches cause heavy left-padding on pc examples to match the longer
-    # img prompts (video tokens), which distorts img generation quality.
-    examples = sorted(examples, key=lambda e: e.get('_modality', 'pc'))
+    # Gradient checkpointing forces use_cache=False which breaks img generation:
+    # prepare_inputs_for_generation sets pixel_values_videos=None for cache_position>0,
+    # so the model loses the image after the first token.  Disable it for eval.
+    had_gc = getattr(model, 'is_gradient_checkpointing', False)
+    if had_gc:
+        model.gradient_checkpointing_disable()
 
-    all_codes = [''] * len(examples)
-    sorted_indices = list(range(len(examples)))
-    n = len(examples)
-    for i in range(0, n, eval_batch_size):
-        chunk = examples[i:i + eval_batch_size]
-        collate_items = [{k: v for k, v in ex.items() if not k.startswith('_')}
-                         for ex in chunk]
-        batch = collate(collate_items, processor=processor, n_points=256, eval=True)
+    try:
+        # ── 1. Batched inference ──────────────────────────────────────────────
+        # Sort by modality so pc and img examples are never mixed in the same batch.
+        # Mixed batches cause heavy left-padding on pc examples to match the longer
+        # img prompts (video tokens), which distorts img generation quality.
+        examples = sorted(examples, key=lambda e: e.get('_modality', 'pc'))
 
-        generated_ids = model.generate(
-            input_ids=batch['input_ids'].to(device),
-            attention_mask=batch['attention_mask'].to(device),
-            point_clouds=batch['point_clouds'].to(device),
-            is_pc=batch['is_pc'].to(device),
-            is_img=batch['is_img'].to(device),
-            pixel_values_videos=(
-                batch['pixel_values_videos'].to(device)
-                if batch.get('pixel_values_videos') is not None else None),
-            video_grid_thw=(
-                batch['video_grid_thw'].to(device)
-                if batch.get('video_grid_thw') is not None else None),
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
-            bad_words_ids=[[model.config.video_token_id]])
+        all_codes = [''] * len(examples)
+        n = len(examples)
+        for i in range(0, n, eval_batch_size):
+            chunk = examples[i:i + eval_batch_size]
+            collate_items = [{k: v for k, v in ex.items() if not k.startswith('_')}
+                             for ex in chunk]
+            batch = collate(collate_items, processor=processor, n_points=256, eval=True)
 
-        prompt_len = batch['input_ids'].shape[1]
-        for j in range(len(chunk)):
-            code = processor.decode(generated_ids[j, prompt_len:], skip_special_tokens=True)
-            all_codes[i + j] = code
+            # Reset cached rope_deltas before each generate() call.
+            # Qwen2VL caches self.rope_deltas after the first img forward pass.
+            # If stale (from a training step), get_rope_index() is skipped,
+            # 2D spatial position IDs for video tokens are NOT computed,
+            # and the model can't interpret images → img IoU ≈ 0.2.
+            if hasattr(model, 'rope_deltas'):
+                model.rope_deltas = None
 
-    # ── 2. Parallel reward computation ───────────────────────────────────────
-    buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
+            generated_ids = model.generate(
+                input_ids=batch['input_ids'].to(device),
+                attention_mask=batch['attention_mask'].to(device),
+                point_clouds=batch['point_clouds'].to(device),
+                is_pc=batch['is_pc'].to(device),
+                is_img=batch['is_img'].to(device),
+                pixel_values_videos=(
+                    batch['pixel_values_videos'].to(device)
+                    if batch.get('pixel_values_videos') is not None else None),
+                video_grid_thw=(
+                    batch['video_grid_thw'].to(device)
+                    if batch.get('video_grid_thw') is not None else None),
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                bad_words_ids=[[model.config.video_token_id]])
 
-    def _score(idx):
-        ex = examples[idx]
-        iou_reward, cd = compute_metrics(
-            all_codes[idx], ex['gt_mesh_path'],
-            timeout=eval_timeout,
-            use_pool=True,   # warm pool + result cache (Fix 1/2/4)
-        )
-        return idx, iou_reward, cd
+            prompt_len = batch['input_ids'].shape[1]
+            for j in range(len(chunk)):
+                code = processor.decode(generated_ids[j, prompt_len:], skip_special_tokens=True)
+                all_codes[i + j] = code
 
-    with ThreadPoolExecutor(max_workers=reward_workers) as pool:
-        futures = [pool.submit(_score, i) for i in range(n)]
-        for fut in as_completed(futures):
-            idx, iou_reward, cd = fut.result()
-            ex    = examples[idx]
-            mod   = ex.get('_modality', 'pc')
-            label = ex.get('_dataset_label', 'DeepCAD test')
-            key   = (mod, label)
-            buckets[key]['total'] += 1
-            if iou_reward <= -1.0:
-                buckets[key]['failures'] += 1
-            else:
-                buckets[key]['ious'].append(iou_reward)
-                if cd is not None:
-                    buckets[key]['cds'].append(cd)
+        # ── 2. Parallel reward computation ───────────────────────────────────
+        buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0, 'total': 0})
 
+        def _score(idx):
+            ex = examples[idx]
+            iou_reward, cd = compute_metrics(
+                all_codes[idx], ex['gt_mesh_path'],
+                timeout=eval_timeout,
+                use_pool=True,
+            )
+            return idx, iou_reward, cd
+
+        with ThreadPoolExecutor(max_workers=reward_workers) as pool:
+            futures = [pool.submit(_score, i) for i in range(n)]
+            for fut in as_completed(futures):
+                idx, iou_reward, cd = fut.result()
+                ex    = examples[idx]
+                mod   = ex.get('_modality', 'pc')
+                label = ex.get('_dataset_label', 'DeepCAD test')
+                key   = (mod, label)
+                buckets[key]['total'] += 1
+                if iou_reward <= -1.0:
+                    buckets[key]['failures'] += 1
+                else:
+                    buckets[key]['ious'].append(iou_reward)
+                    if cd is not None:
+                        buckets[key]['cds'].append(cd)
+
+        out = {}
+        for (mod, label), b in buckets.items():
+            ious = b['ious']
+            cds  = b['cds']
+            fail_frac  = b['failures'] / b['total'] if b['total'] > 0 else 0.0
+            mean_iou   = float(np.mean(ious))   if ious else 0.0
+            median_iou = float(np.median(ious)) if ious else 0.0
+            mean_cd    = float(np.mean(cds))    if cds  else float('nan')
+            median_cd  = float(np.median(cds))  if cds  else float('nan')
+            prefix = f'eval/{mod}/{label}'
+            out[f'{prefix}/IoU mean']          = mean_iou
+            out[f'{prefix}/IoU median']        = median_iou
+            out[f'{prefix}/CD mean']           = mean_cd
+            out[f'{prefix}/CD median']         = median_cd
+            out[f'{prefix}/Failures fraction'] = fail_frac
+            print(f'  [{mod}/{label}] IoU={mean_iou:.3f}  CD={mean_cd:.2e}  Fail={fail_frac*100:.1f}%')
+
+        return out
+
+    finally:
+        if had_gc:
+            model.gradient_checkpointing_enable()
+
+
+def _run_img_eval_subprocess(model, processor, img_examples: list, args) -> dict:
+    """Run img-mode eval via a fresh subprocess to avoid CUDA state contamination.
+
+    The training process accumulates CUDA state (kernel warm-up, memory layout)
+    that causes model.generate() to produce systematically different (worse) code
+    than a fresh process loading the same checkpoint.  Running eval_img.py as a
+    subprocess with a freshly loaded model reproduces the eval_img.py accuracy.
+
+    Memory: saves model to a temp checkpoint, offloads params to CPU (freeing
+    ~4.4 GB VRAM), runs the subprocess (~5 GB), then restores params to GPU.
+    Optimizer states (~8.8 GB) stay on GPU throughout — total GPU peak ≈ 14 GB,
+    within the 16 GB 4080 SUPER budget.
+    """
+    if not img_examples:
+        return {}
+
+    device = next(model.parameters()).device
+    eval_img_py = os.path.join(_REPO_ROOT, 'tools', 'eval_img.py')
+    output_dir  = getattr(args, 'output_dir', '/tmp')
+    ckpt_dir    = os.path.join(output_dir, '_eval_tmp_checkpoint')
+    out_root    = os.path.join(output_dir, '_eval_tmp_img')
     out = {}
-    for (mod, label), b in buckets.items():
-        ious = b['ious']
-        cds  = b['cds']
-        fail_frac  = b['failures'] / b['total'] if b['total'] > 0 else 0.0
-        mean_iou   = float(np.mean(ious))   if ious else 0.0
-        median_iou = float(np.median(ious)) if ious else 0.0
-        mean_cd    = float(np.mean(cds))    if cds  else float('nan')
-        median_cd  = float(np.median(cds))  if cds  else float('nan')
-        prefix = f'eval/{mod}/{label}'
-        out[f'{prefix}/IoU mean']          = mean_iou
-        out[f'{prefix}/IoU median']        = median_iou
-        out[f'{prefix}/CD mean']           = mean_cd
-        out[f'{prefix}/CD median']         = median_cd
-        out[f'{prefix}/Failures fraction'] = fail_frac
-        print(f'  [{mod}/{label}] IoU={mean_iou:.3f}  CD={mean_cd:.2e}  Fail={fail_frac*100:.1f}%')
+
+    try:
+        # 1. Save current model weights to a temp checkpoint.
+        print('[eval/img] Saving temp checkpoint for subprocess eval ...', flush=True)
+        model.save_pretrained(ckpt_dir)
+        # processor is loaded from HF hub inside eval_img.py — no need to save it.
+
+        # 2. Offload model params to CPU to free VRAM for the subprocess.
+        model.cpu()
+        torch.cuda.empty_cache()
+        print('[eval/img] Model offloaded to CPU; VRAM freed.', flush=True)
+
+        # 3. Group img examples by dataset (gt_dir as key).
+        groups = {}
+        for e in img_examples:
+            gt_dir = os.path.dirname(e['gt_mesh_path'])
+            label  = e.get('_dataset_label', 'DeepCAD test')
+            if gt_dir not in groups:
+                groups[gt_dir] = {'label': label, 'n': 0}
+            groups[gt_dir]['n'] += 1
+
+        # 4. Run eval_img.py once per dataset group.
+        for gt_dir, info in groups.items():
+            label     = info['label']
+            n_samples = info['n']
+            short     = 'deepcad' if 'deepcad' in label.lower() else 'fusion360'
+
+            print(f'[eval/img] {label}: eval_img.py ({n_samples} samples) ...', flush=True)
+            subprocess.run([
+                sys.executable, eval_img_py,
+                '--checkpoint',    ckpt_dir,
+                '--splits',        f'{short}:{gt_dir}',
+                '--n-samples',     str(n_samples),
+                '--out-dir',       out_root,
+                '--batch-size',    str(getattr(args, 'eval_batch_size', 8)),
+                '--max-new-tokens', str(args.max_new_tokens),
+                '--seed',          '42',
+            ], timeout=3600)
+
+            # 5. Parse results.csv produced by evaluate.py.
+            results_csv = os.path.join(out_root, short, 'results.csv')
+            if not os.path.exists(results_csv):
+                print(f'[eval/img] WARNING: {results_csv} not found — skipping', flush=True)
+                continue
+
+            ious, cds, failures = [], [], 0
+            with open(results_csv) as f:
+                for row in csv.DictReader(f):
+                    try:
+                        iou = float(row['iou']) if row.get('iou') not in ('', 'None', None) else None
+                        cd  = float(row['cd'])  if row.get('cd')  not in ('', 'None', None) else None
+                    except (ValueError, KeyError):
+                        iou, cd = None, None
+                    if iou is None:
+                        failures += 1
+                    else:
+                        ious.append(iou)
+                        if cd is not None:
+                            cds.append(cd)
+
+            total  = len(ious) + failures
+            prefix = f'eval/img/{label}'
+            out[f'{prefix}/IoU mean']          = float(np.mean(ious))   if ious else 0.0
+            out[f'{prefix}/IoU median']        = float(np.median(ious)) if ious else 0.0
+            out[f'{prefix}/CD mean']           = float(np.mean(cds))    if cds  else float('nan')
+            out[f'{prefix}/CD median']         = float(np.median(cds))  if cds  else float('nan')
+            out[f'{prefix}/Failures fraction'] = failures / total        if total else 0.0
+            print(f'  [img/{label}] IoU={out[f"{prefix}/IoU mean"]:.3f}  '
+                  f'Fail={out[f"{prefix}/Failures fraction"]*100:.1f}%', flush=True)
+
+    finally:
+        # 6. Restore model params to GPU (optimizer states never left GPU).
+        model.to(device)
+        shutil.rmtree(ckpt_dir, ignore_errors=True)
+        shutil.rmtree(out_root,  ignore_errors=True)
 
     return out
 
 
 def run_validation(model, val_examples: list, processor, args) -> dict:
-    """Greedy eval over all val_examples; returns W&B-ready metrics dict."""
-    return eval_one_pass(
-        model, val_examples, processor, args.max_new_tokens,
-        eval_batch_size=getattr(args, 'eval_batch_size', 8),
-        reward_workers=getattr(args, 'eval_workers', 2),   # Fix 5: separate eval_workers
-        eval_timeout=getattr(args, 'eval_timeout', 120.0), # Fix 1: longer eval timeout
-    )
+    """Greedy eval over all val_examples; returns W&B-ready metrics dict.
+
+    PC examples are evaluated inline (no CUDA state issue for text-only prompts).
+    IMG examples are evaluated via a fresh subprocess (eval_img.py) to avoid
+    CUDA kernel state contamination from the training process, which otherwise
+    causes consistently wrong img IoU (~0.2 vs the correct ~0.83).
+    """
+    pc_examples  = [e for e in val_examples if e.get('_modality') != 'img']
+    img_examples = [e for e in val_examples if e.get('_modality') == 'img']
+
+    out = {}
+
+    if pc_examples:
+        pc_metrics = eval_one_pass(
+            model, pc_examples, processor, args.max_new_tokens,
+            eval_batch_size=getattr(args, 'eval_batch_size', 8),
+            reward_workers=getattr(args, 'eval_workers', 2),
+            eval_timeout=getattr(args, 'eval_timeout', 120.0),
+        )
+        out.update(pc_metrics)
+
+    if img_examples:
+        img_metrics = _run_img_eval_subprocess(model, processor, img_examples, args)
+        out.update(img_metrics)
+
+    return out

@@ -222,7 +222,17 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
     sequential = getattr(args, 'sequential_generation', False)
     device = next(model.parameters()).device
 
-    if not sequential:
+    # Gradient checkpointing causes transformers to override use_cache=False in
+    # generate().  With use_cache=False, Qwen2VL's prepare_inputs_for_generation
+    # sets pixel_values_videos=None for positions > 0, making the model blind to
+    # the image after the first token.  Disable GC for the generate() call and
+    # re-enable it before the backward pass.
+    had_gc = getattr(gen_model, 'is_gradient_checkpointing', False)
+    if had_gc:
+        gen_model.gradient_checkpointing_disable()
+
+    try:
+      if not sequential:
         try:
             expanded = {}
             for k in _GEN_INPUT_KEYS:
@@ -241,31 +251,36 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
             print(f'[rollout] batched G={G} OOM — switching to sequential for rest of run')
             args.sequential_generation = True
 
-    # Sequential fallback: generate one prompt at a time, G rollouts each.
-    single_kwargs = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
-                     for k, v in ((k, single_batch.get(k)) for k in _GEN_INPUT_KEYS)}
-    batch_size = single_kwargs['input_ids'].shape[0]
-    generated_ids_list = []
-    with torch.no_grad():
-        for i in range(batch_size):
-            one = {}
-            for k, v in single_kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    one[k] = v[i:i + 1]
-                else:
-                    one[k] = v
-            for _ in range(G):
-                ids = gen_model.generate(**one, **gen_kwargs)
-                generated_ids_list.append(ids.cpu())
+      # Sequential fallback: generate one prompt at a time, G rollouts each.
+      single_kwargs = {k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                       for k, v in ((k, single_batch.get(k)) for k in _GEN_INPUT_KEYS)}
+      batch_size = single_kwargs['input_ids'].shape[0]
+      generated_ids_list = []
+      with torch.no_grad():
+          for i in range(batch_size):
+              one = {}
+              for k, v in single_kwargs.items():
+                  if isinstance(v, torch.Tensor):
+                      one[k] = v[i:i + 1]
+                  else:
+                      one[k] = v
+              for _ in range(G):
+                  ids = gen_model.generate(**one, **gen_kwargs)
+                  generated_ids_list.append(ids.cpu())
 
-    max_len = max(ids.shape[1] for ids in generated_ids_list)
-    padded = []
-    for ids in generated_ids_list:
-        if ids.shape[1] < max_len:
-            pad = torch.full((1, max_len - ids.shape[1]), pad_token_id, dtype=ids.dtype)
-            ids = torch.cat([ids, pad], dim=1)
-        padded.append(ids)
-    return torch.cat(padded, dim=0)
+      max_len = max(ids.shape[1] for ids in generated_ids_list)
+      padded = []
+      for ids in generated_ids_list:
+          if ids.shape[1] < max_len:
+              pad = torch.full((1, max_len - ids.shape[1]), pad_token_id, dtype=ids.dtype)
+              ids = torch.cat([ids, pad], dim=1)
+          padded.append(ids)
+      return torch.cat(padded, dim=0)
+
+    finally:
+        # Re-enable gradient checkpointing for the subsequent backward pass.
+        if had_gc:
+            gen_model.gradient_checkpointing_enable()
 
 
 # ---------------------------------------------------------------------------
@@ -625,14 +640,14 @@ def train_cppo(model, optimizer, dataset, processor,
         if use_buffer else None
     )
 
-    if val_examples and step == 0 and rank == 0:
-        print('\n[eval step=0 (pre-training baseline)]')
+    if val_examples and rank == 0:
+        print(f'\n[eval step={step} (pre-training baseline)]')
         try:
             raw_model = model.module if hasattr(model, 'module') else model
             val_metrics = run_validation(raw_model, val_examples, processor, args)
-            log_eval(val_metrics, step=0, log_path=log_path, use_wandb=use_wandb)
+            log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
         except Exception as e:
-            print(f'[eval step=0] failed (skipping): {e}')
+            print(f'[eval step={step}] failed (skipping): {e}')
         model.train()
 
     # DistributedSampler gives each rank a disjoint shard of the dataset.
