@@ -35,7 +35,7 @@ eps_low: 0.1
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
-max_new_tokens: 400           # scripts are 115–220 tokens; 400 is safe ceiling
+max_new_tokens: 1024          # 1024 needed for complete CadQuery scripts
 rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 16            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: true
@@ -56,7 +56,7 @@ val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
-val_modalities:        img
+val_modalities:        pc,img
 eval_steps: 100
 
 # Logging & checkpoints

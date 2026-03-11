@@ -21,13 +21,13 @@ checkpoint_path: ./checkpoints/cadrille-sft
 
 # Data
 train_modality: img      # paper default: image input for RL
-data_dir: ./data/cadrille_training
-hard_examples_pkl: null
+data_dir: null
+hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
 # Training (official hyperparameters)
 max_steps: 50000
-lr: 3.0e-5
+lr: 1.0e-5                    # scaled for hard_examples_pkl batch (same as 4080/h100)
 
 # Dr. CPPO — full paper settings (G=16 fits in 80 GB)
 G: 16
@@ -37,7 +37,7 @@ eps_low: 0.1
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3
 max_new_tokens: 1024
-rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
+rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 8
 eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
 eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
@@ -58,6 +58,7 @@ eval_steps: 500
 # Logging & checkpoints
 log_steps: 50
 save_steps: 1000
+save_total_limit: 10
 
 # W&B
 wandb_project: cadrille-rl
