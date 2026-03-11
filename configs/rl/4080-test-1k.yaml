@@ -26,6 +26,7 @@ G: 4
 top_N: 2
 eps_high: 0.1
 eps_low: 0.1
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 1
 max_new_tokens: 64          # reduced from 256 for speed; enough to test algo
 rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy

@@ -27,6 +27,7 @@ G: 16
 top_N: 4
 eps_high: 0.1
 eps_low: 0.1
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3
 batch_size: 2
 max_new_tokens: 1024

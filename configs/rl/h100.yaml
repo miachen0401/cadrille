@@ -32,6 +32,7 @@ G: 16
 top_N: 4
 eps_high: 0.1
 eps_low: 0.1
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
 max_new_tokens: 400           # scripts are 115–220 tokens; 400 is safe ceiling
