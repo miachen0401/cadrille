@@ -29,6 +29,7 @@ G: 2
 top_N: 1
 eps_high: 0.1
 eps_low: 0.1
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 1
 max_new_tokens: 512         # long enough for real CadQuery code
 rollout_temperature: 0.3

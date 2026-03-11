@@ -471,9 +471,10 @@ def cppo_step(model, optimizer, items, processor, args,
     # Phase 2: batch_updates PPO steps on the flat [B*N, T] batch.
     # One forward per inner step — no gradient accumulation needed.
     # ------------------------------------------------------------------
-    last_loss    = 0.0
-    last_entropy = float('nan')
-    last_new_lp  = None
+    last_loss      = 0.0
+    last_entropy   = float('nan')
+    last_new_lp    = None
+    entropy_coef   = float(getattr(args, 'entropy_coef', 0.0))
 
     t_grad = time.perf_counter()
     for k in range(args.batch_updates):
@@ -484,6 +485,10 @@ def cppo_step(model, optimizer, items, processor, args,
 
         loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
                             args.eps_high, args.eps_low)
+        if entropy_coef > 0:
+            step_entropy = compute_policy_entropy(
+                new_out.logits, comp_mask, logits_to_keep)
+            loss = loss - entropy_coef * step_entropy
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
@@ -491,10 +496,13 @@ def cppo_step(model, optimizer, items, processor, args,
 
         if is_last:
             last_loss = loss.item()
-            with torch.no_grad():
-                if compute_diag:
-                    last_entropy = compute_policy_entropy(
-                        new_out.logits, comp_mask, logits_to_keep).item()
+            if compute_diag:
+                with torch.no_grad():
+                    if entropy_coef > 0:
+                        last_entropy = step_entropy.item()
+                    else:
+                        last_entropy = compute_policy_entropy(
+                            new_out.logits, comp_mask, logits_to_keep).item()
             last_new_lp = new_lp.detach()
 
     # ------------------------------------------------------------------

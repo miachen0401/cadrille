@@ -15,7 +15,8 @@
 checkpoints_dir: ./checkpoints
 
 mode: cppo
-checkpoint_path: ./checkpoints/cadrille-sft
+checkpoint_path: ./checkpoints/rl-s50k-lr1e-5-G4-cppo-0310-0322/checkpoint-1000
+start_step: 1000
 
 # Data
 data_dir: null
@@ -33,6 +34,7 @@ G: 4                     # reduced from 16; sequential_generation keeps VRAM fla
 top_N: 2                 # select top-2 of 4 by |advantage|
 eps_high: 0.1
 eps_low: 0.1
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
 max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
 rollout_temperature: 0.3    # sampling temp for G rollouts; chosen by temp sweep (best pass@4)
@@ -54,7 +56,7 @@ val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        pc,img
-eval_steps: 500
+eval_steps: 100
 
 # Logging & checkpoints
 # save_total_limit: keep only the N most-recent checkpoints to cap disk usage.

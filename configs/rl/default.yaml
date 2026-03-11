@@ -30,6 +30,7 @@ G: 16                    # rollout completions per prompt
 top_N: 4                 # select top-N by |advantage| for gradient update
 eps_high: 0.1            # PPO clip upper bound
 eps_low: 0.1             # PPO clip lower bound
+entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3         # gradient steps per rollout (re-use same data)
 batch_size: 1            # prompt batch size for each GRPO rollout step
 max_new_tokens: 1024     # CAD code requires >800 tokens; 1024 matches paper
