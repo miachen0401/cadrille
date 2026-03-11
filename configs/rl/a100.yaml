@@ -24,7 +24,7 @@ dpo_dataset: null
 
 # Training
 max_steps: 50000
-lr: 3.0e-5
+lr: 1.0e-5                    # scaled for hard_examples_pkl batch (same as 4080/h100)
 
 # Dr. CPPO — reduced G=8 to fit 40 GB; other settings match official paper
 G: 8
@@ -49,12 +49,13 @@ val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
-val_modalities:        pc
+val_modalities:        pc,img
 eval_steps: 500
 
 # Logging & checkpoints
 log_steps: 10      # ~3-10 min between W&B updates at actual A100 throughput
 save_steps: 500    # save frequently — Colab A100 sessions can timeout after ~12h
+save_total_limit: 10
 
 # W&B
 wandb_project: cadrille-rl
