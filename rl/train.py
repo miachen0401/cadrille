@@ -344,6 +344,31 @@ def train(args, cfg_to_save=None):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     if rank == 0:
         print('Optimizer: AdamW (fp32, weight_decay=0.01 — matches ref grpo_mm.py:286)')
+        opt_path = os.path.join(args.checkpoint_path, 'optimizer.pt')
+        if os.path.exists(opt_path):
+            optimizer.load_state_dict(torch.load(opt_path, map_location='cpu'))
+            print(f'Optimizer state loaded from {opt_path}')
+        else:
+            print(f'No optimizer.pt in {args.checkpoint_path} — cold start')
+
+    # LR schedule: linear warmup → cosine decay to lr * lr_min_ratio.
+    # Scheduler tracks its own counter from 0 regardless of start_step,
+    # so warmup always fires on resume (compensates cold optimizer when no optimizer.pt).
+    import math as _math
+    warmup_steps = max(0, int(getattr(args, 'warmup_steps', 0)))
+    lr_min_ratio = float(getattr(args, 'lr_min_ratio', 0.1))
+    total_steps  = args.max_steps - getattr(args, 'start_step', 0)
+
+    def _lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return float(current_step + 1) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        cosine   = 0.5 * (1.0 + _math.cos(_math.pi * progress))
+        return lr_min_ratio + (1.0 - lr_min_ratio) * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
+    if rank == 0:
+        print(f'LR schedule: linear warmup {warmup_steps} steps → cosine decay to {lr_min_ratio}x')
 
     # Validation (rank-0 only: eval runs as subprocess pool on the master node)
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
@@ -393,7 +418,7 @@ def train(args, cfg_to_save=None):
 
         # No separate old_model — old log-probs are computed from the current
         # model at rollout time (matching the reference grpo_mm.py design).
-        train_cppo(model, optimizer, dataset, processor,
+        train_cppo(model, optimizer, scheduler, dataset, processor,
                    val_examples, use_wandb, args,
                    rank=rank, world_size=world_size)
 

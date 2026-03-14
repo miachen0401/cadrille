@@ -26,6 +26,8 @@ dpo_dataset: null
 # Training (paper Table 11, lr scaled for single-GPU batch_size=4 vs paper 16/GPU)
 max_steps: 50000
 lr: 1.0e-5                    # paper: 3e-5 @ batch=16/GPU → 1e-5 @ batch=4 (linear scaling)
+warmup_steps: 200             # linear warmup from 0→lr over 200 steps (compensates cold optimizer on resume)
+lr_min_ratio: 0.1             # cosine decay floor: lr decays to lr*0.1 by max_steps
 
 # Dr. CPPO official settings
 G: 16
@@ -35,7 +37,7 @@ eps_low: 0.1
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
-max_new_tokens: 1024          # 1024 needed for complete CadQuery scripts
+max_new_tokens: 1024        # match nixqqhdd; RL model writes longer scripts, 512 causes truncation
 rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 16            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: true

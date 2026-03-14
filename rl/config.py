@@ -106,6 +106,14 @@ def resolve_args(args, cfg: dict) -> dict:
         _seq = cfg.get('sequential_generation', False)
     args.sequential_generation = bool(_seq)
 
+    # Rollout & entropy
+    args.rollout_temperature = cfg.get('rollout_temperature', 1.0)
+    args.entropy_coef        = cfg.get('entropy_coef', 0.0)
+
+    # LR schedule: linear warmup then cosine decay to lr * lr_min_ratio
+    args.warmup_steps  = cfg.get('warmup_steps', 0)
+    args.lr_min_ratio  = cfg.get('lr_min_ratio', 0.1)   # cosine decay floor as fraction of peak lr
+
     # DPO
     args.beta                 = cfg.get('beta', 0.3)
     args.dpo_epochs_per_round = cfg.get('dpo_epochs_per_round', 10)

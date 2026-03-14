@@ -6,12 +6,14 @@ Research codebase extending [cadrille (ICLR 2026)](https://arxiv.org/abs/2505.22
 
 ### Baseline results (cadrille, for comparison)
 
-| Method | DeepCAD IoU ↑ | Fusion360 IoU ↑ | CC3D IoU ↑ | Invalid ↓ |
-|--------|:---:|:---:|:---:|:---:|
-| CAD-Recode (ICCV 2025) | 0.721 | 0.663 | 0.357 | 2.3% |
-| cadrille SFT | 0.756 | 0.674 | 0.368 | 1.8% |
-| cadrille SFT + Dr. CPPO | **0.787** | **0.706** | **0.392** | **1.2%** |
-| **Ours** | — | — | — | — |
+
+| Method                  | DeepCAD IoU ↑ | Fusion360 IoU ↑ | CC3D IoU ↑ | Invalid ↓ |
+| ----------------------- | ------------- | --------------- | ---------- | --------- |
+| CAD-Recode (ICCV 2025)  | 0.721         | 0.663           | 0.357      | 2.3%      |
+| cadrille SFT            | 0.756         | 0.674           | 0.368      | 1.8%      |
+| cadrille SFT + Dr. CPPO | **0.787**     | **0.706**       | **0.392**  | **1.2%**  |
+| **Ours**                | —             | —               | —          | —         |
+
 
 ---
 
@@ -46,7 +48,7 @@ bash scripts/setup.sh --data
 
 # 4. Train — use screen/tmux so training survives SSH disconnects
 screen -S rl    # or: tmux new -s rl
-PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
+PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
 # Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r rl
 
 # Resume after crash / session timeout
@@ -56,15 +58,18 @@ PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \
 
 **GPU configs:**
 
-| VRAM | Config | G | Notes |
-|------|--------|---|-------|
-| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16 | Full paper hyperparameters |
-| ~40 GB (A100 40G) | `configs/rl/a100.yaml` | 8 | AdamW8bit |
-| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4 | Sequential generation |
+
+| VRAM                     | Config                 | G   | Notes                      |
+| ------------------------ | ---------------------- | --- | -------------------------- |
+| ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16  | Full paper hyperparameters |
+| ~40 GB (A100 40G)        | `configs/rl/a100.yaml` | 8   | AdamW8bit                  |
+| ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4   | Sequential generation      |
+
 
 For 8× GPU: `torchrun --nproc_per_node=8 rl/train.py --config configs/rl/h100x8.yaml`
 
 **Monitor:**
+
 ```bash
 tail -f logs/<run-name>.log          # live training log
 watch -n3 nvidia-smi                 # GPU utilisation
@@ -125,6 +130,7 @@ Three packages (`pytorch3d`, `cadquery`-from-git, `flash-attn`) need special bui
 **Docker** — see Quick Start above.
 
 **Bare metal**
+
 ```bash
 bash scripts/setup.sh           # deps only
 bash scripts/setup.sh --data    # deps + download checkpoint + data
@@ -139,13 +145,15 @@ bash scripts/setup.sh --data    # deps + download checkpoint + data
 All datasets are downloaded automatically by `bash scripts/setup.sh --data`.
 Each is a single zip file on HuggingFace (avoids the 5000-file resolver rate limit).
 
-| Dataset | HuggingFace | Size | Purpose |
-|---------|-------------|------|---------|
-| `deepcad_train_mesh` | `Hula0401/deepcad_train_mesh` | ~242 MB | RL training — DeepCAD (84k STLs) |
-| `fusion360_train_mesh` | `Hula0401/fusion360_train_mesh` | ~TBD | RL training — Fusion360 (6.9k STLs) |
-| `deepcad_test_mesh` | `Hula0401/deepCAD_test` | ~413 MB | Eval (8k STLs) |
-| `fusion360_test_mesh` | `Hula0401/fusion360_test_mesh` | ~126 MB | Eval (1.7k STLs) |
-| `cadrille-sft` checkpoint | `maksimko123/cadrille` | ~4.5 GB | RL starting point |
+
+| Dataset                   | HuggingFace                     | Size    | Purpose                             |
+| ------------------------- | ------------------------------- | ------- | ----------------------------------- |
+| `deepcad_train_mesh`      | `Hula0401/deepcad_train_mesh`   | ~242 MB | RL training — DeepCAD (84k STLs)    |
+| `fusion360_train_mesh`    | `Hula0401/fusion360_train_mesh` | ~TBD    | RL training — Fusion360 (6.9k STLs) |
+| `deepcad_test_mesh`       | `Hula0401/deepCAD_test`         | ~413 MB | Eval (8k STLs)                      |
+| `fusion360_test_mesh`     | `Hula0401/fusion360_test_mesh`  | ~126 MB | Eval (1.7k STLs)                    |
+| `cadrille-sft` checkpoint | `maksimko123/cadrille`          | ~4.5 GB | RL starting point                   |
+
 
 All STL meshes are pre-normalised to [0, 1]³. No preprocessing needed after download.
 
@@ -193,6 +201,7 @@ bash scripts/run_sft.sh --config configs/sft/smoke.yaml
 ```
 
 Key SFT hyperparameters:
+
 ```
 optimizer:    AdamW  |  lr: 2e-4 (cosine)  |  warmup: 1000 steps
 max_steps:    120,000  |  batch: 28  |  precision: bfloat16 + flash_attention_2
@@ -223,6 +232,7 @@ python rl/train.py --config configs/rl/h100.yaml \
 ```
 
 Key RL hyperparameters (H100 config, matching cadrille paper):
+
 ```
 algorithm:      Dr. CPPO / GRPO
 optimizer:      Adam (Adam8bit on ≤ 40 GB GPU)
@@ -231,6 +241,7 @@ batch_updates:  3     |  max_new_tokens: 400
 ```
 
 W&B metrics logged each step:
+
 - `loss` — PPO clip loss
 - `average_reward` — mean IoU reward across G rollouts
 - `eval/pc/DeepCAD test/IoU mean` — greedy validation IoU
@@ -309,10 +320,12 @@ python evaluate.py --py-path ./outputs
 
 ### Pre-trained Models (cadrille baselines)
 
-| Model | Description | HuggingFace |
-|-------|-------------|-------------|
-| `maksimko123/cadrille` | SFT on CAD-Recode v1.5 — starting point for RL | [🤗](https://huggingface.co/maksimko123/cadrille) |
-| `maksimko123/cadrille-rl` | cadrille SFT + Dr. CPPO — baseline to beat | [🤗](https://huggingface.co/maksimko123/cadrille-rl) |
+
+| Model                     | Description                                    | HuggingFace                                          |
+| ------------------------- | ---------------------------------------------- | ---------------------------------------------------- |
+| `maksimko123/cadrille`    | SFT on CAD-Recode v1.5 — starting point for RL | [🤗](https://huggingface.co/maksimko123/cadrille)    |
+| `maksimko123/cadrille-rl` | cadrille SFT + Dr. CPPO — baseline to beat     | [🤗](https://huggingface.co/maksimko123/cadrille-rl) |
+
 
 ---
 
@@ -331,3 +344,4 @@ If you use this codebase, please also cite the cadrille paper it builds on:
   url       = {https://arxiv.org/abs/2505.22914}
 }
 ```
+

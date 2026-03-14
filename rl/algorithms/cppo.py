@@ -598,10 +598,11 @@ def _safe_histogram(data):
 # Checkpoint rotation
 # ---------------------------------------------------------------------------
 
+_OPTIMIZER_KEEP = 3   # number of recent optimizer.pt files to retain
+
+
 def _rotate_checkpoints(output_dir: str, save_total_limit: Optional[int]):
-    """Delete oldest checkpoint-XXXXX dirs when limit is exceeded."""
-    if not save_total_limit or save_total_limit <= 0:
-        return
+    """Delete oldest checkpoint-XXXXX dirs and optimizer.pt files when limits exceeded."""
     checkpoints = []
     for name in os.listdir(output_dir):
         if name.startswith('checkpoint-'):
@@ -611,16 +612,32 @@ def _rotate_checkpoints(output_dir: str, save_total_limit: Optional[int]):
             except ValueError:
                 pass
     checkpoints.sort()
-    for _, path in checkpoints[:-save_total_limit]:
-        shutil.rmtree(path, ignore_errors=True)
-        print(f'[checkpoint] deleted old checkpoint: {path}')
+
+    if save_total_limit and save_total_limit > 0:
+        for _, path in checkpoints[:-save_total_limit]:
+            shutil.rmtree(path, ignore_errors=True)
+            print(f'[checkpoint] deleted old checkpoint: {path}')
+
+    # Rotate optimizer snapshots independently (keep last _OPTIMIZER_KEEP).
+    opt_files = []
+    for name in os.listdir(output_dir):
+        if name.startswith('optimizer-') and name.endswith('.pt'):
+            try:
+                step = int(name[len('optimizer-'):-len('.pt')])
+                opt_files.append((step, os.path.join(output_dir, name)))
+            except ValueError:
+                pass
+    opt_files.sort()
+    for _, path in opt_files[:-_OPTIMIZER_KEEP]:
+        os.remove(path)
+        print(f'[checkpoint] deleted old optimizer state: {path}')
 
 
 # ---------------------------------------------------------------------------
 # CPPO training loop
 # ---------------------------------------------------------------------------
 
-def train_cppo(model, optimizer, dataset, processor,
+def train_cppo(model, optimizer, scheduler, dataset, processor,
                val_examples, use_wandb, args, rank=0, world_size=1):
     """Main Dr. CPPO training loop.
 
@@ -710,6 +727,7 @@ def train_cppo(model, optimizer, dataset, processor,
                 print(f'[step {step}] cppo_step error: {e}')
                 continue
 
+            scheduler.step()
             step += 1
             pbar.update(1)
             e = metrics['train/entropy']
@@ -793,6 +811,11 @@ def train_cppo(model, optimizer, dataset, processor,
                 save_model = model.module if hasattr(model, 'module') else model
                 save_model.save_pretrained(ckpt_dir)
                 processor.save_pretrained(ckpt_dir)
+                opt_path = os.path.join(args.output_dir, f'optimizer-{step}.pt')
+                torch.save(optimizer.state_dict(), opt_path)
+                # Also write a fixed-name pointer so checkpoint_path→optimizer.pt works.
+                import shutil as _shutil
+                _shutil.copy2(opt_path, os.path.join(ckpt_dir, 'optimizer.pt'))
                 _rotate_checkpoints(args.output_dir,
                                     getattr(args, 'save_total_limit', None))
 
