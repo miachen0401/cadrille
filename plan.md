@@ -6,6 +6,40 @@ Target: DeepCAD IoU 92.2%, Fusion360 IoU 84.6% via Dr. CPPO on DeepCAD + Fusion3
 
 ---
 
+## ⚠️  H100 Entropy Explosion on Restart — ROOT CAUSE CONFIRMED
+
+### Symptom
+All 4 restarts from nixqqhdd RL checkpoints had entropy ≥ 1.4 at step+1 (before any optimizer step),
+rewards all negative. nixqqhdd itself (from SFT) was healthy at entropy 0.12–0.25.
+
+| Run | Source checkpoint | Entropy at step+10 | Reward |
+|-----|-------------------|--------------------|--------|
+| nixqqhdd | cadrille-sft (SFT) | 0.12 – 0.25 ✅ | +0.3–+0.7 |
+| 2vfkt7tr | nixqqhdd/ckpt-7200 | 1.39 at step 7220 💥 | near zero |
+| lisvpg5d | nixqqhdd/ckpt-7200 | 4.90 at step 7210 💥 | negative |
+| zc5jle3o | nixqqhdd/ckpt-6300 | 2.03–8.67 oscillating 💥 | negative |
+| 3izqjn6g | nixqqhdd/ckpt-6300 | 3.14 at step 6310 💥 | negative |
+
+### Root Cause: GC Bug in rollout generation (CONFIRMED by debug-3step-a100-6000)
+- All 4 failing runs used code **without** the `gradient_checkpointing_disable()` fix in `generate_rollouts()`
+- GC bug chain: `is_gradient_checkpointing=True` → `generate()` forces `use_cache=False` →
+  `prepare_inputs_for_generation()` sets `pixel_values_videos=None` at decode position > 0 →
+  model blind to image → garbage tokens → near-uniform logits → entropy ≈ 8–11
+- **Proof**: debug-3step-a100-6000 used an RL checkpoint (a100-step6000) WITH the GC fix →
+  `k=0 entropy = 0.1907` (healthy, before any optimizer step) → confirms optimizer is NOT the cause
+
+### Why nixqqhdd from SFT was OK without the fix
+- SFT model generates reasonable CadQuery code even when image hidden after token 0 — the image
+  embedding at position 0 still guides generation enough for acceptable rewards
+- RL-trained model over-relies on image at every decoding step → losing image = garbage output
+- Note: the distinction is SFT vs RL checkpoint behaviour under the GC bug, NOT optimizer cold-start
+
+### Fix (DONE in cppo.py:232-300)
+`gradient_checkpointing_disable()` called before `generate()`, re-enabled after. This is already
+deployed in the current 4080 codebase. For H100: **git pull the latest code before restarting**.
+
+---
+
 ## Paper Target Metrics
 
 | Model | RL | DeepCAD IoU | Fusion360 IoU |

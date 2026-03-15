@@ -264,6 +264,21 @@ def eval_passk(
         print(f'  pass@{k}: {mean_val:.3f}')
         wandb_metrics[f'eval/pass@{k}'] = mean_val
 
+    # best_iou@k: mean over examples of max(IoU) among k samples (oracle upper bound)
+    results['best_iou_at_k'] = {}
+    print(f'\n--- best IoU@k (oracle, mean of per-example max) ---')
+    for k in k_values:
+        per_ex_best = []
+        for e in per_example:
+            valid = [v for v in e['ious'][:k] if v >= 0]
+            if valid:
+                per_ex_best.append(max(valid))
+        if per_ex_best:
+            bk = float(np.mean(per_ex_best))
+            results['best_iou_at_k'][k] = bk
+            print(f'  best_iou@{k}: {bk:.3f}')
+            wandb_metrics[f'eval/best_iou@{k}'] = bk
+
     all_valid = [v for e in per_example for v in e['ious'] if v >= 0]
     if all_valid:
         results['mean_iou']   = float(np.mean(all_valid))

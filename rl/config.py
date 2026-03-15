@@ -104,7 +104,11 @@ def resolve_args(args, cfg: dict) -> dict:
     _seq = getattr(args, 'sequential_generation', None)
     if not _seq:
         _seq = cfg.get('sequential_generation', False)
-    args.sequential_generation = bool(_seq)
+    args.sequential_generation  = bool(_seq)
+    args.rollout_temperature    = cfg.get('rollout_temperature', 1.0)
+    args.entropy_coef           = float(cfg.get('entropy_coef', 0.0))
+    args.debug_rollout_steps    = int(cfg.get('debug_rollout_steps', 0))
+    args.freeze_vision_encoder  = bool(cfg.get('freeze_vision_encoder', False))
 
     # DPO
     args.beta                 = cfg.get('beta', 0.3)

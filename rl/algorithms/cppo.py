@@ -94,11 +94,13 @@ def compute_token_log_probs(logits: torch.Tensor, full_ids: torch.Tensor,
     Returns:
         [B, T] per-token log probs
     """
-    # Causal-LM shift: logits[:, i] predicts token[:, i+1]
-    shift_logits = logits[:, :-1, :].float()             # [B, L-1, V]
-    shift_logits = shift_logits[:, -logits_to_keep:, :]  # [B, T, V]
-    completion_ids = full_ids[:, -logits_to_keep:]        # [B, T]
-    log_probs = F.log_softmax(shift_logits, dim=-1)       # [B, T, V]
+    # Causal-LM shift: logits[:, i] predicts token[:, i+1].
+    # Keep in the model's native dtype (bf16) — float32 cast doubles memory usage
+    # (~1.6 GB vs ~0.8 GB for the log_probs tensor in the autograd graph) and is
+    # unnecessary on Ada/Ampere GPUs where bf16 log_softmax is numerically stable.
+    shift_logits = logits[:, :-1, :][:, -logits_to_keep:, :]  # [B, T, V]
+    completion_ids = full_ids[:, -logits_to_keep:]             # [B, T]
+    log_probs = F.log_softmax(shift_logits, dim=-1)            # [B, T, V]
     # Clamp IDs to [0, V-1] to prevent CUDA device-side assert if any generated
     # token ID (e.g. a vision special token) is >= vocab_size.
     completion_ids = completion_ids.clamp(0, shift_logits.shape[-1] - 1)
@@ -131,14 +133,22 @@ def cppo_loss_fn(new_lp: torch.Tensor, old_lp: torch.Tensor,
     return -seq_loss.mean()
 
 
-def compute_policy_entropy(logits: torch.Tensor, completion_mask: torch.Tensor,
-                           logits_to_keep: int) -> torch.Tensor:
-    """Mean per-token entropy over valid completion positions."""
-    shift_logits = logits[:, :-1, :].float()[:, -logits_to_keep:, :]  # [B, T, V]
-    log_p = F.log_softmax(shift_logits, dim=-1)
-    token_entropy = -(torch.exp(log_p) * log_p).sum(dim=-1)            # [B, T]
+def compute_policy_entropy(log_probs: torch.Tensor,
+                           completion_mask: torch.Tensor) -> torch.Tensor:
+    """Per-token policy entropy estimated from sampled token log-probs.
+
+    Uses the identity: E_{a~π}[-log π(a)] = H(π)
+    This is a memory-efficient, unbiased estimate of mean per-token entropy
+    that only requires the log-probs of GENERATED tokens ([B*N, T] tensor),
+    not the full vocabulary distribution ([B*N, T, V] = ~600 MB+).
+
+    Compared to the full-vocab sum, this estimate:
+    - Has higher variance (noisy per-token estimate vs deterministic sum)
+    - Has the same magnitude in nats (both equal log(V) at uniform dist)
+    - Is gradient-compatible: grads flow through log_probs → model weights
+    """
     total = completion_mask.sum().clamp(min=1)
-    return (token_entropy * completion_mask).sum() / total
+    return -(log_probs * completion_mask).sum() / total
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +254,8 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
                 else:
                     expanded[k] = v
             with torch.no_grad():
+                if hasattr(gen_model, 'rope_deltas'):
+                    gen_model.rope_deltas = None
                 out = gen_model.generate(**expanded, **gen_kwargs)
             return out.cpu()
         except torch.cuda.OutOfMemoryError:
@@ -265,6 +277,11 @@ def generate_rollouts(model, single_batch: dict, G: int, args,
                   else:
                       one[k] = v
               for _ in range(G):
+                  # Reset cached rope_deltas so Qwen2VL recomputes from scratch
+                  # for each generate() call (stale values from prior examples
+                  # cause wrong positional encodings).
+                  if hasattr(gen_model, 'rope_deltas'):
+                      gen_model.rope_deltas = None
                   ids = gen_model.generate(**one, **gen_kwargs)
                   generated_ids_list.append(ids.cpu())
 
@@ -333,7 +350,9 @@ _NAN_DIAG = {
 
 
 def cppo_step(model, optimizer, items, processor, args,
-              compute_diag: bool = True) -> dict:
+              compute_diag: bool = True,
+              step: int = 0,
+              debug_rollouts: bool = False) -> dict:
     """Dr. CPPO / GRPO update step over a batch of B prompts.
 
     Fully batched tensor flow (matches reference grpo_mm.py style):
@@ -407,6 +426,77 @@ def cppo_step(model, optimizer, items, processor, args,
                                          workers=args.reward_workers)
     rew_seconds = time.perf_counter() - t_rew
     rewards_t = torch.tensor(rewards, dtype=torch.float32).view(B, G)  # [B, G]
+
+    # ---- Debug: print each rollout code (first 200 chars) + reward --------
+    if debug_rollouts:
+        print(f'\n{"="*70}')
+        print(f'[DEBUG step={step}] B={B} G={G} — rollout codes & rewards')
+        print(f'{"="*70}')
+        # Print input cases
+        for bi, it in enumerate(items):
+            stem = os.path.splitext(os.path.basename(it.get('gt_mesh_path', '?')))[0]
+            mod  = it.get('modality', it.get('train_modality', it.get('_modality', '?')))
+            print(f'  Input {bi}: {stem}  (modality={mod})')
+        print()
+        for i, (code, rew, gt) in enumerate(zip(code_strings, rewards, gt_paths)):
+            bi, gi = divmod(i, G)
+            stem = os.path.splitext(os.path.basename(gt))[0]
+            code_preview = code.replace('\n', '\\n')[:200]
+            print(f'  [{bi}×{G}+{gi}] {stem}  rew={rew:+.3f}  code: {code_preview}')
+        print(f'  rewards matrix (B×G):')
+        for bi in range(B):
+            row = rewards_t[bi].tolist()
+            print(f'    prompt {bi}: {[f"{r:+.3f}" for r in row]}  '
+                  f'mean={rewards_t[bi].mean():.3f}  std={rewards_t[bi].std():.3f}')
+
+        # Greedy comparison: same inputs, model.eval(), do_sample=False (temp=0).
+        # Compares stochastic rollout rewards against deterministic greedy output.
+        # If greedy >> rollout_mean: sampling is noisy but model knows the answer.
+        # If greedy << rollout_best: model has high variance (stochastic helpful).
+        print(f'\n  [greedy eval] model.eval() do_sample=False on same B={B} inputs:')
+        _gm = model.module if hasattr(model, 'module') else model
+        _had_gc_dbg = getattr(_gm, 'is_gradient_checkpointing', False)
+        if _had_gc_dbg:
+            _gm.gradient_checkpointing_disable()
+        _gm.eval()
+        _greedy_codes = []
+        with torch.no_grad():
+            for _bi in range(B):
+                if hasattr(_gm, 'rope_deltas'):
+                    _gm.rope_deltas = None
+                _pv = batch.get('pixel_values_videos')
+                _vg = batch.get('video_grid_thw')
+                _g_ids = _gm.generate(
+                    input_ids=batch['input_ids'][_bi:_bi+1].to(device),
+                    attention_mask=batch['attention_mask'][_bi:_bi+1].to(device),
+                    point_clouds=batch['point_clouds'][_bi:_bi+1].to(device),
+                    is_pc=batch['is_pc'][_bi:_bi+1].to(device),
+                    is_img=batch['is_img'][_bi:_bi+1].to(device),
+                    pixel_values_videos=(_pv[_bi:_bi+1].to(device) if _pv is not None else None),
+                    video_grid_thw=(_vg[_bi:_bi+1].to(device) if _vg is not None else None),
+                    max_new_tokens=args.max_new_tokens,
+                    do_sample=False, temperature=None, top_p=None, top_k=None,
+                    bad_words_ids=bad_words)
+                _gc = processor.decode(_g_ids[0, prompt_len:], skip_special_tokens=True)
+                _greedy_codes.append(_gc)
+        if _had_gc_dbg:
+            _gm.gradient_checkpointing_enable()
+        _gm.train()
+        _greedy_gt = [it['gt_mesh_path'] for it in items]
+        _greedy_rewards = compute_rewards_parallel(_greedy_codes, _greedy_gt,
+                                                   workers=args.reward_workers)
+        for _bi in range(B):
+            _stem = os.path.splitext(os.path.basename(items[_bi]['gt_mesh_path']))[0]
+            _gr   = _greedy_rewards[_bi]
+            _best = rewards_t[_bi].max().item()
+            _mean = rewards_t[_bi].mean().item()
+            _gc_preview = _greedy_codes[_bi].replace('\n', '\\n')[:200]
+            print(f'    [{_bi}] {_stem}  greedy_rew={_gr:+.3f}  '
+                  f'(rollout_best={_best:+.3f}  rollout_mean={_mean:+.3f})')
+            print(f'      greedy code: {_gc_preview}')
+        print(f'{"="*70}\n')
+    # -----------------------------------------------------------------------
+
     # Guard against non-finite reward values before mean/std/topk.
     rewards_t = torch.nan_to_num(
         rewards_t, nan=-1.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
@@ -425,6 +515,7 @@ def cppo_step(model, optimizer, items, processor, args,
             'train/reward_max':   rewards_t.max().item(),
             'train/reward_min':   rewards_t.min().item(),
             'train/entropy':      float('nan'),
+            'train/entropy_k0':   float('nan'),
             'train/adv_abs_mean': 0.0,
             'train/adv_mean_seq': 0.0,
             'train/adv_mean_tok': 0.0,
@@ -467,6 +558,10 @@ def cppo_step(model, optimizer, items, processor, args,
         old_lp  = compute_token_log_probs(
             old_out.logits, sel_ids, logits_to_keep).detach()            # [B*N, T]
 
+    # k=0 entropy: per-token entropy estimated from old_lp (before any training update).
+    # Cheap: uses [B*N, T] old_lp, no logits materialisation.
+    first_entropy = compute_policy_entropy(old_lp, comp_mask).item()
+
     # ------------------------------------------------------------------
     # Phase 2: batch_updates PPO steps on the flat [B*N, T] batch.
     # One forward per inner step — no gradient accumulation needed.
@@ -476,34 +571,59 @@ def cppo_step(model, optimizer, items, processor, args,
     last_new_lp    = None
     entropy_coef   = float(getattr(args, 'entropy_coef', 0.0))
 
+    def _mem(tag):
+        if debug_rollouts:
+            a = torch.cuda.memory_allocated() / 1e9
+            r = torch.cuda.memory_reserved() / 1e9
+            print(f'[MEM step={step} k={k} {tag}] alloc={a:.2f}GB  reserved={r:.2f}GB')
+
     t_grad = time.perf_counter()
     for k in range(args.batch_updates):
         is_last = (k == args.batch_updates - 1)
         model.train()
+        _mem('pre-fwd')
         new_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
+        _mem('post-fwd')
         new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
+        _mem('post-log_probs')
 
         loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
                             args.eps_high, args.eps_low)
         if entropy_coef > 0:
-            step_entropy = compute_policy_entropy(
-                new_out.logits, comp_mask, logits_to_keep)
+            # Per-token entropy bonus: E_{a~π}[-log π(a)] = H(π) (unbiased estimate).
+            # Uses new_lp [B*N, T] — no extra log_softmax over full vocab needed.
+            # Memory: ~4 MB vs ~1.2 GB for the logits-based full-vocab sum.
+            step_entropy = compute_policy_entropy(new_lp, comp_mask)
             loss = loss - entropy_coef * step_entropy
         optimizer.zero_grad()
+        _mem('pre-backward')
         loss.backward()
+        _mem('post-backward')
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
+        _mem('post-opt-step')
 
         if is_last:
             last_loss = loss.item()
-            if compute_diag:
-                with torch.no_grad():
-                    if entropy_coef > 0:
-                        last_entropy = step_entropy.item()
-                    else:
-                        last_entropy = compute_policy_entropy(
-                            new_out.logits, comp_mask, logits_to_keep).item()
+            with torch.no_grad():
+                if entropy_coef > 0:
+                    last_entropy = step_entropy.item()
+                else:
+                    last_entropy = compute_policy_entropy(
+                        new_lp.detach(), comp_mask).item()
             last_new_lp = new_lp.detach()
+
+    # ---- Debug: entropy before vs after optimizer steps ------------------
+    if debug_rollouts:
+        print(f'[DEBUG step={step}] entropy: '
+              f'k=0 (pre-update)={first_entropy:.4f}  '
+              f'k={args.batch_updates-1} (post-update)={last_entropy:.4f}  '
+              f'Δ={last_entropy - first_entropy:+.4f}  '
+              f'batch_updates={args.batch_updates}')
+        print(f'[DEBUG step={step}] mean_reward={rewards_t.mean():.4f}  '
+              f'reward_std={rewards_t.std():.4f}  '
+              f'avg_gen_len={avg_gen_len:.1f}  loss={last_loss:.4f}\n')
+    # -----------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # Phase 3: Diagnostics on the flat [B*N, T] tensor — no aggregation
@@ -553,6 +673,13 @@ def cppo_step(model, optimizer, items, processor, args,
             diag = dict(_NAN_DIAG)
 
     grad_seconds = time.perf_counter() - t_grad
+
+    # Free gradient tensors and defragment CUDA memory pool so the NEXT step starts
+    # with a clean slate (model+m+v only, ~11 GB).  Without this, reserved grows
+    # monotonically across steps due to fragmentation → backward OOM by step 3.
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.empty_cache()
+
     _n_tok = comp_mask.sum().clamp(min=1)
     return {
         'train/loss':         last_loss,
@@ -561,6 +688,7 @@ def cppo_step(model, optimizer, items, processor, args,
         'train/reward_max':   rewards_t.max().item(),
         'train/reward_min':   rewards_t.min().item(),
         'train/entropy':      last_entropy,
+        'train/entropy_k0':   first_entropy,   # entropy before any optimizer step
         'train/adv_abs_mean': advantages.abs().mean().item(),
         # adv_mean_seq: mean of per-sequence advantage scalars [B*N].
         #   Should be ≈0 (reward−group_mean; slight drift from top-N selection).
@@ -695,8 +823,11 @@ def train_cppo(model, optimizer, dataset, processor,
                 # compute_diag=True only on steps that will be logged.
                 # step+1 because step is incremented after cppo_step returns.
                 compute_diag = ((step + 1) % args.log_steps == 0)
+                debug_steps = int(getattr(args, 'debug_rollout_steps', 0))
                 metrics = cppo_step(model, optimizer, batch_items, processor, args,
-                                    compute_diag=compute_diag)
+                                    compute_diag=compute_diag,
+                                    step=step,
+                                    debug_rollouts=(rank == 0 and step < debug_steps))
                 if replay_buffer is not None:
                     std_list = metrics.get('_reward_std_groups', [])
                     n_pick = int(len(std_list) * buffer_expand_frac)
@@ -715,6 +846,14 @@ def train_cppo(model, optimizer, dataset, processor,
             e = metrics['train/entropy']
             if not (e != e):  # update only when not nan
                 last_entropy = e
+                # Early-step sanity check: healthy entropy is ~0.1–1.5.
+                # Entropy > 5 at step ≤ 5 almost certainly means the GC bug
+                # (model blind to image during generate → garbage tokens).
+                if step <= 5 and e > 5.0 and rank == 0:
+                    print(f'\n[WARNING] step={step} entropy={e:.2f} > 5.0 — '
+                          f'possible gradient-checkpointing + use_cache bug. '
+                          f'Check that gradient_checkpointing_disable() is being '
+                          f'called before model.generate() in generate_rollouts().')
             pbar.set_postfix(
                 loss=f"{metrics['train/loss']:.3f}",
                 reward=f"{metrics['train/mean_reward']:.2f}",
@@ -730,6 +869,7 @@ def train_cppo(model, optimizer, dataset, processor,
                     f" train/reward_max={metrics['train/reward_max']:.4f}"
                     f" train/reward_min={metrics['train/reward_min']:.4f}"
                     f" train/entropy={metrics['train/entropy']:.4f}"
+                    f" train/entropy_k0={metrics['train/entropy_k0']:.4f}"
                     f" train/clip_fraction={metrics['train/clip_fraction']:.4f}"
                     f" train/kl_approx={metrics['train/kl_approx']:.6f}"
                     f" train/ratio_mean={metrics['train/ratio_mean']:.4f}"
@@ -752,6 +892,7 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/reward_max':      metrics['train/reward_max'],
                         'train/reward_min':      metrics['train/reward_min'],
                         'train/entropy':         metrics['train/entropy'],
+                        'train/entropy_k0':      metrics['train/entropy_k0'],
                         'train/kl_approx':       metrics['train/kl_approx'],
                         'train/clip_fraction':   metrics['train/clip_fraction'],
                         'train/clip_lower_frac': metrics['train/clip_lower_frac'],

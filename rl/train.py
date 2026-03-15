@@ -21,6 +21,9 @@ python rl/train.py --config configs/rl/4080.yaml --max-steps 3 --wandb-offline
 import os
 import sys
 
+# Reduce CUDA memory fragmentation — helps avoid OOM on large-batch rollouts
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Allow execution from repo root or rl/ subdirectory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -341,9 +344,45 @@ def train(args, cfg_to_save=None):
             device_map='auto')
         model.gradient_checkpointing_enable()   # reduces activation memory during backward
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # Optionally freeze visual encoder to reduce optimizer-state memory.
+    # On 4080 (16 GB): model(4.8) + LM-grads(3.5) + m(3.5) + v(3.5) = 15.3 GB — fits.
+    # Without freeze:  model(4.8) + all-grads(4.8) + m(4.8) + v(4.8) = 19.2 GB — OOM.
+    # This is also architecturally correct: RL should refine the LM policy, not the
+    # visual perception backbone.
+    if getattr(args, 'freeze_vision_encoder', False):
+        raw_model = model.module if hasattr(model, 'module') else model
+        if not hasattr(raw_model, 'visual'):
+            raise AttributeError(
+                'freeze_vision_encoder=True but model has no .visual attribute. '
+                'This option requires Qwen2-VL-based Cadrille.')
+        for param in raw_model.visual.parameters():
+            param.requires_grad_(False)
+        ve_params = sum(p.numel() for p in raw_model.visual.parameters())
+        if rank == 0:
+            print(f'Visual encoder frozen: {ve_params/1e6:.0f}M params excluded from optimizer')
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # foreach=False: single-tensor updates; avoids bulk fp32 upcast buffers that
+    # torch._foreach_* ops create for all params simultaneously (would OOM on 16 GB).
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01,
+                                   foreach=False)
     if rank == 0:
-        print('Optimizer: AdamW (fp32, weight_decay=0.01 — matches ref grpo_mm.py:286)')
+        n_trainable = sum(p.numel() for p in trainable_params)
+        print(f'Optimizer: AdamW (foreach=False), trainable params: {n_trainable/1e6:.0f}M')
+
+    # Pre-warm optimizer states NOW (only model on GPU, ~4.8 GB) to avoid lazy-init OOM
+    # during the first backward pass when GPU has model+grads+m+v simultaneously.
+    # Pre-warm: model(4.8) + zero-grad(3.1) + m(3.1) + v(3.1) = 11.1 GB — fine.
+    # Training: model(4.8) + grad(3.1) + m(3.1) + v(3.1) = 14.1 GB — no new allocs.
+    if rank == 0:
+        print('Pre-warming AdamW states (before first backward)...', flush=True)
+    for p in trainable_params:
+        p.grad = torch.zeros_like(p)   # zero gradient — step() won't change model weights
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)   # free the zero-grad tensors
+    if rank == 0:
+        alloc = torch.cuda.memory_allocated() / 1e9
+        print(f'  Optimizer states pre-warmed. GPU alloc: {alloc:.2f} GB', flush=True)
 
     # Validation (rank-0 only: eval runs as subprocess pool on the master node)
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))

@@ -1,10 +1,14 @@
 # Cadrille RL fine-tuning — single RTX 4080 SUPER (16 GB)
 # Sequential generation (1 rollout at a time) to keep VRAM flat.
 #
-# Memory breakdown (~14 GB peak):
-#   Model weights (bf16):          ~4.5 GB
-#   AdamW fp32 optimizer states:   ~9.0 GB
-#   Activations + KV cache (×1):   ~0.5 GB  (1 sample at a time, sequential)
+# Memory breakdown (~15.4 GB peak with freeze_vision_encoder=true):
+#   Full model on GPU (bf16):      ~4.8 GB  (VE frozen, LM trainable)
+#   LM gradients only (bf16):      ~3.5 GB  (VE has no grads)
+#   AdamW m+v for LM only (bf16):  ~7.1 GB  (3.55 GB each)
+#   Activations + misc:            ~0.5 GB
+#   Total peak at optimizer.step: ~15.4 GB  (fits in 16 GB)
+#
+# Without freeze: model(4.8)+grads(4.8)+m(4.8)+v(4.8)=19.2 GB → OOM.
 #
 # G=4 with sequential_generation: ~40 s/step (4 × ~10 s) → 50k steps ≈ 23 days.
 # Consider Colab A100 (a100.yaml) or H100 (h100.yaml) for full runs.
@@ -15,8 +19,8 @@
 checkpoints_dir: ./checkpoints
 
 mode: cppo
-checkpoint_path: ./checkpoints/rl-s50k-lr1e-5-G4-cppo-0310-0322/checkpoint-1000
-start_step: 1000
+checkpoint_path: ./checkpoints/rl-s50k-lr1e-5-G4-cppo-0311-0259/checkpoint-9000
+start_step: 9000
 
 # Data
 data_dir: null
@@ -38,10 +42,12 @@ entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * ent
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
 max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
 rollout_temperature: 0.3    # sampling temp for G rollouts; chosen by temp sweep (best pass@4)
+debug_rollout_steps: 3      # print per-rollout codes+rewards, greedy comparison, and k=0/k=final entropy for first N steps (0=off)
 reward_workers: 4
 eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
 eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
+freeze_vision_encoder: true  # freeze VE to fit in 16 GB (LM only = 1.77B trainable params)
 
 # DPO (unused in cppo mode)
 beta: 0.3

@@ -8,6 +8,106 @@
 
 ---
 
+## 4080 OOM root-cause 调试 & 修复 (2026-03-14)
+
+### 背景：bvnmuyho 空跑原因
+- [x] W&B run `bvnmuyho` = `rl-s50k-lr1e-5-G4-cppo-0311-0259` 从 step 1000 开始训练
+- [x] **发现**：之前 4080 所有训练都是 "空跑"（degenerate），原因：
+  - gradient_checkpointing_enable() → transformers 强制 generate() 的 use_cache=False
+  - Qwen2VL: use_cache=False 时，decode 位置 >0 的 prepare_inputs_for_generation 设 pixel_values_videos=None
+  - 模型看不到图像 → 生成乱码 → 所有 reward = -1 → 所有 advantage ≈ 0 → cppo_step 早退
+  - 早退 = 跳过 backward 和 optimizer.step() → 模型参数从未更新
+  - W&B eval 指标 "变化" 是因为每次 eval 随机抽 50 个不同样本 + temperature=0.3 有随机性
+
+### GC bug 修复（已提交）
+- [x] `rl/algorithms/cppo.py` `generate_rollouts()`: generate() 前 `gradient_checkpointing_disable()`，之后重新 enable
+- [x] `rl/eval.py` `eval_one_pass()`: 同样 disable GC before generate
+
+### 修复后首次真实训练的 OOM root-cause
+- [x] GC bug 修复后，optimizer.step() 首次真正执行
+- [x] **OOM 根因**：PyTorch AdamW 懒初始化 — 第一次 step() 才分配 m/v 状态 (`_init_group`)
+  - 模型 (2.39B params × bf16) = 4.78 GB
+  - grads (backward 后) = 4.78 GB
+  - 懒初始化：同时分配 m=4.78 GB + v=4.78 GB = 9.56 GB
+  - 总峰值：4.78+4.78+4.78+4.78 = 19.12 GB > 16 GB → OOM
+- [x] **Fix 1**: `freeze_vision_encoder: true` — 冻结 VE (665M params)，可训练参数降到 1.544B
+  - m+v 降到 6.18 GB；峰值 ~14.35 GB，适合 16 GB
+- [x] **Fix 2**: 预热 optimizer states（模型加载后、第一次 backward 前）
+  - 用零梯度调用 optimizer.step()，在只有模型 (~4.78 GB) 在 GPU 时初始化 m/v
+  - 初始化后: 10.59 GB alloc
+- [x] **Fix 3**: `foreach=False` — 禁止 bulk fp32 upcast buffers
+- [x] **Fix 4**: `optimizer.zero_grad(set_to_none=True)` + `torch.cuda.empty_cache()` 在每步末尾
+  - 防止 CUDA allocator fragmentation（reserved 跨步单调增长 → step 2-3 backward OOM）
+
+### debug-3step-a100-6000 运行结果（3步验证，已成功）
+- [x] 从 a100-step6000 checkpoint 出发，3步全部成功（无 OOM）
+- [x] entropy 未爆炸（Δ = +0.085 最大），healthy behavior with entropy_coef=0.01
+- [x] Step 0: rewards=[+0.073, 0.000, -1.000, 0.000], mean=-0.232, entropy Δ=+0.0854
+- [x] Step 1: rewards=[0.000, +0.022, 0.000, +0.027], mean=+0.012, entropy Δ=+0.0311
+- [x] Step 2: 全 advantage≈0 → 早退（示例均一致得分）
+- [x] 内存峰值：~14.35 GB alloc，~15.85 GB reserved（安全）
+- [x] 步速：~20 sec/step（vs 修复前从未真正训练过）
+
+### 0311-0259 production run 状态（截至 2026-03-14）
+- [x] 训练从 step 1000 跑到 step 9330 并停止（进程不再运行）
+- [x] 最新保存 checkpoint: `checkpoints/rl-s50k-lr1e-5-G4-cppo-0311-0259/checkpoint-9000`
+- [x] 但 **eval IoU 下降**（模型退化）：
+  - 基线 (step 1000): img/DeepCAD=84.1%, img/Fusion360=78.4%, pc/DeepCAD=87.6%
+  - step 9100: img/DeepCAD=78.65% (-5.5%)
+  - step 9300: img/DeepCAD=80.96% (-3.1%)，仍低于基线
+- [x] 原因分析：该 run 用 `rollout_temperature=1.0`（默认，未设），`freeze_vision_encoder=false`（未设），仅用 hard examples 训练 → 过拟合难例，损害通用分布
+- [~] **TODO**: 下一步是否从 checkpoint-9000 继续，还是从 SFT 重新开始？
+
+### 待做
+- [ ] 确认是否继续 0311-0259 run（checkpoint-9000）还是重新从 SFT 开始
+- [x] 更新 4080.yaml: checkpoint_path→checkpoint-9000, start_step=9000, debug_rollout_steps=3
+- [x] cppo.py 调试增强：rollout 打印加 stem，新增 greedy eval 对比（model.eval, do_sample=False）
+
+---
+
+## H100 entropy explosion 调试 (2026-03-14~15) — ROOT CAUSE CONFIRMED ✅
+
+### 已排除的原因
+- [x] GC + use_cache bug：`gradient_checkpointing_disable()` 正确传播到所有子模块，确认有效
+- [x] generation_config.use_cache 差异：SFT 和 A100 checkpoint 都是 True
+- [x] attention_dropout 差异：都是 0.0
+- [x] gen_kwargs 覆盖失败：验证 top_k=50/temp=1.0 正确覆盖 A100 generation_config 里的 top_k=1/temp=0.01
+- [x] rope_deltas 污染：Cadrille.forward() 条件3（past_key_values is None）每次 generate 都会重算
+
+### 已发现的次要 bug（已修复）
+- [x] rope_deltas 未在 generate_rollouts() 中重置 → 加了 `gen_model.rope_deltas = None`
+- [x] early entropy alert：entropy > 5 时打印警告
+- [x] A100 generation_config.json 保存了 `do_sample=True, temperature=0.01, top_k=1, attn_implementation=flash_attention_2` → 无害
+
+### ✅ 根因已确认：冷 optimizer + RL checkpoint 的尖锐极值
+
+**W&B 数据证明（2026-03-15 从 W&B API 拉取）：**
+
+| Run | 起点 | 第一步 entropy | 状态 |
+|-----|------|----------------|------|
+| nixqqhdd | cadrille-sft（SFT） | 0.12–0.25 | ✅ 全程稳定 |
+| 2vfkt7tr | nixqqhdd/ckpt-7200 | step 7220 = 1.39 💥 | crashed (step 7220) |
+| lisvpg5d | nixqqhdd/ckpt-7200 | step 7210 = 4.90 💥 | entropy 3–8 全程振荡 |
+| zc5jle3o | nixqqhdd/ckpt-6300 | step 6310 = 2.03 💥 | entropy 1–8 振荡 |
+| 3izqjn6g | nixqqhdd/ckpt-6300 | step 6310 = 3.14 💥 | killed 立即 |
+
+**根因链**：
+1. RL training 把参数收敛到 loss landscape 的**尖锐极值**（sharp minimum）
+2. Restart 时 Adam optimizer 状态全部重置（m=0, v=0）— 代码没有 save/load optimizer.pt
+3. 冷 Adam 第一步 ≈ sign SGD：update = ±lr × 1（每参数），不经过自适应缩放
+4. 对于 SFT 起点（平坦 landscape）：冷 Adam ±1e-5 步长安全
+5. 对于 RL checkpoint（尖锐极值）：相同步长导致**参数过冲** → entropy 爆炸
+6. 随机性：同一 checkpoint、不同 rollout 采样 → lisvpg5d 第 1 步爆，2vfkt7tr 第 2 步爆
+
+**4080 debug 未爆炸的原因**：G=4（vs H100 G=16）→ 每步 rollout variance 更小 → gradient norm 更小 → 同样冷 Adam 步长不够触发过冲
+
+### Fix（待实现）
+- [ ] **方案1（推荐）**：保存/加载 optimizer state：`torch.save(optimizer.state_dict(), ckpt_dir/'optimizer.pt')` at each checkpoint，resume 时 load → 完全保留热 m/v states
+- [ ] **方案2（简单）**：`lr_warmup_steps` config key，resume 时从 lr=0 线性 warmup 到 target lr over N steps (100–200)
+- [ ] 验证：用 nixqqhdd/checkpoint-7200 + 方案1 或方案2 重启，确认 entropy ≤ 1.0 on step 1
+
+---
+
 ## Repo Restructuring + Official W&B Logging (2026-03-03)
 
 - [x] Step 0: Commit pre-refactor state (commit 28667f9)

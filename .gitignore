@@ -22,6 +22,7 @@ data/_zips/
 data/cad_json/
 data/data.tar
 data/mined/
+data/render_assets/
 data/smoke_train/
 work_dirs
 wandb/
