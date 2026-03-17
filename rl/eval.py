@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from cadrille import Cadrille, collate
 from rl.dataset import render_img
-from rl.reward import compute_metrics, init_eval_pool
+from rl.reward import compute_metrics
 
 try:
     import wandb
@@ -341,27 +341,28 @@ def _run_img_eval_subprocess(model, processor, img_examples: list, args) -> dict
 def run_validation(model, val_examples: list, processor, args) -> dict:
     """Greedy eval over all val_examples; returns W&B-ready metrics dict.
 
-    PC examples are evaluated inline (no CUDA state issue for text-only prompts).
-    IMG examples are evaluated via a fresh subprocess (eval_img.py) to avoid
-    CUDA kernel state contamination from the training process, which otherwise
-    causes consistently wrong img IoU (~0.2 vs the correct ~0.83).
+    PC examples: evaluated inline via eval_one_pass.
+    IMG examples: evaluated via _run_img_eval_subprocess (fresh subprocess with
+    the correct Qwen2VL fast processor loaded from base model).  The cadrille-sft
+    checkpoint ships a SLOW Qwen2VLImageProcessor whose __init__ always overwrites
+    size.shortest_edge with the min_pixels kwarg (200704 → 32×32 tiles, 1024 tokens).
+    The fast processor (loaded inside eval_img.py from Qwen2-VL-2B-Instruct) keeps
+    the correct size.shortest_edge=3136 → 20×20 tiles, 400 tokens → correct IoU.
     """
-    pc_examples  = [e for e in val_examples if e.get('_modality') != 'img']
+    if not val_examples:
+        return {}
+
+    pc_examples  = [e for e in val_examples if e.get('_modality', 'pc') == 'pc']
     img_examples = [e for e in val_examples if e.get('_modality') == 'img']
 
     out = {}
-
     if pc_examples:
-        pc_metrics = eval_one_pass(
+        out.update(eval_one_pass(
             model, pc_examples, processor, args.max_new_tokens,
             eval_batch_size=getattr(args, 'eval_batch_size', 8),
             reward_workers=getattr(args, 'eval_workers', 2),
             eval_timeout=getattr(args, 'eval_timeout', 120.0),
-        )
-        out.update(pc_metrics)
-
+        ))
     if img_examples:
-        img_metrics = _run_img_eval_subprocess(model, processor, img_examples, args)
-        out.update(img_metrics)
-
+        out.update(_run_img_eval_subprocess(model, processor, img_examples, args))
     return out
