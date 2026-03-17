@@ -16,7 +16,7 @@ checkpoints_dir: ./checkpoints
 mode: cppo
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data — hard-mined examples from Hula0401/mine_CAD (6,861 examples at R_th=0.75)
+# Data — full-scan hard-mined examples (22,970 examples at R_th=0.75, K=1 img mode)
 train_modality: img      # paper default: image input for RL
 data_dir: null
 hard_examples_pkl: ./data/mined/combined_hard.pkl
@@ -55,7 +55,12 @@ eval_steps: 500
 # Logging & checkpoints
 log_steps: 10      # ~3-10 min between W&B updates at actual A100 throughput
 save_steps: 500    # save frequently — Colab A100 sessions can timeout after ~12h
-save_total_limit: 10
+save_total_limit: 3
+
+# HuggingFace checkpoint upload (async background thread after each save)
+# Set to your model repo, e.g. "hula-the-cat/cadrille-rl"
+# Requires HF_TOKEN env var or huggingface-cli login
+hf_upload_repo: Hula0401/cad_ckpt
 
 # W&B
 wandb_project: cadrille-rl

@@ -13,8 +13,44 @@ Key algorithmic choices matching the reference:
 import os
 import time
 import shutil
+import threading
 from typing import Optional
 from collections import deque
+
+# ---------------------------------------------------------------------------
+# Async HuggingFace checkpoint upload
+# ---------------------------------------------------------------------------
+
+_bg_upload_threads: list = []
+
+
+def _upload_checkpoint_async(ckpt_dir: str, repo_id: str, token: Optional[str] = None) -> None:
+    """Upload a checkpoint directory to HuggingFace in a background thread.
+
+    Organises as: <repo_id>/<run_name>/<checkpoint_name>/
+    Errors are printed but never crash training.
+    """
+    def _run():
+        try:
+            from huggingface_hub import HfApi
+            api  = HfApi(token=token or os.environ.get('HF_TOKEN'))
+            run  = os.path.basename(os.path.dirname(ckpt_dir))
+            name = os.path.basename(ckpt_dir)
+            api.upload_folder(
+                folder_path=ckpt_dir,
+                repo_id=repo_id,
+                repo_type='model',
+                path_in_repo=f'{run}/{name}',
+            )
+            print(f'[HF] ✓ {name} → {repo_id}/{run}/{name}', flush=True)
+        except Exception as e:
+            print(f'[HF] Upload failed for {os.path.basename(ckpt_dir)}: {e}', flush=True)
+
+    t = threading.Thread(target=_run, daemon=False,
+                         name=f'hf-upload-{os.path.basename(ckpt_dir)}')
+    t.start()
+    _bg_upload_threads.append(t)
+    print(f'[HF] Upload queued: {os.path.basename(ckpt_dir)} → {repo_id}', flush=True)
 
 import numpy as np
 import torch
@@ -455,6 +491,17 @@ def cppo_step(model, optimizer, items, processor, args,
         # If greedy << rollout_best: model has high variance (stochastic helpful).
         print(f'\n  [greedy eval] model.eval() do_sample=False on same B={B} inputs:')
         _gm = model.module if hasattr(model, 'module') else model
+        # Build bad_words_ids locally (same logic as generate_rollouts)
+        bad_words = None
+        _blocked = []
+        _cfg_dbg = getattr(_gm, 'config', None)
+        if _cfg_dbg is not None:
+            for _attr in ('video_token_id', 'image_token_id'):
+                _tid = getattr(_cfg_dbg, _attr, None)
+                if _tid is not None:
+                    _blocked.append([_tid])
+        if _blocked:
+            bad_words = _blocked
         _had_gc_dbg = getattr(_gm, 'is_gradient_checkpointing', False)
         if _had_gc_dbg:
             _gm.gradient_checkpointing_disable()
@@ -727,19 +774,31 @@ def _safe_histogram(data):
 # ---------------------------------------------------------------------------
 
 def _rotate_checkpoints(output_dir: str, save_total_limit: Optional[int]):
-    """Delete oldest checkpoint-XXXXX dirs when limit is exceeded."""
+    """Delete oldest checkpoint-XXXXX dirs when limit is exceeded.
+
+    Skips checkpoints that still have an active HF upload thread — deleting
+    a checkpoint directory while upload_folder() is reading it corrupts the
+    upload.  The directory will be cleaned up on the next rotation call once
+    the upload thread has finished.
+    """
     if not save_total_limit or save_total_limit <= 0:
         return
+    # Names of checkpoints currently being uploaded (thread name = hf-upload-<name>)
+    uploading = {t.name.removeprefix('hf-upload-')
+                 for t in _bg_upload_threads if t.is_alive()}
     checkpoints = []
     for name in os.listdir(output_dir):
         if name.startswith('checkpoint-'):
             try:
                 step = int(name[len('checkpoint-'):])
-                checkpoints.append((step, os.path.join(output_dir, name)))
+                checkpoints.append((step, name, os.path.join(output_dir, name)))
             except ValueError:
                 pass
     checkpoints.sort()
-    for _, path in checkpoints[:-save_total_limit]:
+    for _, name, path in checkpoints[:-save_total_limit]:
+        if name in uploading:
+            print(f'[checkpoint] skipping deletion of {name} (upload in progress)')
+            continue
         shutil.rmtree(path, ignore_errors=True)
         print(f'[checkpoint] deleted old checkpoint: {path}')
 
@@ -764,9 +823,36 @@ def train_cppo(model, optimizer, dataset, processor,
     is_distributed = world_size > 1
     log_path = os.path.join(args.output_dir, 'log.txt')
     step = getattr(args, 'start_step', 0)
+    seed = int(getattr(args, 'seed', 42))
+    rng = np.random.RandomState(seed)   # seeded RNG for data order — reproducible per run
+    torch.manual_seed(seed)
+    if rank == 0:
+        print(f'RNG seed: {seed}')
     if step > 0 and rank == 0:
         print(f'Resuming from step {step}')
     indices = list(range(len(dataset)))
+
+    # Resume RNG + epoch position so data order is exactly reproducible.
+    _resume_rank_indices = None   # saved shuffled order for the in-progress epoch
+    _resume_start_in_epoch = 0   # next batch position within that epoch
+    _resume_epoch = 0
+    if step > 0:
+        rng_path = os.path.join(args.checkpoint_path, 'rng_state.pt')
+        if os.path.exists(rng_path):
+            rs = torch.load(rng_path, map_location='cpu', weights_only=False)
+            rng.set_state(rs['numpy_rng'])
+            torch.set_rng_state(rs['torch_rng'])
+            if rs.get('cuda_rng') is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state(rs['cuda_rng'])
+            _resume_epoch          = rs.get('epoch', 0)
+            _resume_start_in_epoch = rs.get('next_start', 0)
+            _resume_rank_indices   = rs.get('rank_indices', None)
+            if rank == 0:
+                print(f'[resume] RNG state restored — epoch={_resume_epoch}, '
+                      f'pos={_resume_start_in_epoch}')
+        elif rank == 0:
+            print('[resume] WARNING: no rng_state.pt — data order will differ from '
+                  'original run (optimizer state is still restored correctly)')
     batch_size = max(1, int(getattr(args, 'batch_size', 1)))
     use_buffer = bool(getattr(args, 'use_buffer', False))
     buffer_sample_size = int(getattr(args, 'buffer_sample_size', batch_size))
@@ -785,6 +871,8 @@ def train_cppo(model, optimizer, dataset, processor,
         except Exception as e:
             print(f'[eval step={step}] failed (skipping): {e}')
         model.train()
+        import gc as _gc; _gc.collect()   # drop Python circular refs before CUDA flush
+        torch.cuda.empty_cache()          # flush fragmentation left by step-0 eval
 
     # DistributedSampler gives each rank a disjoint shard of the dataset.
     # set_epoch() re-shuffles with a different seed each epoch.
@@ -793,18 +881,25 @@ def train_cppo(model, optimizer, dataset, processor,
     else:
         sampler = None
 
-    pbar = tqdm(total=args.max_steps, desc='Dr. CPPO', disable=(rank != 0))
+    pbar = tqdm(total=args.max_steps, initial=step, desc='Dr. CPPO', disable=(rank != 0))
     last_entropy = float('nan')
-    epoch = 0
+    epoch = _resume_epoch
+    _first_epoch = (_resume_rank_indices is not None)  # use saved indices for first epoch
     while step < args.max_steps:
         if is_distributed:
             sampler.set_epoch(epoch)
             rank_indices = list(sampler)
+            _start_in_epoch = 0
+        elif _first_epoch:
+            rank_indices    = _resume_rank_indices
+            _start_in_epoch = _resume_start_in_epoch
+            _first_epoch    = False
         else:
-            np.random.shuffle(indices)
-            rank_indices = indices
+            rng.shuffle(indices)
+            rank_indices    = indices
+            _start_in_epoch = 0
         epoch += 1
-        for start in range(0, len(rank_indices), batch_size):
+        for start in range(_start_in_epoch, len(rank_indices), batch_size):
             if step >= args.max_steps:
                 break
             base_indices = rank_indices[start:start + batch_size]
@@ -838,7 +933,14 @@ def train_cppo(model, optimizer, dataset, processor,
                                   if int(i) < len(train_indices)]
                         replay_buffer.add_many(picked)
             except Exception as e:
+                msg = str(e)
+                # Fatal CUDA allocator corruption — cannot recover, must restart.
+                # Happens when a previous OOM leaves the allocator in a bad state.
+                if 'INTERNAL ASSERT FAILED' in msg or 'handles_.at' in msg:
+                    print(f'[step {step}] FATAL CUDA allocator error — restarting from last checkpoint is required.\n{e}')
+                    raise
                 print(f'[step {step}] cppo_step error: {e}')
+                torch.cuda.empty_cache()
                 continue
 
             step += 1
@@ -928,14 +1030,31 @@ def train_cppo(model, optimizer, dataset, processor,
                 if is_distributed:
                     _dist.barrier()   # non-rank-0 wait for rank-0 eval
                 model.train()
+                import gc as _gc; _gc.collect()
+                torch.cuda.empty_cache()
 
             if step % args.save_steps == 0 and rank == 0:
                 ckpt_dir = os.path.join(args.output_dir, f'checkpoint-{step}')
                 save_model = model.module if hasattr(model, 'module') else model
                 save_model.save_pretrained(ckpt_dir)
                 processor.save_pretrained(ckpt_dir)
+                torch.save(optimizer.state_dict(),
+                           os.path.join(ckpt_dir, 'optimizer.pt'))
+                # Save RNG state so any resume is exactly reproducible
+                torch.save({
+                    'numpy_rng':   rng.get_state(),
+                    'torch_rng':   torch.get_rng_state(),
+                    'cuda_rng':    torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+                    'epoch':       epoch - 1,        # 0-indexed epoch whose indices are active
+                    'next_start':  start + batch_size,  # first unprocessed position in epoch
+                    'rank_indices': rank_indices,    # this epoch's shuffled data order
+                }, os.path.join(ckpt_dir, 'rng_state.pt'))
                 _rotate_checkpoints(args.output_dir,
                                     getattr(args, 'save_total_limit', None))
+                # Async upload to HuggingFace (non-blocking)
+                hf_repo = getattr(args, 'hf_upload_repo', None)
+                if hf_repo:
+                    _upload_checkpoint_async(ckpt_dir, hf_repo)
 
     pbar.close()
     if rank == 0:
@@ -943,4 +1062,14 @@ def train_cppo(model, optimizer, dataset, processor,
         save_model = model.module if hasattr(model, 'module') else model
         save_model.save_pretrained(final_dir)
         processor.save_pretrained(final_dir)
+        torch.save(optimizer.state_dict(), os.path.join(final_dir, 'optimizer.pt'))
         print(f'Training complete. Final checkpoint → {final_dir}')
+        # Upload final checkpoint and wait for all in-flight uploads
+        hf_repo = getattr(args, 'hf_upload_repo', None)
+        if hf_repo:
+            _upload_checkpoint_async(final_dir, hf_repo)
+        live = [t for t in _bg_upload_threads if t.is_alive()]
+        if live:
+            print(f'[HF] Waiting for {len(live)} upload(s) to finish...')
+            for t in live:
+                t.join(timeout=600)
