@@ -1,8 +1,9 @@
-# Cadrille RL fine-tuning — single H100 / A100 80 GB
-# Official hyperparameters (Table 11, Cadrille paper): G=16, N=4, lr=3e-5,
-# K_updates=3, eps=0.1, optimizer=AdamW (weight_decay=0.01).
-# Paper trains on IMAGES only (8 H100s, effective batch=128).
-# Single-GPU adaptation: img modality, lr scaled to 1e-5 (batch 4 vs paper 16/GPU).
+# Cadrille RL fine-tuning — single H100 80 GB or A100 80 GB
+# (Both GPUs have identical 80 GB VRAM; H100 is ~2× faster compute.)
+#
+# Official hyperparameters (Table 14, Cadrille paper): G=16, N=4, lr=3e-5,
+# batch_size=128 (8×H100 with 16 prompts/GPU), batch_updates=3, eps=0.1.
+# Single-GPU adaptation: batch_size=4, lr=1e-5 (linear scaling from paper 3e-5@16).
 #
 # Usage: python rl/train.py --config configs/rl/h100.yaml
 #

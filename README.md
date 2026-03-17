@@ -21,7 +21,7 @@ This repo extends the cadrille training pipeline with:
 
 - **Modular RL package** (`rl/`) — clean separation of algorithm (`cppo.py`, `dpo.py`), dataset, evaluation, and reward; easy to swap reward signals and algorithms
 - **Process-level rewards** (`rl/reward.py`) — IoU reward via isolated subprocess; Chamfer Distance computed alongside IoU for richer eval signal
-- **Multi-GPU and Colab support** — configs for H100 80 GB, A100 40/80 GB, RTX 4080 16 GB; `colab.ipynb` for cloud training with Drive-backed checkpoints
+- **Multi-GPU and Colab support** — configs for H100/A100 80 GB (single or 8-GPU) and RTX 4080 16 GB; `colab.ipynb` for cloud training with Drive-backed checkpoints
 - **Comprehensive validation** — per-step greedy eval on DeepCAD + Fusion360 test sets, both `pc` and `img` modalities, logged to W&B
 
 The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B + point cloud encoder). The RL training starts from the public cadrille SFT checkpoint.
@@ -61,7 +61,6 @@ PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \
 | VRAM | Config | G | Notes |
 |------|--------|---|-------|
 | ≥70 GB (H100 / A100 80G) | `configs/rl/h100.yaml` | 16 | Full paper hyperparameters |
-| ~40 GB (A100 40G) | `configs/rl/a100.yaml` | 8 | AdamW8bit |
 | ~16 GB (RTX 4080 / 3090) | `configs/rl/4080.yaml` | 4 | Sequential generation |
 
 For 8× GPU: `torchrun --nproc_per_node=8 rl/train.py --config configs/rl/h100x8.yaml`
@@ -132,7 +131,7 @@ bash scripts/setup.sh           # deps only
 bash scripts/setup.sh --data    # deps + download checkpoint + data
 ```
 
-**Google Colab** — open `colab.ipynb`. Cells [1]–[7] set up the environment; cell [8] starts RL training. GPU is auto-detected (H100 / A100 40 GB / A100 80 GB).
+**Google Colab** — open `colab.ipynb`. Cells [1]–[7] set up the environment; cell [8] starts RL training. GPU is auto-detected (H100 / A100 80 GB).
 
 ---
 
@@ -209,11 +208,8 @@ Reward: `r = -1` (invalid code) or `IoU ∈ [0, 1]` (valid geometry).
 Both pred and GT meshes are normalised to [−1, 1]³ before IoU computation.
 
 ```bash
-# RTX 4080 16 GB — G=4, Adam8bit, sequential generation
+# RTX 4080 16 GB — G=4, sequential generation
 python rl/train.py --config configs/rl/4080.yaml
-
-# A100 40 GB — G=8, Adam8bit
-python rl/train.py --config configs/rl/a100.yaml
 
 # H100 or A100 80 GB — G=16, full official hyperparameters
 python rl/train.py --config configs/rl/h100.yaml
@@ -227,7 +223,7 @@ python rl/train.py --config configs/rl/h100.yaml \
 Key RL hyperparameters (H100 / A100 80G config):
 ```
 algorithm:      Dr. CPPO / GRPO
-optimizer:      AdamW (Adam8bit on ≤ 40 GB GPU)
+optimizer:      AdamW
 lr:             1e-5 (paper 3e-5 @ 8×H100; scaled for single-GPU batch)
 G: 16 rollouts  |  top_N: 4  |  eps: 0.1  |  batch_updates: 3
 max_new_tokens: 1024
@@ -294,7 +290,7 @@ python evaluate.py --py-path ./outputs
 │
 ├── configs/
 │   ├── sft/             SFT configs: default (12k), full (120k), h100, smoke
-│   └── rl/              RL configs: 4080 (16 GB), a100 (40 GB), h100 (80 GB)
+│   └── rl/              RL configs: 4080 (16 GB), h100 (80 GB), h100x8 (8-GPU)
 │
 ├── scripts/
 │   ├── run_sft.sh       SFT launcher
@@ -305,7 +301,7 @@ python evaluate.py --py-path ./outputs
 ├── tests/
 │   └── test_cppo_step.py  Unit test for CPPO step (no mesh files needed)
 │
-└── colab.ipynb          Google Colab notebook (H100 / A100 40 GB / A100 80 GB)
+└── colab.ipynb          Google Colab notebook (H100 / A100 80 GB)
 ```
 
 ---
