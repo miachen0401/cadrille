@@ -479,7 +479,7 @@ def cppo_step(model, optimizer, items, processor, args,
             stem = os.path.splitext(os.path.basename(gt))[0]
             code_preview = code.replace('\n', '\\n')[:200]
             print(f'  [{bi}×{G}+{gi}] {stem}  rew={rew:+.3f}  code: {code_preview}')
-        print(f'  rewards matrix (B×G):')
+        print('  rewards matrix (B×G):')
         for bi in range(B):
             row = rewards_t[bi].tolist()
             print(f'    prompt {bi}: {[f"{r:+.3f}" for r in row]}  '
@@ -617,6 +617,7 @@ def cppo_step(model, optimizer, items, processor, args,
     last_entropy   = float('nan')
     last_new_lp    = None
     entropy_coef   = float(getattr(args, 'entropy_coef', 0.0))
+    step_entropy   = None   # set at k=0; kept for diagnostic block after loop
 
     def _mem(tag):
         if debug_rollouts:
@@ -636,10 +637,15 @@ def cppo_step(model, optimizer, items, processor, args,
 
         loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
                             args.eps_high, args.eps_low)
-        if entropy_coef > 0:
-            # Per-token entropy bonus: E_{a~π}[-log π(a)] = H(π) (unbiased estimate).
-            # Uses new_lp [B*N, T] — no extra log_softmax over full vocab needed.
-            # Memory: ~4 MB vs ~1.2 GB for the logits-based full-vocab sum.
+        if entropy_coef > 0 and k == 0:
+            # Entropy bonus on the first inner update only.
+            # At k=0 the policy has not yet been updated, so new_lp == old_lp and
+            #   E_{a~π}[-log π(a)] = H(π)   (unbiased true entropy estimate).
+            # For k > 0 the weights have already been updated by optimizer.step(),
+            # so new_lp = log π_new(OLD tokens).  Using those to estimate entropy
+            # gives cross-entropy H(π_old, π_new), not H(π_new) — incorrect gradient
+            # direction that pulls the policy back toward π_old instead of toward
+            # uniformity.  Skip the bonus for k > 0 rather than apply a biased term.
             step_entropy = compute_policy_entropy(new_lp, comp_mask)
             loss = loss - entropy_coef * step_entropy
         optimizer.zero_grad()
@@ -654,7 +660,7 @@ def cppo_step(model, optimizer, items, processor, args,
             last_loss = loss.item()
             if compute_diag:
                 with torch.no_grad():
-                    if entropy_coef > 0:
+                    if entropy_coef > 0 and step_entropy is not None:
                         last_entropy = step_entropy.item()
                     else:
                         last_entropy = compute_policy_entropy(

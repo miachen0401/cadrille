@@ -264,15 +264,16 @@ def eval_passk(
         print(f'  pass@{k}: {mean_val:.3f}')
         wandb_metrics[f'eval/pass@{k}'] = mean_val
 
-    # best_iou@k: mean over examples of max(IoU) among k samples (oracle upper bound)
+    # best_iou@k: mean over examples of max(IoU) among k samples (oracle upper bound).
+    # Examples where all k samples fail (no valid mesh) contribute 0.0 so that
+    # checkpoints with more failures don't get an inflated oracle score.
     results['best_iou_at_k'] = {}
     print(f'\n--- best IoU@k (oracle, mean of per-example max) ---')
     for k in k_values:
         per_ex_best = []
         for e in per_example:
             valid = [v for v in e['ious'][:k] if v >= 0]
-            if valid:
-                per_ex_best.append(max(valid))
+            per_ex_best.append(max(valid) if valid else 0.0)
         if per_ex_best:
             bk = float(np.mean(per_ex_best))
             results['best_iou_at_k'][k] = bk

@@ -66,7 +66,7 @@ def _preflight_check(args):
         _avail_kb = _mi.get('MemAvailable', None)
         if _avail_kb is not None:
             _avail_gb = _avail_kb / 1024 / 1024
-            if _avail_gb < 1.0:
+            if _avail_gb < 3.0:
                 try:
                     _is_wsl = 'microsoft' in open('/proc/version').read().lower()
                 except Exception:
@@ -75,11 +75,8 @@ def _preflight_check(args):
                          if _is_wsl else
                          '  Fix: free memory before starting training.')
                 raise RuntimeError(
-                    f'\n[preflight] Only {_avail_gb:.1f} GB RAM available — too low to start.\n'
+                    f'\n[preflight] Only {_avail_gb:.1f} GB RAM available — below the 3 GB floor.\n'
                     + _hint)
-            if _avail_gb < 3.0:
-                print(f'[preflight] WARNING: only {_avail_gb:.1f} GB available '
-                      f'(consider freeing memory before the first eval).', flush=True)
             print(f'[preflight] RAM OK  ({_avail_gb:.1f} GB available)', flush=True)
     except RuntimeError:
         raise
@@ -384,14 +381,22 @@ def train(args, cfg_to_save=None):
 
     # Pre-warm optimizer states NOW (only model on GPU, ~4.8 GB) to avoid lazy-init OOM
     # during the first backward pass when GPU has model+grads+m+v simultaneously.
-    # Pre-warm: model(4.8) + zero-grad(3.1) + m(3.1) + v(3.1) = 11.1 GB — fine.
-    # Training: model(4.8) + grad(3.1) + m(3.1) + v(3.1) = 14.1 GB — no new allocs.
+    # Pre-warm: model(4.8) + m(3.1) + v(3.1) = ~11 GB — fine.
+    # Training: model(4.8) + grad(3.1) + m(3.1) + v(3.1) = ~14 GB — no new allocs.
+    #
+    # Direct state-dict init — NOT optimizer.step() with zero gradients.
+    # AdamW.step() applies decoupled weight decay (p ← p · (1−lr·wd)) even when
+    # grad=0, causing a tiny but real parameter change before training starts.
+    # It also advances state['step'] to 1, biasing bias-correction on the first
+    # real update.  Direct init avoids both side effects.
     if rank == 0:
         print('Pre-warming AdamW states (before first backward)...', flush=True)
-    for p in trainable_params:
-        p.grad = torch.zeros_like(p)   # zero gradient — step() won't change model weights
-    optimizer.step()
-    optimizer.zero_grad(set_to_none=True)   # free the zero-grad tensors
+    with torch.no_grad():
+        for p in trainable_params:
+            state = optimizer.state[p]
+            state['step']       = torch.tensor(0.0)
+            state['exp_avg']    = torch.zeros_like(p, memory_format=torch.preserve_format)
+            state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
     if rank == 0:
         alloc = torch.cuda.memory_allocated() / 1e9
         print(f'  Optimizer states pre-warmed. GPU alloc: {alloc:.2f} GB', flush=True)

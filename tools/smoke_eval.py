@@ -5,7 +5,7 @@ on any checkpoint without launching full training.
 
 Usage
 -----
-python tools/smoke_eval.py \\
+uv run python tools/smoke_eval.py \\
     --checkpoints checkpoints/cadrille-sft checkpoints/cadrille-rl \\
     --pkl data/smoke_train/smoke_train.pkl \\
     --n 5 \\
@@ -180,7 +180,8 @@ def main():
     for r in all_results:
         print(f'  {r["label"]:<20}  {r["avg_iou"]:>8.4f}  {r["n_valid"]}/{r["n_total"]}')
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(out_dir, exist_ok=True)
     with open(args.out, 'w') as f:
         json.dump(all_results, f, indent=2)
     print(f'\nSaved → {args.out}')

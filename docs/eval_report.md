@@ -133,7 +133,7 @@ Key findings:
 1. **best_iou@1 is *higher* at t=1.0 than t=0.3** — surprising but consistent across all RL models. High temperature still finds good samples; diversity helps even at k=1 for the oracle metric. Exception: SFT and 4080-9000, where t=0.3 @1 > t=1.0 @1 (collapsed/weaker policies benefit from lower variance).
 2. **best_iou@4 peaks at t=0.7 for all models** — the diversity-quality sweet spot.
 3. **best_iou@16 is nearly flat across temperatures** (~0.905–0.921) — at k=16 there are enough samples to find a good one regardless.
-4. **pass@1 (strict quality) peaks at t=0.3** for official-rl (0.504 vs 0.522 at t=0.7) but the difference is small and **reverses** for RL-trained models at higher k.
+4. **pass@1 (strict quality) peaks at t=0.7** for official-rl (0.522 vs 0.504 at t=0.3); the gap is small but consistent.
 5. **official-rl consistently dominates on pass@k@0.95** — the RL training improves not just mean IoU but also the tail of the distribution (more samples exceed 0.95).
 
 **Practical recommendation:** use t=0.7 for best coverage-efficiency trade-off. For single-shot greedy eval (paper metrics), use t=0 (greedy/do_sample=False).
@@ -155,7 +155,7 @@ The IoU peak at step 6000 then slight regression at 7200 is consistent with a mi
 ### 6.1 Next training run
 
 - **Start from**: `a100-step6000` (best IoU checkpoint, stable run)
-- **Config**: H100 (80 GB) with OOM fix (`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, `sequential_generation=True` if needed)
+- **Config**: H100 (80 GB) with `sequential_generation=True` if OOM (train.py defaults to `PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8`; do **not** set `expandable_segments:True` — it causes allocator crashes)
 - **Entropy bonus**: `entropy_coef=0.01` from step 0 (already in config)
 - **Monitor**: watch `eval/img/DeepCAD/IoU` every 500 steps; stop if IoU regresses > 1% from peak for 2 consecutive evals
 
