@@ -125,9 +125,12 @@ class MeshDataset:
         ex = self.examples[index]
         if self.modality == 'img':
             item = dict(ex)
+            item['modality'] = 'img'
             item.update(render_img(ex['gt_mesh_path']))
             return item
-        return ex
+        item = dict(ex)
+        item['modality'] = 'pc'
+        return item
 
 
 class RLDataset:
@@ -152,6 +155,7 @@ class RLDataset:
             'description': 'Generate cadquery code',
             'file_name': ex['file_name'],
             'gt_mesh_path': ex['gt_mesh_path'],
+            'modality': self.modality,
         }
         if self.modality == 'pc':
             import trimesh

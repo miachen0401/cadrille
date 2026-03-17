@@ -104,7 +104,15 @@ def resolve_args(args, cfg: dict) -> dict:
     _seq = getattr(args, 'sequential_generation', None)
     if not _seq:
         _seq = cfg.get('sequential_generation', False)
-    args.sequential_generation = bool(_seq)
+    args.sequential_generation  = bool(_seq)
+    args.rollout_temperature    = cfg.get('rollout_temperature', 1.0)
+    args.entropy_coef           = float(cfg.get('entropy_coef', 0.0))
+    args.debug_rollout_steps    = int(cfg.get('debug_rollout_steps', 0))
+    args.freeze_vision_encoder  = bool(cfg.get('freeze_vision_encoder', False))
+    args.seed                   = int(cfg.get('seed', 42))
+
+    # HuggingFace checkpoint upload (async, background thread)
+    args.hf_upload_repo = cfg.get('hf_upload_repo', None)   # e.g. "YourOrg/cadrille-rl"
 
     # DPO
     args.beta                 = cfg.get('beta', 0.3)
@@ -120,13 +128,20 @@ def resolve_args(args, cfg: dict) -> dict:
     args.wandb_run_name = cfg.get('wandb_run_name', run_name)
     args.run_name       = run_name
 
-    # Resume step: auto-detect from checkpoint directory name (e.g. checkpoint-5000 → 5000)
+    # Resume step: auto-detect from checkpoint directory name.
+    # Matches the trailing integer in names like:
+    #   checkpoint-6000  →  6000
+    #   a100-step6000    →  6000
+    #   step-6000        →  6000
+    #   run_v2_9000      →  9000
+    import re as _re
     start_step = 0
     ckpt_path = getattr(args, 'checkpoint_path', None)
     if ckpt_path:
         ckpt_name = os.path.basename(ckpt_path.rstrip('/'))
-        if ckpt_name.startswith('checkpoint-') and ckpt_name[len('checkpoint-'):].isdigit():
-            start_step = int(ckpt_name[len('checkpoint-'):])
+        m = _re.search(r'(\d+)$', ckpt_name)
+        if m:
+            start_step = int(m.group(1))
     args.start_step = start_step
 
     # Return resolved config dict for saving alongside checkpoint
