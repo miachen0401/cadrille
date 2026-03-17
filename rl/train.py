@@ -21,6 +21,11 @@ python rl/train.py --config configs/rl/4080.yaml --max-steps 3 --wandb-offline
 import os
 import sys
 
+# expandable_segments:True can trigger !handles_.at(i) INTERNAL ASSERT when
+# VRAM is near-full after inline eval (100 generate() calls fragment the pool).
+# garbage_collection_threshold=0.8 aggressively reclaims cached blocks instead.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.8")
+
 # Allow execution from repo root or rl/ subdirectory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,7 +40,6 @@ from cadrille import Cadrille
 from rl.config import load_yaml, resolve_args
 from rl.dataset import MeshDataset, RLDataset, DPODataset
 from rl.eval import load_val_examples
-from rl.reward import init_eval_pool, init_reward_pool
 from rl.algorithms.cppo import train_cppo
 from rl.algorithms.dpo import train_dpo
 
@@ -51,6 +55,36 @@ def _preflight_check(args):
     import glob as _glob
     import subprocess
     import textwrap
+
+    # ── 0. Memory guard — catch low-RAM before loading model ─────────────────
+    # WSL2: crashed CUDA processes leave leaked DX12 pages until `wsl --shutdown`.
+    # Docker/CI: MemAvailable may be absent — skip the check gracefully.
+    try:
+        with open('/proc/meminfo') as _f:
+            _mi = {k: int(v.split()[0]) for k, v in
+                   (l.split(':', 1) for l in _f if ':' in l)}
+        _avail_kb = _mi.get('MemAvailable', None)
+        if _avail_kb is not None:
+            _avail_gb = _avail_kb / 1024 / 1024
+            if _avail_gb < 1.0:
+                try:
+                    _is_wsl = 'microsoft' in open('/proc/version').read().lower()
+                except Exception:
+                    _is_wsl = False
+                _hint = ('  Fix: run  wsl --shutdown  in Windows PowerShell, then reopen WSL.'
+                         if _is_wsl else
+                         '  Fix: free memory before starting training.')
+                raise RuntimeError(
+                    f'\n[preflight] Only {_avail_gb:.1f} GB RAM available — too low to start.\n'
+                    + _hint)
+            if _avail_gb < 3.0:
+                print(f'[preflight] WARNING: only {_avail_gb:.1f} GB available '
+                      f'(consider freeing memory before the first eval).', flush=True)
+            print(f'[preflight] RAM OK  ({_avail_gb:.1f} GB available)', flush=True)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass  # /proc not available (non-Linux) — skip silently
 
     # ── 1. Checkpoint has actual weight files ─────────────────────────────────
     ckpt = args.checkpoint_path
@@ -280,45 +314,26 @@ def train(args, cfg_to_save=None):
             except Exception as e:
                 print(f'Warning: wandb.init() failed ({e}). Pass --wandb-offline for local logging.')
 
-    # Processor loading strategy:
-    #   1. If base_model is a local directory (pre-downloaded), use it directly.
-    #   2. Otherwise try checkpoint_path — works if checkpoint includes preprocessor_config.json.
-    #   3. If checkpoint is missing the image-processor config (cadrille-sft only ships
-    #      model weights + tokenizer), fall back to base_model HF download.
-    #   4. If HF is rate-limiting (Colab shared IPs) print a clear fix: hf login.
+    # Always load processor from the BASE model (Qwen2-VL-2B-Instruct fast processor).
+    # The cadrille-sft checkpoint ships a SLOW Qwen2VLImageProcessor whose __init__
+    # unconditionally overwrites size.shortest_edge with the min_pixels kwarg:
+    #   size["shortest_edge"] = min_pixels = 200704  →  32×32 tiles (1024 tokens)
+    # The fast processor (base model) ignores the kwarg for size and keeps the correct:
+    #   size["shortest_edge"] = 3136  →  20×20 tiles (400 tokens)
+    # The model was trained with 400 video tokens; 1024 tokens = can't interpret image → IoU≈0.09.
     _proc_kwargs = dict(min_pixels=256 * 28 * 28, max_pixels=1280 * 28 * 28, padding_side='left')
-    _proc_local = (args.base_model
-                   if (args.base_model and os.path.isdir(args.base_model))
-                   else args.checkpoint_path)
     try:
-        processor = AutoProcessor.from_pretrained(_proc_local, **_proc_kwargs)
-        if rank == 0 and _proc_local != args.base_model:
-            print(f'Processor loaded from checkpoint_path (no HF request needed)')
-    except OSError:
-        # cadrille-sft only ships model.safetensors + config.json; no processor files.
-        # Download from base_model (one-time HF request), then save into checkpoint_path
-        # so all future runs load locally without any HF network access.
+        processor = AutoProcessor.from_pretrained(args.base_model, **_proc_kwargs)
         if rank == 0:
-            print(f'Processor: {_proc_local!r} has no preprocessor_config.json '
-                  f'→ downloading from {args.base_model!r} (one-time)')
-            print('  Tip: if rate-limited, run `huggingface-cli login` first (Cell [7])')
-        try:
-            processor = AutoProcessor.from_pretrained(args.base_model, **_proc_kwargs)
-            if rank == 0:
-                # Save all processor files into checkpoint_path so next run is local
-                processor.save_pretrained(_proc_local)
-                print(f'  Processor files saved to {_proc_local!r} — future runs skip this step')
-        except Exception as e:
-            raise RuntimeError(
-                f'\nCannot load processor from checkpoint ({_proc_local!r}) '
-                f'or base model ({args.base_model!r}).\n'
-                f'HuggingFace is likely rate-limiting your Colab IP. Fix:\n'
-                f'  1. Re-run Cell [7] and paste a HuggingFace token when prompted\n'
-                f'     (get a read-only token at https://huggingface.co/settings/tokens)\n'
-                f'  2. Then re-run this cell — processor files will be saved to Drive\n'
-                f'     and never downloaded again.\n'
-                f'Original error: {e}'
-            ) from e
+            print(f'Processor loaded from {args.base_model!r} '
+                  f'(size.shortest_edge={processor.image_processor.size["shortest_edge"]})')
+    except Exception as e:
+        raise RuntimeError(
+            f'\nCannot load processor from base model ({args.base_model!r}).\n'
+            f'Ensure the HuggingFace cache has Qwen2-VL-2B-Instruct:\n'
+            f'  huggingface-cli download {args.base_model}\n'
+            f'Original error: {e}'
+        ) from e
 
     if is_distributed:
         # DDP: load onto the local GPU explicitly; device_map='auto' would
@@ -341,9 +356,64 @@ def train(args, cfg_to_save=None):
             device_map='auto')
         model.gradient_checkpointing_enable()   # reduces activation memory during backward
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # Optionally freeze visual encoder to reduce optimizer-state memory.
+    # On 4080 (16 GB): model(4.8) + LM-grads(3.5) + m(3.5) + v(3.5) = 15.3 GB — fits.
+    # Without freeze:  model(4.8) + all-grads(4.8) + m(4.8) + v(4.8) = 19.2 GB — OOM.
+    # This is also architecturally correct: RL should refine the LM policy, not the
+    # visual perception backbone.
+    if getattr(args, 'freeze_vision_encoder', False):
+        raw_model = model.module if hasattr(model, 'module') else model
+        if not hasattr(raw_model, 'visual'):
+            raise AttributeError(
+                'freeze_vision_encoder=True but model has no .visual attribute. '
+                'This option requires Qwen2-VL-based Cadrille.')
+        for param in raw_model.visual.parameters():
+            param.requires_grad_(False)
+        ve_params = sum(p.numel() for p in raw_model.visual.parameters())
+        if rank == 0:
+            print(f'Visual encoder frozen: {ve_params/1e6:.0f}M params excluded from optimizer')
+
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # foreach=False: single-tensor updates; avoids bulk fp32 upcast buffers that
+    # torch._foreach_* ops create for all params simultaneously (would OOM on 16 GB).
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=0.01,
+                                   foreach=False)
     if rank == 0:
-        print('Optimizer: AdamW (fp32, weight_decay=0.01 — matches ref grpo_mm.py:286)')
+        n_trainable = sum(p.numel() for p in trainable_params)
+        print(f'Optimizer: AdamW (foreach=False), trainable params: {n_trainable/1e6:.0f}M')
+
+    # Pre-warm optimizer states NOW (only model on GPU, ~4.8 GB) to avoid lazy-init OOM
+    # during the first backward pass when GPU has model+grads+m+v simultaneously.
+    # Pre-warm: model(4.8) + zero-grad(3.1) + m(3.1) + v(3.1) = 11.1 GB — fine.
+    # Training: model(4.8) + grad(3.1) + m(3.1) + v(3.1) = 14.1 GB — no new allocs.
+    if rank == 0:
+        print('Pre-warming AdamW states (before first backward)...', flush=True)
+    for p in trainable_params:
+        p.grad = torch.zeros_like(p)   # zero gradient — step() won't change model weights
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)   # free the zero-grad tensors
+    if rank == 0:
+        alloc = torch.cuda.memory_allocated() / 1e9
+        print(f'  Optimizer states pre-warmed. GPU alloc: {alloc:.2f} GB', flush=True)
+
+    # Restore optimizer state when resuming — without this, Adam's exp_avg_sq
+    # resets to 0 while model weights are already converged. The missing second
+    # moment causes effective LR to be 10-100× larger than during training
+    # (v_steady >> g_current² at convergence), which blows entropy from ~0.1 to 8+.
+    if args.start_step > 0:
+        opt_path = os.path.join(args.checkpoint_path, 'optimizer.pt')
+        if os.path.exists(opt_path):
+            opt_state = torch.load(opt_path, map_location='cpu')
+            optimizer.load_state_dict(opt_state)
+            del opt_state
+            if rank == 0:
+                print(f'Optimizer state restored from {opt_path}')
+        else:
+            if rank == 0:
+                print(f'[WARNING] Resuming from step {args.start_step} but no '
+                      f'optimizer.pt found in {args.checkpoint_path}.\n'
+                      f'  Adam exp_avg_sq will be zero — first few steps may have '
+                      f'oversized effective LR and blow entropy.')
 
     # Validation (rank-0 only: eval runs as subprocess pool on the master node)
     val_modalities = tuple(m.strip() for m in args.val_modalities.split(','))
@@ -358,12 +428,11 @@ def train(args, cfg_to_save=None):
         if not val_examples:
             print('No validation dirs found; skipping validation.')
 
-        # Start warm eval process pool before training begins (rank 0 only).
-        if val_examples:
-            init_eval_pool(n_workers=getattr(args, 'eval_workers', 2))
-
-        # Start warm reward pool — eliminates per-rollout Python startup overhead.
-        init_reward_pool(n_workers=getattr(args, 'reward_workers', 8))
+        # NOTE: pools are NOT pre-warmed at startup.
+        # Pre-warming keeps N cadquery processes resident in CPU RAM (~400 MB each).
+        # On 16 GB systems (4080) that constant drain + model.cpu() during img eval
+        # = OOM → WSL freeze.  Workers spawn on-demand and die after each batch;
+        # the per-step overhead is ~1-2 s (parallel spawn) vs ~40 s/step: acceptable.
 
     if args.mode == 'cppo':
         if args.data_dir:

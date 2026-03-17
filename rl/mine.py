@@ -123,10 +123,10 @@ def main():
     print(f"  Remaining: {len(todo)} STLs to process")
     print(f"  Scores table: {scores_path}")
 
-    # ── Mine (batched) ────────────────────────────────────────────────────────
+    # ── Mine (batched, serial) ────────────────────────────────────────────────
     # Batch B items per generate() call so GPU is busy more continuously.
-    # Rendering is parallelised with ThreadPoolExecutor; rewards are already
-    # parallel via compute_rewards_parallel.
+    # Rendering is parallelised with ThreadPoolExecutor; rewards run serially
+    # after generate to avoid CPU/CUDA contention on consumer GPUs.
     import json as _json
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -165,8 +165,6 @@ def main():
     pbar = tqdm(total=len(todo),
                 desc=f"Mining ({args.modality}, K={args.K}, B={B}, R_th={args.R_th})")
 
-    # Walk todo in chunks of B; use a thread pool to pre-render the NEXT
-    # chunk while the GPU is busy with the current one.
     with ThreadPoolExecutor(max_workers=min(B, 4)) as pool:
         i = 0
         while i < len(todo):
@@ -234,11 +232,12 @@ def main():
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False)
 
-            # Compute rewards for the whole batch in parallel
+            # Compute rewards after generate (serial avoids CPU/CUDA contention)
             all_stl_paths = [p for p, _ in items_ok for _ in range(args.K)]
             all_rewards_flat = compute_rewards_parallel(
                 all_completions, all_stl_paths,
-                workers=max(args.reward_workers, len(items_ok) * args.K))
+                workers=args.reward_workers,
+                timeout=30.0)
 
             # Write results per original example
             for idx, (stl_path, _) in enumerate(items_ok):
