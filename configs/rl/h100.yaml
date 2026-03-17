@@ -26,7 +26,7 @@ dpo_dataset: null
 
 # Training (paper Table 11, lr scaled for single-GPU batch_size=4 vs paper 16/GPU)
 max_steps: 50000
-lr: 1.0e-5                    # paper: 3e-5 @ batch=16/GPU → 1e-5 @ batch=4 (linear scaling)
+lr: 7.5e-6                    # paper: 3e-5 @ batch=16/GPU → 1e-5 @ batch=4 (linear scaling)
 
 # Dr. CPPO official settings
 G: 16
@@ -36,10 +36,10 @@ eps_low: 0.1
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
-max_new_tokens: 1024          # 1024 needed for complete CadQuery scripts
+max_new_tokens: 1024
 rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 16            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
-use_buffer: true
+use_buffer: false
 buffer_sample_size: 1
 buffer_expand_frac: 0.5
 buffer_max_size: 4096
@@ -47,9 +47,6 @@ eval_workers: 2
 eval_timeout: 120.0
 sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=4
 
-# DPO (unused)
-beta: 0.3
-dpo_epochs_per_round: 10
 
 # Validation — 50 DeepCAD + 50 Fusion360, img modality (matches training)
 # Update paths for Colab. Set val_fusion360_dir: null if data unavailable.
@@ -63,7 +60,7 @@ eval_steps: 100
 # Logging & checkpoints
 # save_steps=300  → checkpoint every ~1 h on A100 80G; safe for Colab session timeouts.
 # save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on Drive. Increase if Drive has space.
-log_steps: 10
+log_steps: 20
 save_steps: 300
 save_total_limit: 10
 
