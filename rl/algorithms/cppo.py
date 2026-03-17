@@ -652,12 +652,13 @@ def cppo_step(model, optimizer, items, processor, args,
 
         if is_last:
             last_loss = loss.item()
-            with torch.no_grad():
-                if entropy_coef > 0:
-                    last_entropy = step_entropy.item()
-                else:
-                    last_entropy = compute_policy_entropy(
-                        new_lp.detach(), comp_mask).item()
+            if compute_diag:
+                with torch.no_grad():
+                    if entropy_coef > 0:
+                        last_entropy = step_entropy.item()
+                    else:
+                        last_entropy = compute_policy_entropy(
+                            new_lp.detach(), comp_mask).item()
             last_new_lp = new_lp.detach()
 
     # ---- Debug: entropy before vs after optimizer steps ------------------

@@ -51,7 +51,12 @@ def run_smoke(ckpt_path, examples, max_new_tokens, modality, device):
     print(f'[smoke] {label}  ({ckpt_path})')
     print(f'{"="*60}')
 
-    processor = AutoProcessor.from_pretrained(ckpt_path, use_fast=False)
+    # Always load from base model (fast processor) — same fix as train.py.
+    # cadrille-sft ships a SLOW processor whose __init__ overwrites size.shortest_edge
+    # with min_pixels (200704 → 32×32 tiles) instead of the correct 3136 → 20×20 tiles.
+    processor = AutoProcessor.from_pretrained(
+        'Qwen/Qwen2-VL-2B-Instruct',
+        min_pixels=256 * 28 * 28, max_pixels=1280 * 28 * 28, padding_side='left')
     model = Cadrille.from_pretrained(ckpt_path, torch_dtype=torch.bfloat16)
     model = model.to(device)
     model.eval()

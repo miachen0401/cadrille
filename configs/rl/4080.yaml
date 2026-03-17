@@ -19,21 +19,25 @@
 checkpoints_dir: ./checkpoints
 
 mode: cppo
-checkpoint_path: ./checkpoints/rl-s50k-lr1e-5-G4-cppo-0311-0259/checkpoint-9000
-start_step: 9000
+# checkpoint_path: set via --checkpoint-path CLI flag when resuming
 
 # Data
-data_dir: null
+# Full dataset: all DeepCAD + Fusion360 train meshes (84,526 + 15,410 = ~100k examples).
+# Set hard_examples_pkl to null to disable hard-only mode.
+# Set data_dir2 to also include Fusion360 train meshes.
+data_dir: ./data/deepcad_train_mesh
+data_dir2: ./data/fusion360_train_mesh
 train_modality: img
-hard_examples_pkl: ./data/mined/combined_hard.pkl
+hard_examples_pkl: null
 dpo_dataset: null
 
 # Training
 max_steps: 50000
-lr: 1.0e-5              # reduced from 3e-5: G=4 has high gradient variance vs official G=16
+lr: 2.0e-7              # reduced from 3e-5: G=4 has high gradient variance vs official G=16
                         # lr=3e-5 caused KL divergence (ratio=2.42) at step 300 → collapse
 
 # CPPO hyperparameters — memory-safe for 16 GB (official: G=16, top_N=4, batch_updates=3)
+batch_size: 1            # 1 prompt per step; memory ceiling on 16 GB
 G: 4                     # reduced from 16; sequential_generation keeps VRAM flat
 top_N: 2                 # select top-2 of 4 by |advantage|
 eps_high: 0.1
@@ -49,9 +53,6 @@ eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
 freeze_vision_encoder: true  # freeze VE to fit in 16 GB (LM only = 1.77B trainable params)
 
-# DPO (unused in cppo mode)
-beta: 0.3
-dpo_epochs_per_round: 10
 
 # Validation — 25 DeepCAD + 25 Fusion360, both pc and img modalities.
 # Validation runs on CPU-offloaded old model (not in memory) + single forward
@@ -62,7 +63,7 @@ val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        pc,img
-eval_steps: 100
+eval_steps: 10
 
 # Logging & checkpoints
 # save_total_limit: keep only the N most-recent checkpoints to cap disk usage.
@@ -70,8 +71,8 @@ eval_steps: 100
 # For a full pass@k sweep, aim for 10-20 evenly spaced points.
 # With save_steps=2000 and max_steps=50000: 25 checkpoints saved, 10 kept.
 log_steps: 10
-save_steps: 500
-save_total_limit: 10
+save_steps: 10
+save_total_limit: 3
 
 # W&B
 wandb_project: cadrille-rl

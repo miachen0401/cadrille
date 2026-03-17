@@ -319,6 +319,24 @@ def _reward_worker_run(
         return None, None
 
 
+def shutdown_pools() -> None:
+    """Shut down reward + eval pools and free their RSS (~400 MB per worker).
+
+    Call before model.cpu() during img eval to reclaim CPU RAM on memory-
+    constrained systems (4080 / 16 GB).  Pools are NOT restarted afterwards;
+    subsequent reward/eval calls fall back to fresh subprocesses automatically.
+    """
+    global _reward_pool, _eval_pool
+    for pool, name in [(_reward_pool, 'reward'), (_eval_pool, 'eval')]:
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+    _reward_pool = None
+    _eval_pool   = None
+
+
 def init_reward_pool(n_workers: int = 8) -> None:
     """Spawn the warm reward process pool (call once at training startup).
 

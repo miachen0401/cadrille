@@ -40,7 +40,6 @@ from cadrille import Cadrille
 from rl.config import load_yaml, resolve_args
 from rl.dataset import MeshDataset, RLDataset, DPODataset
 from rl.eval import load_val_examples
-from rl.reward import init_eval_pool, init_reward_pool, shutdown_pools  # noqa: F401
 from rl.algorithms.cppo import train_cppo
 from rl.algorithms.dpo import train_dpo
 
@@ -57,23 +56,31 @@ def _preflight_check(args):
     import subprocess
     import textwrap
 
-    # ── 0. Memory guard — catch WSL2 ghost-page bloat before loading model ────
-    # A crashed CUDA process on WSL2 leaves leaked DX12/kernel anonymous pages
-    # that persist until `wsl --shutdown`.  Starting training with <6 GB
-    # available means model.cpu() during img eval will OOM → hard freeze.
+    # ── 0. Memory guard — catch low-RAM before loading model ─────────────────
+    # WSL2: crashed CUDA processes leave leaked DX12 pages until `wsl --shutdown`.
+    # Docker/CI: MemAvailable may be absent — skip the check gracefully.
     try:
         with open('/proc/meminfo') as _f:
             _mi = {k: int(v.split()[0]) for k, v in
                    (l.split(':', 1) for l in _f if ':' in l)}
-        _avail_gb = _mi.get('MemAvailable', 0) / 1024 / 1024
-        if _avail_gb < 1.0:
-            raise RuntimeError(
-                f'\n[preflight] Only {_avail_gb:.1f} GB RAM available — too low to start.\n'
-                f'  Fix: run  wsl --shutdown  in Windows PowerShell, then reopen WSL.')
-        if _avail_gb < 3.0:
-            print(f'[preflight] WARNING: only {_avail_gb:.1f} GB available '
-                  f'(WSL2 ghost pages from previous crash — consider wsl --shutdown).', flush=True)
-        print(f'[preflight] RAM OK  ({_avail_gb:.1f} GB available)', flush=True)
+        _avail_kb = _mi.get('MemAvailable', None)
+        if _avail_kb is not None:
+            _avail_gb = _avail_kb / 1024 / 1024
+            if _avail_gb < 1.0:
+                try:
+                    _is_wsl = 'microsoft' in open('/proc/version').read().lower()
+                except Exception:
+                    _is_wsl = False
+                _hint = ('  Fix: run  wsl --shutdown  in Windows PowerShell, then reopen WSL.'
+                         if _is_wsl else
+                         '  Fix: free memory before starting training.')
+                raise RuntimeError(
+                    f'\n[preflight] Only {_avail_gb:.1f} GB RAM available — too low to start.\n'
+                    + _hint)
+            if _avail_gb < 3.0:
+                print(f'[preflight] WARNING: only {_avail_gb:.1f} GB available '
+                      f'(consider freeing memory before the first eval).', flush=True)
+            print(f'[preflight] RAM OK  ({_avail_gb:.1f} GB available)', flush=True)
     except RuntimeError:
         raise
     except Exception:

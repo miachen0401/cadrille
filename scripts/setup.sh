@@ -49,8 +49,11 @@ for i in range(n):
 EOF
 
 # ── 4. Data + checkpoint (optional) ───────────────────────────────────────────
-if [[ "${1:-}" == "--data" ]]; then
+if [[ "${1:-}" == "--data" || "${1:-}" == "--full" ]]; then
     echo "[4/4] Downloading checkpoint and mesh data from HuggingFace ..."
+    # --full also downloads the full training meshes (84k DeepCAD + 30k Fusion360 STLs)
+    # needed only for mining new hard examples; adds ~2 GB and several minutes.
+    [[ "${1:-}" == "--full" ]] && export DOWNLOAD_TRAIN_MESHES=1
 
     # SFT checkpoint — small number of files, no rate-limit issue
     uv run huggingface-cli download maksimko123/cadrille \
@@ -59,8 +62,10 @@ if [[ "${1:-}" == "--data" ]]; then
     # Mesh datasets + hard examples — all downloaded as single zips to avoid HF's
     # 5000 req/5min rate limit (deepcad_test_mesh has 8048 files alone).
     uv run python - <<'EOF'
-import os, zipfile, pickle
+import os, sys, zipfile, pickle
 from huggingface_hub import hf_hub_download
+
+FULL = "--full" in sys.argv  # noqa: only read, not passed here (handled in bash below)
 
 def download_zip(repo_id, zip_name, out_dir, repo_type="dataset", skip_if_ext='.stl'):
     """Download a zip from HuggingFace and extract to out_dir.
@@ -83,13 +88,13 @@ def download_zip(repo_id, zip_name, out_dir, repo_type="dataset", skip_if_ext='.
     n_png = len([f for f in os.listdir(out_dir) if f.endswith('.png')])
     print(f"  {out_dir}: {n_stl} STLs, {n_png} PNGs")
 
-# Test meshes (STLs + pre-rendered PNGs)
+# Test meshes (STLs + pre-rendered PNGs) — always downloaded
 download_zip("Hula0401/deepCAD_test",        "deepcad_test_mesh.zip",      "data/deepcad_test_mesh")
 download_zip("Hula0401/deepCAD_test",        "deepcad_test_renders.zip",   "data/deepcad_test_mesh",   skip_if_ext='_render.png')
 download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip",    "data/fusion360_test_mesh")
 download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_renders.zip", "data/fusion360_test_mesh", skip_if_ext='_render.png')
 
-# Hard examples (training set for RL)
+# Hard-mined examples — required for RL training (h100/a100/4080 configs all use hard_examples_pkl)
 if os.path.exists("data/mined/combined_hard.pkl"):
     print("  data/mined/combined_hard.pkl already present, skipping")
 else:
@@ -106,6 +111,16 @@ else:
     with open("data/mined/combined_hard.pkl", "wb") as f:
         pickle.dump(rows, f)
     print(f"  data/mined/combined_hard.pkl ready: {len(rows)} hard examples")
+
+# Full training meshes — only needed for mining new hard examples (--full flag)
+if os.environ.get("DOWNLOAD_TRAIN_MESHES"):
+    print("  [--full] Downloading full training meshes for mining ...")
+    download_zip("Hula0401/deepcad_train_mesh",    "deepcad_train_mesh.zip",      "data/deepcad_train_mesh")
+    download_zip("Hula0401/deepcad_train_mesh",    "deepcad_train_renders.zip",   "data/deepcad_train_mesh",   skip_if_ext='_render.png')
+    download_zip("Hula0401/fusion360_train_mesh",  "fusion360_train_mesh.zip",    "data/fusion360_train_mesh")
+    download_zip("Hula0401/fusion360_train_mesh",  "fusion360_train_renders.zip", "data/fusion360_train_mesh", skip_if_ext='_render.png')
+else:
+    print("  Skipping full training meshes (only needed for mining). Re-run with --full to download.")
 EOF
 
     echo "[4/4] Data download complete."

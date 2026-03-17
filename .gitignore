@@ -30,4 +30,5 @@ ref_code/
 logs/
 DeepCAD/
 .bash_history
-.claude/
+.claude/uv.lock
+uv.lock

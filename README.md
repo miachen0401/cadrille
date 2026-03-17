@@ -41,8 +41,10 @@ cp .env.example .env   # then edit .env with your HF_TOKEN and WANDB_API_KEY
 source .env            # loads HF_TOKEN and WANDB_API_KEY into the shell
 # Alternative: interactive login (uv run huggingface-cli login && uv run wandb login)
 
-# 3. Download SFT checkpoint + test meshes + hard examples (~5 GB total)
+# 3. Download SFT checkpoint + test meshes + hard examples (~2 GB, ~5 min)
 bash scripts/setup.sh --data
+# Optional: also download full training meshes for mining new hard examples (~4 GB extra)
+# bash scripts/setup.sh --full
 
 # 4. Train — use screen/tmux so training survives SSH disconnects
 screen -S rl    # or: tmux new -s rl
@@ -222,12 +224,13 @@ python rl/train.py --config configs/rl/h100.yaml \
     --checkpoint-path ./checkpoints/cadrille-rl-v1/checkpoint-5000
 ```
 
-Key RL hyperparameters (H100 config, matching cadrille paper):
+Key RL hyperparameters (H100 / A100 80G config):
 ```
 algorithm:      Dr. CPPO / GRPO
-optimizer:      Adam (Adam8bit on ≤ 40 GB GPU)
-lr:             3e-5  |  G: 16 rollouts  |  top_N: 4  |  eps: 0.1
-batch_updates:  3     |  max_new_tokens: 400
+optimizer:      AdamW (Adam8bit on ≤ 40 GB GPU)
+lr:             1e-5 (paper 3e-5 @ 8×H100; scaled for single-GPU batch)
+G: 16 rollouts  |  top_N: 4  |  eps: 0.1  |  batch_updates: 3
+max_new_tokens: 1024
 ```
 
 W&B metrics logged each step:
