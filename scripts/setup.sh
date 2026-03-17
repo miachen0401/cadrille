@@ -67,15 +67,17 @@ from huggingface_hub import hf_hub_download
 
 FULL = "--full" in sys.argv  # noqa: only read, not passed here (handled in bash below)
 
-def download_zip(repo_id, zip_name, out_dir, repo_type="dataset", skip_if_ext='.stl'):
+def download_zip(repo_id, zip_name, out_dir, repo_type="dataset", skip_if_ext='.stl', skip_dir=None):
     """Download a zip from HuggingFace and extract to out_dir.
-    Skips if out_dir already contains files with skip_if_ext.
-    Use skip_if_ext='_render.png' for render zips (checks PNG presence).
+    Skips if skip_dir (default: out_dir) already contains files with skip_if_ext.
+    Use skip_if_ext='_render.png' and skip_dir='data/mined/deepcad' for render zips
+    where out_dir='data/mined' but the zip expands into a deepcad/ subdirectory.
     """
-    if os.path.isdir(out_dir):
-        n_existing = len([f for f in os.listdir(out_dir) if f.endswith(skip_if_ext)])
+    check_dir = skip_dir or out_dir
+    if os.path.isdir(check_dir):
+        n_existing = len([f for f in os.listdir(check_dir) if f.endswith(skip_if_ext)])
         if n_existing > 0:
-            print(f"  {out_dir}: {n_existing} {skip_if_ext} files already present, skipping {zip_name}")
+            print(f"  {check_dir}: {n_existing} {skip_if_ext} files already present, skipping {zip_name}")
             return
     print(f"  Downloading {zip_name} from {repo_id} ...")
     local_zip = hf_hub_download(repo_id=repo_id, filename=zip_name,
@@ -100,8 +102,8 @@ if os.path.exists("data/mined/combined_hard.pkl"):
 else:
     os.makedirs("data/mined", exist_ok=True)
     download_zip("Hula0401/mine_CAD", "combined_hard_stls.zip",      "data/mined")
-    download_zip("Hula0401/mine_CAD", "deepcad_hard_renders.zip",    "data/mined/deepcad",   skip_if_ext='_render.png')
-    download_zip("Hula0401/mine_CAD", "fusion360_hard_renders.zip",  "data/mined/fusion360", skip_if_ext='_render.png')
+    download_zip("Hula0401/mine_CAD", "deepcad_hard_renders.zip",    "data/mined", skip_if_ext='_render.png', skip_dir='data/mined/deepcad')
+    download_zip("Hula0401/mine_CAD", "fusion360_hard_renders.zip",  "data/mined", skip_if_ext='_render.png', skip_dir='data/mined/fusion360')
     pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
                           repo_type="dataset", local_dir="data/mined/hf")
     with open(pkl, "rb") as f:
