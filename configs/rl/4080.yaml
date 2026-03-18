@@ -19,16 +19,13 @@
 checkpoints_dir: ./checkpoints
 
 mode: cppo
-# checkpoint_path: set via --checkpoint-path CLI flag when resuming
+checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data
-# Full dataset: all DeepCAD + Fusion360 train meshes (84,526 + 15,410 = ~100k examples).
-# Set hard_examples_pkl to null to disable hard-only mode.
-# Set data_dir2 to also include Fusion360 train meshes.
-data_dir: ./data/deepcad_train_mesh
-data_dir2: ./data/fusion360_train_mesh
+# Data — hard-mined examples (22,970 DeepCAD + Fusion360, R_th=0.75)
+# Download via scripts/setup.sh --data
+data_dir: null
 train_modality: img
-hard_examples_pkl: null
+hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
 # Training
@@ -48,6 +45,7 @@ max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scrip
 rollout_temperature: 0.3    # sampling temp for G rollouts; chosen by temp sweep (best pass@4)
 debug_rollout_steps: 3      # print per-rollout codes+rewards, greedy comparison, and k=0/k=final entropy for first N steps (0=off)
 reward_workers: 4
+eval_batch_size: 8
 eval_workers: 2           # Fix 5: pool workers for eval (separate from reward_workers)
 eval_timeout: 120.0        # Fix 1: long timeout for eval subprocess (vs 30s for training)
 sequential_generation: true  # batched fits but is slower at 97% VRAM; H100 uses false
@@ -63,7 +61,7 @@ val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        pc,img
-eval_steps: 10
+eval_steps: 50
 
 # Logging & checkpoints
 # save_total_limit: keep only the N most-recent checkpoints to cap disk usage.
@@ -71,8 +69,11 @@ eval_steps: 10
 # For a full pass@k sweep, aim for 10-20 evenly spaced points.
 # With save_steps=2000 and max_steps=50000: 25 checkpoints saved, 10 kept.
 log_steps: 10
-save_steps: 10
-save_total_limit: 3
+save_steps: 500
+save_total_limit: 5
+
+# HuggingFace checkpoint upload (optional — uploads each checkpoint in background)
+hf_upload_repo: Hula0401/cad_ckpt   # set to null to disable
 
 # W&B
 wandb_project: cadrille-rl
