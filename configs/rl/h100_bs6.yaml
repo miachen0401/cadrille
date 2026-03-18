@@ -26,7 +26,7 @@ dpo_dataset: null
 
 # Training (paper Table 11, lr scaled for single-GPU batch_size=4 vs paper 16/GPU)
 max_steps: 50000
-lr: 1.5e-6                    # paper: 3e-5 @ batch=16/GPU → 1e-5 @ batch=4 (linear scaling)
+lr: 1.5e-6                    # linear scaling: bs=4→1e-6, bs=6→1.5e-6
 
 # Dr. CPPO official settings
 G: 16
