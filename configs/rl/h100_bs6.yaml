@@ -3,9 +3,9 @@
 #
 # Official hyperparameters (Table 14, Cadrille paper): G=16, N=4, lr=3e-5,
 # batch_size=128 (8×H100 with 16 prompts/GPU), batch_updates=3, eps=0.1.
-# Single-GPU adaptation: batch_size=4, lr=1e-5 (linear scaling from paper 3e-5@16).
+# Single-GPU adaptation: batch_size=6, lr=1.5e-6 (linear scaling from bs=4 baseline 1e-6).
 #
-# Usage: python rl/train.py --config configs/rl/h100.yaml
+# Usage: python rl/train.py --config configs/rl/h100_bs6.yaml
 #
 # Colab: update checkpoint_path and data paths below before running.
 
@@ -46,7 +46,7 @@ buffer_max_size: 4096
 eval_batch_size: 32
 eval_workers: 24
 eval_timeout: 120.0
-sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=4
+sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=6
 
 # DPO (unused)
 beta: 0.3

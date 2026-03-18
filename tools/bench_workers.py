@@ -125,7 +125,7 @@ def _sweep_workers(codes: list, gt_paths: list, worker_counts: list,
                                                workers=n_workers, timeout=timeout)
             elapsed = time.perf_counter() - t0
             times.append(elapsed)
-            n_valid = sum(1 for r in rewards if r > 0)
+            n_valid = sum(1 for r in rewards if r >= 0)
             print(f'    run {r+1}: {elapsed:.1f}s  valid={n_valid}/{n}  '
                   f'throughput={n/elapsed:.1f} completions/s')
 
@@ -169,7 +169,7 @@ def main():
             data = pickle.load(f)
         valid = [d for d in data if os.path.exists(d.get('gt_mesh_path', ''))]
         samples = random.Random(args.seed).sample(valid, min(args.n_codes, len(valid)))
-        codes = ['import cadquery as cq\nr = cq.Workplane("XY").box(1,1,1)'] * args.n_codes
+        codes = ['import cadquery as cq\nr = cq.Workplane("XY").box(1,1,1)'] * len(samples)
         gt_paths = [d['gt_mesh_path'] for d in samples]
     else:
         print(f'\nGenerating {args.n_codes} fresh completions from {args.checkpoint} ...')
