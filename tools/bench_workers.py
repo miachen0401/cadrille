@@ -169,7 +169,7 @@ def main():
             data = pickle.load(f)
         valid = [d for d in data if os.path.exists(d.get('gt_mesh_path', ''))]
         samples = random.Random(args.seed).sample(valid, min(args.n_codes, len(valid)))
-        codes = ['import cadquery as cq\nresult = cq.Workplane("XY").box(1,1,1)'] * args.n_codes
+        codes = ['import cadquery as cq\nr = cq.Workplane("XY").box(1,1,1)'] * args.n_codes
         gt_paths = [d['gt_mesh_path'] for d in samples]
     else:
         print(f'\nGenerating {args.n_codes} fresh completions from {args.checkpoint} ...')
