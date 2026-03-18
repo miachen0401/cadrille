@@ -92,7 +92,6 @@ def _generate_codes(pkl_path: str, checkpoint: str, n: int, seed: int) -> tuple:
         gt_paths.append(mesh_path)
 
     del model
-    import torch
     torch.cuda.empty_cache()
     return codes, gt_paths
 
