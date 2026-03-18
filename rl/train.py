@@ -438,11 +438,23 @@ def train(args, cfg_to_save=None):
         if not val_examples:
             print('No validation dirs found; skipping validation.')
 
-        # NOTE: pools are NOT pre-warmed at startup.
-        # Pre-warming keeps N cadquery processes resident in CPU RAM (~400 MB each).
-        # On 16 GB systems (4080) that constant drain + model.cpu() during img eval
-        # = OOM → WSL freeze.  Workers spawn on-demand and die after each batch;
-        # the per-step overhead is ~1-2 s (parallel spawn) vs ~40 s/step: acceptable.
+        # Warm reward pool: keeps N CadQuery processes resident, eliminating
+        # per-rollout Python startup overhead (~1-2 s/worker).
+        # Skipped on low-RAM machines (< 32 GB) where 400 MB × N workers
+        # + model.cpu() during img eval risks OOM.
+        try:
+            with open('/proc/meminfo') as _f:
+                _mi = {k: int(v.split()[0]) for k, v in (l.split(':', 1) for l in _f if ':' in l)}
+            _total_gb = _mi.get('MemTotal', 0) / 1024 / 1024
+        except Exception:
+            _total_gb = 0
+        if _total_gb >= 32:
+            from rl.reward import init_reward_pool
+            n_rw = getattr(args, 'reward_workers', 8)
+            init_reward_pool(n_workers=n_rw)
+            print(f'Reward pool warmed ({n_rw} workers, RAM={_total_gb:.0f} GB)', flush=True)
+        else:
+            print(f'Reward pool skipped (RAM={_total_gb:.0f} GB < 32 GB)', flush=True)
 
     if args.mode == 'cppo':
         if args.data_dir:

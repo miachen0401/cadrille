@@ -15,12 +15,16 @@ Metrics reported per config:
 Usage
 -----
 uv run python tools/bench_config.py \\
-    --configs configs/rl/4080.yaml configs/rl/a100.yaml \\
+    --configs configs/rl/h100.yaml configs/rl/h100_bs8.yaml \\
     --n-warmup 2 \\
-    --n-bench  5 \\
+    --n-bench  3 \\
     --checkpoint checkpoints/cadrille-sft \\
-    --pkl data/smoke_train/smoke_train.pkl \\
-    --n-examples 4
+    --pkl data/mined/combined_hard.pkl \\
+    --n-examples 8 \\
+    --seed 42
+
+Add --gc-frag to enable PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8
+(same setting used in rl/train.py) to test OOM resilience on large batches.
 """
 
 import argparse
@@ -31,16 +35,20 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _load_examples(pkl_path: str, n: int, modality: str):
-    """Load n smallest examples from a pkl, same as smoke_eval."""
+def _load_examples(pkl_path: str, n: int, modality: str, seed: int = 42):
+    """Load n random examples from a pkl for representative benchmarking.
+
+    Uses random sampling (not smallest files) so avg_gen_len matches real training.
+    """
     import pickle
+    import random
     from rl.dataset import render_img
 
     with open(pkl_path, 'rb') as f:
         data = pickle.load(f)
     valid = [d for d in data if os.path.exists(d.get('gt_mesh_path', d.get('mesh_path', '')))]
-    examples = sorted(valid, key=lambda d: os.path.getsize(
-        d.get('gt_mesh_path', d.get('mesh_path', ''))))[:n]
+    rng = random.Random(seed)
+    examples = rng.sample(valid, min(n, len(valid)))
 
     out = []
     for d in examples:
@@ -78,7 +86,14 @@ def _bench_one(cfg_path: str, examples: list, n_warmup: int, n_bench: int,
     from rl.reward import init_reward_pool, shutdown_pools
 
     # ── Load config ──────────────────────────────────────────────────────────
-    args = resolve_args(load_yaml(cfg_path))
+    cfg = load_yaml(cfg_path)
+    import argparse as _ap
+    _dummy = _ap.Namespace(
+        config=cfg_path, run_name=None, checkpoint_path=cfg.get('checkpoint_path'),
+        max_steps=None, wandb_offline=True, mode=None, sequential_generation=None,
+    )
+    resolve_args(_dummy, cfg)
+    args = _dummy
     if checkpoint:
         args.checkpoint_path = checkpoint
     args.wandb_project = None          # disable W&B during bench
@@ -119,23 +134,15 @@ def _bench_one(cfg_path: str, examples: list, n_warmup: int, n_bench: int,
             state['exp_avg']    = torch.zeros_like(p, memory_format=torch.preserve_format)
             state['exp_avg_sq'] = torch.zeros_like(p, memory_format=torch.preserve_format)
 
-    # ── Reward pool ──────────────────────────────────────────────────────────
-    n_workers = min(getattr(args, 'reward_workers', 4), 4)  # cap at 4 for bench
-    reward_pool = init_reward_pool(n_workers)
+    # ── Reward pool — use full config worker count for realistic timing ───────
+    n_workers = getattr(args, 'reward_workers', 4)
+    init_reward_pool(n_workers)
 
     # ── Collate examples into items ──────────────────────────────────────────
     batch_size = max(1, int(getattr(args, 'batch_size', 1)))
     # Tile examples to fill batch_size (repeat if fewer examples than batch_size)
     tiled = (examples * ((batch_size // len(examples)) + 1))[:batch_size]
-    collate_keys = [k for k in tiled[0] if k not in ('gt_mesh_path',)]
-    collate_items = [{k: v for k, v in ex.items() if k != 'gt_mesh_path'} for ex in tiled]
-    gt_paths = [ex['gt_mesh_path'] for ex in tiled]
-
-    items = []
-    for ex, gt in zip(tiled, gt_paths):
-        item = dict(ex)
-        item['gt_mesh_path'] = gt
-        items.append(item)
+    items = [dict(ex) for ex in tiled]
 
     # ── Benchmark loop ───────────────────────────────────────────────────────
     torch.cuda.reset_peak_memory_stats()
@@ -152,7 +159,6 @@ def _bench_one(cfg_path: str, examples: list, n_warmup: int, n_bench: int,
                 items=items,
                 processor=processor,
                 args=args,
-                reward_pool=reward_pool,
                 step=s,
                 compute_diag=False,
                 debug_rollouts=False,
@@ -215,17 +221,26 @@ def main():
                         help='Timed benchmark steps')
     parser.add_argument('--checkpoint', default=None,
                         help='Override checkpoint_path for all configs')
-    parser.add_argument('--pkl',        default='data/smoke_train/smoke_train.pkl',
-                        help='Examples pkl (smoke_train or combined_hard)')
-    parser.add_argument('--n-examples', type=int, default=4,
-                        help='Number of examples per batch (smallest meshes used)')
+    parser.add_argument('--pkl',        default='data/mined/combined_hard.pkl',
+                        help='Examples pkl for benchmarking')
+    parser.add_argument('--n-examples', type=int, default=8,
+                        help='Number of examples (randomly sampled for representative gen length)')
+    parser.add_argument('--seed',       type=int, default=42,
+                        help='Random seed for example sampling')
+    parser.add_argument('--gc-frag',    action='store_true',
+                        help='Enable PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8 '
+                             '(same as rl/train.py) to reduce OOM on large batches')
     parser.add_argument('--out',        default='work_dirs/bench/results.json',
                         help='Output JSON path')
     args = parser.parse_args()
 
+    if args.gc_frag:
+        os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'garbage_collection_threshold:0.8')
+        print('  [gc-frag] PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8')
+
     modality = 'img'   # always benchmark in img mode (training mode)
-    print(f'Loading {args.n_examples} examples from {args.pkl} (modality={modality}) ...')
-    examples = _load_examples(args.pkl, args.n_examples, modality)
+    print(f'Loading {args.n_examples} random examples from {args.pkl} (modality={modality}, seed={args.seed}) ...')
+    examples = _load_examples(args.pkl, args.n_examples, modality, seed=args.seed)
     print(f'  {len(examples)} examples loaded')
 
     results = []
