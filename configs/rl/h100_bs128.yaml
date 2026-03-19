@@ -64,13 +64,13 @@ val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        pc,img
-eval_steps: 100
+eval_steps: 20
 
 # Logging & checkpoints
 # save_steps=300 → checkpoint every ~12 h at bs=128 (8× longer per step); 10 kept.
 # save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on /ephemeral.
 log_steps: 10
-save_steps: 300
+save_steps: 50
 save_total_limit: 10
 
 # HuggingFace checkpoint upload (optional — uploads each checkpoint in background)

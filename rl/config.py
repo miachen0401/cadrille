@@ -54,7 +54,7 @@ def resolve_args(args, cfg: dict) -> dict:
     args.base_model      = cfg.get('base_model', 'Qwen/Qwen2-VL-2B-Instruct')
     args.checkpoint_path = _p(args.checkpoint_path, cfg.get('checkpoint_path'), 'maksimko123/cadrille')
     args.max_steps       = _p(args.max_steps,       cfg.get('max_steps'),       50000)
-    args.lr              = cfg.get('lr', 3e-5)
+    args.lr              = float(cfg.get('lr', 3e-5))
     args.log_steps        = cfg.get('log_steps', 100)
     args.save_steps       = cfg.get('save_steps', 5000)
     args.save_total_limit = cfg.get('save_total_limit', None)  # None = keep all

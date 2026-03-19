@@ -522,6 +522,7 @@ def cppo_step(model, optimizer, items, processor, args,
             old_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
             old_lp  = compute_token_log_probs(
                 old_out.logits, sel_ids, logits_to_keep).detach()           # [M*N, T]
+        del old_out  # logits [B, L, V] not needed after log_probs computed
 
         mb_ppo_list.append(
             (sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep))
@@ -622,6 +623,7 @@ def cppo_step(model, optimizer, items, processor, args,
             new_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
             _mem('post-fwd', k)
             new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
+            del new_out  # logits [B, L, V] not needed for backward (log_softmax saves output)
             _mem('post-log_probs', k)
 
             loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
