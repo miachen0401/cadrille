@@ -91,6 +91,7 @@ def resolve_args(args, cfg: dict) -> dict:
     args.eps_low          = cfg.get('eps_low', 0.1)
     args.batch_updates    = cfg.get('batch_updates', 1)
     args.batch_size       = cfg.get('batch_size', 1)
+    args.mini_batch_size  = cfg.get('mini_batch_size', args.batch_size)  # grad-accum chunk; default=batch_size (no-op)
     args.max_new_tokens   = cfg.get('max_new_tokens', 256)
     args.reward_workers   = cfg.get('reward_workers', 4)
     args.use_buffer       = cfg.get('use_buffer', False)

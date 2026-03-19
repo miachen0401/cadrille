@@ -3,11 +3,12 @@
 #
 # Official hyperparameters (Table 14, Cadrille paper): G=16, N=4, lr=3e-5,
 # batch_size=128 (8×H100 with 16 prompts/GPU), batch_updates=3, eps=0.1.
-# Single-GPU adaptation: batch_size=16, lr=4e-6 (linear scaling from bs=4 baseline 1e-6).
+# Single-GPU with gradient accumulation: effective batch_size=128 (8 mini-batches × 16),
+# matching the official 8-GPU setup. lr=3e-5 matches the official lr exactly.
 #
-# 22,939 training examples → ceil(22939/16)=1,434 steps/epoch → 29,000 steps ≈ 20 epochs.
+# 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs.
 #
-# Usage: python rl/train.py --config configs/rl/h100_bs16.yaml
+# Usage: python rl/train.py --config configs/rl/h100_bs128.yaml
 #
 # Colab: update checkpoint_path and data paths below before running.
 
@@ -26,9 +27,10 @@ train_modality: img                   # paper: images only — pc training was u
 hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
-# Training — 20 epochs over 22,939 examples at batch_size=16
-max_steps: 29000
-lr: 4.0e-6                    # linear scaling: bs=4→1e-6, bs=8→2e-6, bs=16→4e-6
+# Training — effective batch_size=128 matches official 8-GPU setup
+# 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs
+max_steps: 3600
+lr: 3e-5                      # official lr; valid because effective batch_size=128 = official
 
 # Dr. CPPO official settings
 G: 16
@@ -37,7 +39,8 @@ eps_high: 0.1
 eps_low: 0.1
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
-batch_size: 16
+batch_size: 128               # effective prompts per step (= 8 mini-batches × mini_batch_size)
+mini_batch_size: 16           # prompts per gradient-accumulation chunk; keeps VRAM flat
 max_new_tokens: 400
 rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
 reward_workers: 24            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
@@ -64,7 +67,7 @@ val_modalities:        pc,img
 eval_steps: 100
 
 # Logging & checkpoints
-# save_steps=300 → checkpoint every ~1.5 h at bs=16; ~97 checkpoints over 29k steps, 10 kept.
+# save_steps=300 → checkpoint every ~12 h at bs=128 (8× longer per step); 10 kept.
 # save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on /ephemeral.
 log_steps: 10
 save_steps: 300
