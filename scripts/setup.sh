@@ -10,6 +10,16 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
+# ── 0. /ephemeral directories ──────────────────────────────────────────────────
+if [ -d /ephemeral ] && [ ! -w /ephemeral ]; then
+    echo "[0/4] Fixing /ephemeral permissions ..."
+    sudo chown "$USER" /ephemeral
+fi
+if [ -d /ephemeral ]; then
+    mkdir -p /ephemeral/checkpoints
+    echo "[0/4] /ephemeral/checkpoints ✓"
+fi
+
 # ── 1. uv ──────────────────────────────────────────────────────────────────────
 if ! command -v uv &>/dev/null; then
     echo "[1/4] Installing uv ..."
@@ -102,8 +112,8 @@ if os.path.exists("data/mined/combined_hard.pkl"):
 else:
     os.makedirs("data/mined", exist_ok=True)
     download_zip("Hula0401/mine_CAD", "combined_hard_stls.zip",      "data/mined")
-    download_zip("Hula0401/mine_CAD", "deepcad_hard_renders.zip",    "data/mined", skip_if_ext='_render.png', skip_dir='data/mined/deepcad')
-    download_zip("Hula0401/mine_CAD", "fusion360_hard_renders.zip",  "data/mined", skip_if_ext='_render.png', skip_dir='data/mined/fusion360')
+    download_zip("Hula0401/mine_CAD", "deepcad_hard_renders.zip",    "data/mined/deepcad",   skip_if_ext='_render.png')
+    download_zip("Hula0401/mine_CAD", "fusion360_hard_renders.zip",  "data/mined/fusion360", skip_if_ext='_render.png')
     pkl = hf_hub_download("Hula0401/mine_CAD", "combined_hard.pkl",
                           repo_type="dataset", local_dir="data/mined/hf")
     with open(pkl, "rb") as f:

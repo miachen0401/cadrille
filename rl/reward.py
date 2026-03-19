@@ -241,6 +241,14 @@ def _cache_set(key: str, value: Tuple) -> None:
 # Uses spawn (not fork) so CUDA context in parent is never inherited by workers.
 
 _reward_pool: Optional[ProcessPoolExecutor] = None
+_reward_pool_crashes: int = 0
+
+
+def get_and_reset_pool_crashes() -> int:
+    """Return pool crash count since last call and reset to 0."""
+    global _reward_pool_crashes
+    n, _reward_pool_crashes = _reward_pool_crashes, 0
+    return n
 
 
 def _reward_worker_init() -> None:
@@ -630,6 +638,8 @@ def compute_rewards_parallel(
                     results.append(-1.0)
             return results
         except BrokenProcessPool:
+            global _reward_pool_crashes
+            _reward_pool_crashes += 1
             print('[reward pool] worker crashed — restarting pool, '
                   'falling back to subprocess for this batch', flush=True)
             try:
