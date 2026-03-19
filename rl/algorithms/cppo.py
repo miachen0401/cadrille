@@ -391,26 +391,21 @@ def cppo_step(model, optimizer, items, processor, args,
               debug_rollouts: bool = False) -> dict:
     """Dr. CPPO / GRPO update step over a batch of B prompts.
 
-    Fully batched tensor flow (matches reference grpo_mm.py style):
-      Phase 1  — Collate B prompts into one batch; generate all B*G rollouts
-                 in one generate() call → [B*G, full_len] (blocked order).
-                 Decode + reward all B*G completions in parallel.
-                 Row-wise top-N per prompt → flat [B*N, T] PPO tensors.
-                 Single model_forward for old_lp on [B*N, T].
-      Phase 2  — batch_updates PPO steps; each step is one forward on [B*N, T].
-                 No gradient accumulation — the flat [B*N] batch handles all B
-                 prompts in one pass exactly as the reference does.
-      Phase 3  — KL diagnostics on [B*N, T] flat tensors using last IS only.
+    Supports mini-batch gradient accumulation when mini_batch_size < batch_size.
+    B prompts are chunked into ceil(B/mini_batch_size) mini-batches; each
+    mini-batch generates G rollouts independently, then all rewards are computed
+    in one parallel call, and gradients are accumulated across mini-batches
+    before a single optimizer.step() per batch_update epoch.
 
-    With B=1 this reduces to the single-prompt behaviour.
+    With mini_batch_size == batch_size (or unset), behaviour is identical to
+    the original single-mini-batch implementation.
 
     Key properties:
       • Per-prompt group-relative advantages: adv_i = reward_i − mean(group)
       • Per-prompt row-wise top-N selection (not global across prompts)
-      • Advantages are per-SEQUENCE scalars [B*N, 1] broadcast over tokens —
-        no token-level advantage in CPPO/GRPO
-      • Degenerate prompts (std≈0) have adv≈0 → contribute ~zero to loss
-      • All-degenerate early exit skips the expensive forward passes entirely
+      • Advantages are per-SEQUENCE scalars [M*N, 1] broadcast over tokens
+      • Degenerate mini-batches (all advantages ≈ 0) are skipped
+      • Gradient normalised by n_nondegen_mb so loss scale is consistent
     """
     if isinstance(items, dict):
         items = [items]
@@ -421,146 +416,164 @@ def cppo_step(model, optimizer, items, processor, args,
     device = next(model.parameters()).device
     eos_id = processor.tokenizer.eos_token_id
     pad_id = processor.tokenizer.pad_token_id
+    entropy_coef = float(getattr(args, 'entropy_coef', 0.0))
+
+    mini_batch_size = int(getattr(args, 'mini_batch_size', B))
+    mini_batch_size = min(max(1, mini_batch_size), B)
+    mb_items_list   = [items[i:i + mini_batch_size]
+                       for i in range(0, B, mini_batch_size)]
 
     # ------------------------------------------------------------------
-    # Phase 1: Batched rollout — one collate, one generate, one reward call.
-    #
-    # generate_rollouts receives the B-item batch and expands it internally
-    # via repeat_interleave(G) → [B*G, ...] before calling model.generate.
-    # Output [B*G, full_len] is in blocked order: [p0×G, p1×G, ..., p(B-1)×G].
-    # All completions start at prompt_len because prompts are left-padded to
-    # the same max length by collate().
+    # Phase 1: Generate rollouts for each mini-batch (keeps VRAM flat at
+    # [mini_batch_size*G, full_len] peak), then compute ALL rewards in one
+    # parallel call to maximise worker utilisation.
     # ------------------------------------------------------------------
-    collate_items = [{k: v for k, v in it.items() if not k.startswith('_')}
-                     for it in items]
-    batch      = collate(collate_items, processor=processor, n_points=256, eval=True)
-    prompt_len = batch['input_ids'].shape[1]          # left-padded max prompt length
+    all_code_strings: list = []
+    all_gt_paths:     list = []
+    mb_gen_data:      list = []   # (mb_batch, mb_gen_ids, prompt_len, M)
 
     t_gen = time.perf_counter()
-    generated_ids = generate_rollouts(                # [B*G, full_len]
-        model, {k: batch.get(k) for k in _GEN_INPUT_KEYS},
-        G, args, pad_id, processor)
+    for mb_items in mb_items_list:
+        M = len(mb_items)
+        collate_items = [{k: v for k, v in it.items() if not k.startswith('_')}
+                         for it in mb_items]
+        mb_batch   = collate(collate_items, processor=processor, n_points=256, eval=True)
+        prompt_len = mb_batch['input_ids'].shape[1]
+        mb_gen_ids = generate_rollouts(                      # [M*G, full_len]
+            model, {k: mb_batch.get(k) for k in _GEN_INPUT_KEYS},
+            G, args, pad_id, processor)
+        mb_codes = [
+            processor.decode(mb_gen_ids[i, prompt_len:], skip_special_tokens=True,
+                             clean_up_tokenization_spaces=False)
+            for i in range(M * G)
+        ]
+        mb_gt = [it['gt_mesh_path'] for it in mb_items for _ in range(G)]
+        all_code_strings.extend(mb_codes)
+        all_gt_paths.extend(mb_gt)
+        mb_gen_data.append((mb_batch, mb_gen_ids, prompt_len, M))
     gen_seconds = time.perf_counter() - t_gen
 
-    # Average effective generation length across ALL B*G rollouts (CPU, cheap).
-    # Uses create_completion_mask to count tokens up to and including first EOS,
-    # so padding beyond EOS is excluded. Measures the true generation distribution
-    # before top-N selection (which would bias toward extreme advantage sequences).
-    _all_comp = generated_ids[:, prompt_len:]                        # [B*G, T]
-    _all_mask = create_completion_mask(_all_comp, eos_id)            # [B*G, T] float
-    avg_gen_len = _all_mask.sum(dim=1).float().mean().item()
-
-    code_strings = [
-        processor.decode(generated_ids[i, prompt_len:], skip_special_tokens=True,
-                         clean_up_tokenization_spaces=False)
-        for i in range(B * G)
-    ]
-    gt_paths = [it['gt_mesh_path'] for it in items for _ in range(G)]  # blocked order
+    # avg_gen_len across all B*G rollouts (before top-N selection)
+    total_gen_len = 0.0
+    for _, mb_gen_ids, prompt_len, M in mb_gen_data:
+        _comp = mb_gen_ids[:, prompt_len:]
+        _mask = create_completion_mask(_comp, eos_id)
+        total_gen_len += _mask.sum().item()
+    avg_gen_len = total_gen_len / max(1, B * G)
 
     t_rew = time.perf_counter()
-    rewards   = compute_rewards_parallel(code_strings, gt_paths,
-                                         workers=args.reward_workers)
+    all_rewards = compute_rewards_parallel(all_code_strings, all_gt_paths,
+                                           workers=args.reward_workers)
     rew_seconds = time.perf_counter() - t_rew
-    rewards_t = torch.tensor(rewards, dtype=torch.float32).view(B, G)  # [B, G]
 
-    # ---- Debug: print each rollout code (first 200 chars) + reward --------
-    if debug_rollouts:
-        print(f'\n{"="*70}')
-        print(f'[DEBUG step={step}] B={B} G={G} — rollout codes & rewards')
-        print(f'{"="*70}')
-        # Print input cases
-        for bi, it in enumerate(items):
-            stem = os.path.splitext(os.path.basename(it.get('gt_mesh_path', '?')))[0]
-            mod  = it.get('modality', it.get('train_modality', it.get('_modality', '?')))
-            print(f'  Input {bi}: {stem}  (modality={mod})')
-        print()
-        for i, (code, rew, gt) in enumerate(zip(code_strings, rewards, gt_paths)):
-            bi, gi = divmod(i, G)
-            stem = os.path.splitext(os.path.basename(gt))[0]
-            code_preview = code.replace('\n', '\\n')[:200]
-            print(f'  [{bi}×{G}+{gi}] {stem}  rew={rew:+.3f}  code: {code_preview}')
-        print(f'  rewards matrix (B×G):')
-        for bi in range(B):
-            row = rewards_t[bi].tolist()
-            print(f'    prompt {bi}: {[f"{r:+.3f}" for r in row]}  '
-                  f'mean={rewards_t[bi].mean():.3f}  std={rewards_t[bi].std():.3f}')
+    # ------------------------------------------------------------------
+    # Build per-mini-batch PPO tensors: advantages, old_lp, masks.
+    # ------------------------------------------------------------------
+    all_rewards_t_list: list = []   # [M, G] per mini-batch (for metrics)
+    all_std_r_list:     list = []   # [M]    per mini-batch
+    mb_ppo_list:        list = []   # (sel_ids, full_attn, comp_mask, advantages,
+                                    #  old_lp, sel_g_batch, logits_to_keep) or None
 
-        # Greedy comparison: same inputs, model.eval(), do_sample=False (temp=0).
-        # Compares stochastic rollout rewards against deterministic greedy output.
-        # If greedy >> rollout_mean: sampling is noisy but model knows the answer.
-        # If greedy << rollout_best: model has high variance (stochastic helpful).
-        print(f'\n  [greedy eval] model.eval() do_sample=False on same B={B} inputs:')
-        _gm = model.module if hasattr(model, 'module') else model
-        # Build bad_words_ids locally (same logic as generate_rollouts)
-        bad_words = None
-        _blocked = []
-        _cfg_dbg = getattr(_gm, 'config', None)
-        if _cfg_dbg is not None:
-            for _attr in ('video_token_id', 'image_token_id'):
-                _tid = getattr(_cfg_dbg, _attr, None)
-                if _tid is not None:
-                    _blocked.append([_tid])
-        if _blocked:
-            bad_words = _blocked
-        _had_gc_dbg = getattr(_gm, 'is_gradient_checkpointing', False)
-        if _had_gc_dbg:
-            _gm.gradient_checkpointing_disable()
-        _gm.eval()
-        _greedy_codes = []
+    rew_offset = 0
+    for mb_batch, mb_gen_ids, prompt_len, M in mb_gen_data:
+        mb_rews   = all_rewards[rew_offset:rew_offset + M * G]
+        rew_offset += M * G
+
+        rewards_t_mb = torch.tensor(mb_rews, dtype=torch.float32)
+        rewards_t_mb = torch.nan_to_num(
+            rewards_t_mb, nan=-1.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
+        rewards_t_mb = rewards_t_mb.view(M, G)                   # [M, G]
+
+        mean_r   = rewards_t_mb.mean(dim=1, keepdim=True)        # [M, 1]
+        std_r_mb = rewards_t_mb.std(dim=1)                       # [M]
+        adv_raw  = rewards_t_mb - mean_r                         # [M, G]
+        adv_raw  = torch.nan_to_num(adv_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        all_rewards_t_list.append(rewards_t_mb)
+        all_std_r_list.append(std_r_mb)
+
+        if adv_raw.abs().max().item() < 1e-6:
+            mb_ppo_list.append(None)   # degenerate mini-batch — skip
+            continue
+
+        # Row-wise top-N per prompt by |advantage|
+        _, top_idx = torch.topk(adv_raw.abs(), N, dim=1)                   # [M, N]
+        flat_idx   = (torch.arange(M).unsqueeze(1) * G + top_idx).reshape(-1)  # [M*N]
+
+        sel_ids_cpu        = mb_gen_ids[flat_idx]                           # [M*N, full_len]
+        comp_ids_cpu       = sel_ids_cpu[:, prompt_len:]                    # [M*N, T]
+        logits_to_keep     = comp_ids_cpu.shape[1]
+        comp_mask_cpu      = create_completion_mask(comp_ids_cpu, eos_id)   # [M*N, T]
+        g_batch_cpu        = expand_batch(mb_batch, G)                      # [M*G, ...]
+        sel_g_batch_cpu    = slice_batch(g_batch_cpu, flat_idx)             # [M*N, ...]
+        prompt_mask_cpu    = sel_g_batch_cpu['attention_mask']
+        full_attn_mask_cpu = torch.cat(
+            [prompt_mask_cpu, comp_mask_cpu.long()], dim=1)                 # [M*N, full_len]
+        adv_sel = adv_raw.reshape(-1)[flat_idx].unsqueeze(1)                # [M*N, 1]
+
+        sel_ids     = sel_ids_cpu.to(device)
+        full_attn   = full_attn_mask_cpu.to(device)
+        comp_mask   = comp_mask_cpu.to(device)
+        advantages  = adv_sel.to(device)
+        sel_g_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                       for k, v in sel_g_batch_cpu.items()}
+
         with torch.no_grad():
-            for _bi in range(B):
-                if hasattr(_gm, 'rope_deltas'):
-                    _gm.rope_deltas = None
-                _pv = batch.get('pixel_values_videos')
-                _vg = batch.get('video_grid_thw')
-                _g_ids = _gm.generate(
-                    input_ids=batch['input_ids'][_bi:_bi+1].to(device),
-                    attention_mask=batch['attention_mask'][_bi:_bi+1].to(device),
-                    point_clouds=batch['point_clouds'][_bi:_bi+1].to(device),
-                    is_pc=batch['is_pc'][_bi:_bi+1].to(device),
-                    is_img=batch['is_img'][_bi:_bi+1].to(device),
-                    pixel_values_videos=(_pv[_bi:_bi+1].to(device) if _pv is not None else None),
-                    video_grid_thw=(_vg[_bi:_bi+1].to(device) if _vg is not None else None),
-                    max_new_tokens=args.max_new_tokens,
-                    do_sample=False, temperature=None, top_p=None, top_k=None,
-                    bad_words_ids=bad_words)
-                _gc = processor.decode(_g_ids[0, prompt_len:], skip_special_tokens=True)
-                _greedy_codes.append(_gc)
-        if _had_gc_dbg:
-            _gm.gradient_checkpointing_enable()
-        _gm.train()
-        _greedy_gt = [it['gt_mesh_path'] for it in items]
-        _greedy_rewards = compute_rewards_parallel(_greedy_codes, _greedy_gt,
-                                                   workers=args.reward_workers)
-        for _bi in range(B):
-            _stem = os.path.splitext(os.path.basename(items[_bi]['gt_mesh_path']))[0]
-            _gr   = _greedy_rewards[_bi]
-            _best = rewards_t[_bi].max().item()
-            _mean = rewards_t[_bi].mean().item()
-            _gc_preview = _greedy_codes[_bi].replace('\n', '\\n')[:200]
-            print(f'    [{_bi}] {_stem}  greedy_rew={_gr:+.3f}  '
-                  f'(rollout_best={_best:+.3f}  rollout_mean={_mean:+.3f})')
-            print(f'      greedy code: {_gc_preview}')
+            old_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
+            old_lp  = compute_token_log_probs(
+                old_out.logits, sel_ids, logits_to_keep).detach()           # [M*N, T]
+        del old_out  # logits [B, L, V] not needed after log_probs computed
+
+        mb_ppo_list.append(
+            (sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep))
+
+    # Aggregate reward tensors for global metrics
+    all_rewards_t = torch.cat(all_rewards_t_list, dim=0)   # [B, G]
+    all_std_r     = torch.cat(all_std_r_list,     dim=0)   # [B]
+
+    # ---- Debug: print per-mini-batch summary --------------------------------
+    if debug_rollouts:
+        rew_off = 0
+        print(f'\n{"="*70}')
+        print(f'[DEBUG step={step}] B={B} G={G} mini_batch_size={mini_batch_size}')
+        print(f'{"="*70}')
+        for mbi, (mb_batch, mb_gen_ids, prompt_len, M) in enumerate(mb_gen_data):
+            mb_rews = all_rewards[rew_off:rew_off + M * G]
+            rew_off += M * G
+            rmat = torch.tensor(mb_rews).view(M, G)
+            for bi in range(M):
+                row = rmat[bi].tolist()
+                print(f'  [mb{mbi} p{bi}]: {[f"{r:+.3f}" for r in row]}  '
+                      f'mean={rmat[bi].mean():.3f}  std={rmat[bi].std():.3f}')
         print(f'{"="*70}\n')
-    # -----------------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
-    # Guard against non-finite reward values before mean/std/topk.
-    rewards_t = torch.nan_to_num(
-        rewards_t, nan=-1.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
-    mean_r    = rewards_t.mean(dim=1, keepdim=True)                     # [B, 1]
-    std_r     = rewards_t.std(dim=1)                                    # [B]
-    adv_raw   = rewards_t - mean_r                                      # [B, G]
-    # Extra safety before topk in case any upstream op returns non-finite.
-    adv_raw   = torch.nan_to_num(adv_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    # k=0 entropy: token-count-weighted average across non-degenerate mini-batches
+    first_entropy = float('nan')
+    _ent_num = 0.0
+    _ent_den = 0.0
+    for mb_ppo in mb_ppo_list:
+        if mb_ppo is None:
+            continue
+        _, _, comp_mask, _, old_lp, _, _ = mb_ppo
+        _ent_num += (-(old_lp * comp_mask).sum().item())
+        _ent_den += comp_mask.sum().item()
+    if _ent_den > 0:
+        first_entropy = _ent_num / _ent_den
 
-    if adv_raw.abs().max().item() < 1e-6:
-        # All B prompts degenerate — advantages≈0, nothing to learn
+    n_nondegen_mb = sum(1 for mb in mb_ppo_list if mb is not None)
+    # Warn if mini-batches are unequal (last batch smaller) — normalising by count
+    # over-weights the smaller batch. Safe when B % mini_batch_size == 0.
+    if B % mini_batch_size != 0:
+        print(f'[cppo] WARNING: B={B} % mini_batch_size={mini_batch_size} != 0 — '
+              f'last mini-batch is smaller; gradient scale will be slightly biased.')
+    if n_nondegen_mb == 0:
         return {
             'train/loss':         0.0,
-            'train/mean_reward':  rewards_t.mean().item(),
-            'train/reward_std':   std_r.mean().item(),
-            'train/reward_max':   rewards_t.max().item(),
-            'train/reward_min':   rewards_t.min().item(),
+            'train/mean_reward':  all_rewards_t.mean().item(),
+            'train/reward_std':   all_std_r.mean().item(),
+            'train/reward_max':   all_rewards_t.max().item(),
+            'train/reward_min':   all_rewards_t.min().item(),
             'train/entropy':      float('nan'),
             'train/entropy_k0':   float('nan'),
             'train/adv_abs_mean': 0.0,
@@ -570,186 +583,177 @@ def cppo_step(model, optimizer, items, processor, args,
             'train/gen_seconds':  gen_seconds,
             'train/rew_seconds':  rew_seconds,
             'train/grad_seconds': 0.0,
-            '_rewards_list':      rewards,
-            '_reward_std_groups': std_r.tolist(),
+            '_rewards_list':      all_rewards,
+            '_reward_std_groups': all_std_r.tolist(),
             **_NAN_DIAG,
         }
 
-    # Row-wise top-N per prompt by |advantage| → flat [B*N] index into [B*G]
-    _, top_idx = torch.topk(adv_raw.abs(), N, dim=1)                    # [B, N]
-    flat_idx   = (torch.arange(B).unsqueeze(1) * G + top_idx).reshape(-1)  # [B*N]
-
-    # Build flat [B*N, T] PPO tensors — single tensor for all prompts
-    sel_ids_cpu  = generated_ids[flat_idx]            # [B*N, full_len]
-    comp_ids_cpu = sel_ids_cpu[:, prompt_len:]        # [B*N, T]
-    logits_to_keep = comp_ids_cpu.shape[1]
-
-    comp_mask_cpu      = create_completion_mask(comp_ids_cpu, eos_id)   # [B*N, T]
-    g_batch_cpu        = expand_batch(batch, G)                          # [B*G, ...]
-    sel_g_batch_cpu    = slice_batch(g_batch_cpu, flat_idx)              # [B*N, ...]
-    prompt_mask_cpu    = sel_g_batch_cpu['attention_mask']               # [B*N, prompt_len]
-    full_attn_mask_cpu = torch.cat(
-        [prompt_mask_cpu, comp_mask_cpu.long()], dim=1)                  # [B*N, full_len]
-    adv_sel = adv_raw.reshape(-1)[flat_idx].unsqueeze(1)                 # [B*N, 1]
-
-    sel_ids     = sel_ids_cpu.to(device)
-    full_attn   = full_attn_mask_cpu.to(device)
-    comp_mask   = comp_mask_cpu.to(device)
-    advantages  = adv_sel.to(device)
-    sel_g_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                   for k, v in sel_g_batch_cpu.items()}
-
-    # Single forward for old log-probs on the flat [B*N, T] batch
-    with torch.no_grad():
-        old_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
-        old_lp  = compute_token_log_probs(
-            old_out.logits, sel_ids, logits_to_keep).detach()            # [B*N, T]
-
-    # k=0 entropy: per-token entropy estimated from old_lp (before any training update).
-    # Cheap: uses [B*N, T] old_lp, no logits materialisation.
-    first_entropy = compute_policy_entropy(old_lp, comp_mask).item()
-
     # ------------------------------------------------------------------
-    # Phase 2: batch_updates PPO steps on the flat [B*N, T] batch.
-    # One forward per inner step — no gradient accumulation needed.
+    # Phase 2: batch_updates gradient accumulation across mini-batches.
+    # For each epoch k: loop over all non-degenerate mini-batches,
+    # accumulate scaled gradients, then call optimizer.step() once.
+    # Loss is divided by n_nondegen_mb so the effective update magnitude
+    # matches a single-mini-batch step (no lr re-tuning needed).
     # ------------------------------------------------------------------
-    last_loss      = 0.0
-    last_entropy   = float('nan')
-    last_new_lp    = None
-    entropy_coef   = float(getattr(args, 'entropy_coef', 0.0))
+    last_loss    = 0.0
+    last_entropy = float('nan')
+    last_mb_new_lp_list:  list = []
+    last_mb_comp_mask_list: list = []
+    last_mb_old_lp_list:  list = []
+    last_mb_adv_list:     list = []
 
-    def _mem(tag):
+    def _mem(tag, k_):
         if debug_rollouts:
             a = torch.cuda.memory_allocated() / 1e9
             r = torch.cuda.memory_reserved() / 1e9
-            print(f'[MEM step={step} k={k} {tag}] alloc={a:.2f}GB  reserved={r:.2f}GB')
+            print(f'[MEM step={step} k={k_} {tag}] alloc={a:.2f}GB  reserved={r:.2f}GB')
 
     t_grad = time.perf_counter()
     for k in range(args.batch_updates):
         is_last = (k == args.batch_updates - 1)
         model.train()
-        _mem('pre-fwd')
-        new_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
-        _mem('post-fwd')
-        new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
-        _mem('post-log_probs')
-
-        loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
-                            args.eps_high, args.eps_low)
-        if entropy_coef > 0:
-            # Per-token entropy bonus: E_{a~π}[-log π(a)] = H(π) (unbiased estimate).
-            # Uses new_lp [B*N, T] — no extra log_softmax over full vocab needed.
-            # Memory: ~4 MB vs ~1.2 GB for the logits-based full-vocab sum.
-            step_entropy = compute_policy_entropy(new_lp, comp_mask)
-            loss = loss - entropy_coef * step_entropy
         optimizer.zero_grad()
-        _mem('pre-backward')
-        loss.backward()
-        _mem('post-backward')
+        k_loss = 0.0
+        if is_last:
+            last_mb_new_lp_list.clear()
+            last_mb_comp_mask_list.clear()
+            last_mb_old_lp_list.clear()
+            last_mb_adv_list.clear()
+
+        for mb_ppo in mb_ppo_list:
+            if mb_ppo is None:
+                continue
+            sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep = mb_ppo
+            _mem('pre-fwd', k)
+            new_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
+            _mem('post-fwd', k)
+            new_lp  = compute_token_log_probs(new_out.logits, sel_ids, logits_to_keep)
+            del new_out  # logits [B, L, V] not needed for backward (log_softmax saves output)
+            _mem('post-log_probs', k)
+
+            loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
+                                args.eps_high, args.eps_low)
+            if entropy_coef > 0:
+                step_entropy = compute_policy_entropy(new_lp, comp_mask)
+                loss = loss - entropy_coef * step_entropy
+
+            # Normalise so accumulated gradient = single-mini-batch gradient
+            loss = loss / n_nondegen_mb
+            _mem('pre-backward', k)
+            loss.backward()
+            _mem('post-backward', k)
+            k_loss += loss.item()
+
+            if is_last:
+                last_mb_new_lp_list.append(new_lp.detach())
+                last_mb_comp_mask_list.append(comp_mask)
+                last_mb_old_lp_list.append(old_lp)
+                last_mb_adv_list.append(advantages)
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
-        _mem('post-opt-step')
+        _mem('post-opt-step', k)
 
         if is_last:
-            last_loss = loss.item()
-            if compute_diag:
-                with torch.no_grad():
-                    if entropy_coef > 0:
-                        last_entropy = step_entropy.item()
-                    else:
-                        last_entropy = compute_policy_entropy(
-                            new_lp.detach(), comp_mask).item()
-            last_new_lp = new_lp.detach()
+            last_loss = k_loss
+            if compute_diag and last_mb_new_lp_list:
+                _en = 0.0; _ed = 0.0
+                for nlp, cm in zip(last_mb_new_lp_list, last_mb_comp_mask_list):
+                    _en += (-(nlp * cm).sum().item())
+                    _ed += cm.sum().item()
+                last_entropy = _en / max(1.0, _ed)
 
-    # ---- Debug: entropy before vs after optimizer steps ------------------
     if debug_rollouts:
-        print(f'[DEBUG step={step}] entropy: '
-              f'k=0 (pre-update)={first_entropy:.4f}  '
-              f'k={args.batch_updates-1} (post-update)={last_entropy:.4f}  '
-              f'Δ={last_entropy - first_entropy:+.4f}  '
-              f'batch_updates={args.batch_updates}')
-        print(f'[DEBUG step={step}] mean_reward={rewards_t.mean():.4f}  '
-              f'reward_std={rewards_t.std():.4f}  '
-              f'avg_gen_len={avg_gen_len:.1f}  loss={last_loss:.4f}\n')
-    # -----------------------------------------------------------------------
+        print(f'[DEBUG step={step}] entropy_k0={first_entropy:.4f}  '
+              f'entropy_kfinal={last_entropy:.4f}  loss={last_loss:.4f}  '
+              f'batch_updates={args.batch_updates}  n_minibatches={n_nondegen_mb}\n')
+
+    grad_seconds = time.perf_counter() - t_grad
 
     # ------------------------------------------------------------------
-    # Phase 3: Diagnostics on the flat [B*N, T] tensor — no aggregation
-    # loop, all prompts handled in one vectorised pass.
+    # Phase 3: Diagnostics — aggregate token-count-weighted across mini-batches.
     # ------------------------------------------------------------------
+    all_adv_cat = torch.cat(last_mb_adv_list, dim=0)   # [B_nd*N, 1]
     with torch.no_grad():
-        if compute_diag and last_new_lp is not None:
-            ratio_tok = torch.exp(last_new_lp - old_lp)               # [B*N, T]
-            ratio_seq = (ratio_tok * comp_mask).sum(1) \
-                        / comp_mask.sum(1).clamp(min=1)                # [B*N]
+        if compute_diag and last_mb_new_lp_list:
+            _total_tok   = 0.0
+            _clip_num    = 0.0; _clip_lo_num = 0.0; _clip_hi_num = 0.0
+            _kl_sum_seq  = 0.0; _kl_n_seq    = 0.0
+            _kl_seq_list:   list = []
+            _ratio_seq_list: list = []
+            _adv_seq_list:  list = []
 
-            clip_lower = (ratio_tok < 1 - args.eps_low)
-            clip_upper = (ratio_tok > 1 + args.eps_high)
-            n_tok      = comp_mask.sum().clamp(min=1)
-            clip_frac  = ((clip_lower | clip_upper).float() * comp_mask).sum() / n_tok
+            for nlp, olp, cm, adv_mb in zip(last_mb_new_lp_list, last_mb_old_lp_list,
+                                             last_mb_comp_mask_list, last_mb_adv_list):
+                ratio_tok = torch.exp(nlp - olp)                          # [M*N, T]
+                ratio_seq = (ratio_tok * cm).sum(1) / cm.sum(1).clamp(min=1)  # [M*N]
+                n_tok     = cm.sum().clamp(min=1)
+                clip_lo   = ratio_tok < 1 - args.eps_low
+                clip_hi   = ratio_tok > 1 + args.eps_high
+                _total_tok   += n_tok.item()
+                _clip_num    += ((clip_lo | clip_hi).float() * cm).sum().item()
+                _clip_lo_num += (clip_lo.float() * cm).sum().item()
+                _clip_hi_num += (clip_hi.float() * cm).sum().item()
+                kl_tok     = (ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8))) * cm
+                kl_per_seq = kl_tok.sum(dim=1)                            # [M*N]
+                _kl_sum_seq += kl_per_seq.sum().item()
+                _kl_n_seq   += kl_per_seq.shape[0]
+                _kl_seq_list.append(kl_per_seq)
+                _ratio_seq_list.append(ratio_seq)
+                _adv_seq_list.append(adv_mb.squeeze(1))
 
-            kl_tok     = (ratio_tok - 1 - torch.log(ratio_tok.clamp(min=1e-8))) \
-                         * comp_mask
-            kl_per_seq = kl_tok.sum(dim=1)                             # [B*N]
-            kl_total   = kl_per_seq.sum().clamp(min=1e-8)
-            kl_approx  = kl_per_seq.mean() / comp_mask.sum(1).mean().clamp(min=1)
+            kl_seq_all   = torch.cat(_kl_seq_list,    dim=0)   # [B_nd*N]
+            ratio_seq_all = torch.cat(_ratio_seq_list, dim=0)  # [B_nd*N]
+            adv_seq_all  = torch.cat(_adv_seq_list,   dim=0)   # [B_nd*N]
+            kl_total     = kl_seq_all.sum().clamp(min=1e-8)
 
-            adv_sq  = advantages.squeeze(1)                            # [B*N]
-            kl_q_pp = kl_per_seq[(adv_sq > 0)  & (ratio_seq > 1.0)].sum() / kl_total
-            kl_q_pn = kl_per_seq[(adv_sq > 0)  & (ratio_seq <= 1.0)].sum() / kl_total
-            kl_q_np = kl_per_seq[(adv_sq <= 0) & (ratio_seq > 1.0)].sum() / kl_total
-            kl_q_nn = kl_per_seq[(adv_sq <= 0) & (ratio_seq <= 1.0)].sum() / kl_total
+            mean_seq_len = _total_tok / max(1.0, _kl_n_seq)
+            kl_approx    = (_kl_sum_seq / max(1.0, _kl_n_seq)) / max(1.0, mean_seq_len)
 
             diag = {
-                'train/clip_fraction':   clip_frac.item(),
-                'train/clip_lower_frac': ((clip_lower.float() * comp_mask).sum()
-                                          / n_tok).item(),
-                'train/clip_upper_frac': ((clip_upper.float() * comp_mask).sum()
-                                          / n_tok).item(),
-                'train/ratio_mean':      ratio_seq.mean().item(),
-                'train/ratio_std':       ratio_seq.std().item(),
-                'train/kl_approx':       kl_approx.item(),
-                'train/adv_pos_frac':    (advantages > 0).float().mean().item(),
-                'train/kl_q_pp':         kl_q_pp.item(),
-                'train/kl_q_pn':         kl_q_pn.item(),
-                'train/kl_q_np':         kl_q_np.item(),
-                'train/kl_q_nn':         kl_q_nn.item(),
-                '_ratio_list':           ratio_seq.cpu().tolist(),
-                '_adv_list':             adv_sq.cpu().tolist(),
+                'train/clip_fraction':   _clip_num    / max(1.0, _total_tok),
+                'train/clip_lower_frac': _clip_lo_num / max(1.0, _total_tok),
+                'train/clip_upper_frac': _clip_hi_num / max(1.0, _total_tok),
+                'train/ratio_mean':      ratio_seq_all.mean().item(),
+                'train/ratio_std':       ratio_seq_all.std().item(),
+                'train/kl_approx':       kl_approx,
+                'train/adv_pos_frac':    (all_adv_cat > 0).float().mean().item(),
+                'train/kl_q_pp': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
+                'train/kl_q_pn': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all <= 1)].sum().item() / kl_total.item(),
+                'train/kl_q_np': kl_seq_all[(adv_seq_all <= 0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
+                'train/kl_q_nn': kl_seq_all[(adv_seq_all <= 0) & (ratio_seq_all <= 1)].sum().item() / kl_total.item(),
+                '_ratio_list':   ratio_seq_all.cpu().tolist(),
+                '_adv_list':     adv_seq_all.cpu().tolist(),
             }
         else:
             diag = dict(_NAN_DIAG)
 
-    grad_seconds = time.perf_counter() - t_grad
-
-    # Free gradient tensors and defragment CUDA memory pool so the NEXT step starts
-    # with a clean slate (model+m+v only, ~11 GB).  Without this, reserved grows
-    # monotonically across steps due to fragmentation → backward OOM by step 3.
     optimizer.zero_grad(set_to_none=True)
     torch.cuda.empty_cache()
 
-    _n_tok = comp_mask.sum().clamp(min=1)
+    _n_tok = sum(cm.sum().item() for cm in last_mb_comp_mask_list) or 1.0
+    _adv_tok_sum = sum(
+        (adv_mb * cm).sum().item()
+        for adv_mb, cm in zip(last_mb_adv_list, last_mb_comp_mask_list)
+    )
+
     return {
         'train/loss':         last_loss,
-        'train/mean_reward':  rewards_t.mean().item(),
-        'train/reward_std':   rewards_t.std().item(),
-        'train/reward_max':   rewards_t.max().item(),
-        'train/reward_min':   rewards_t.min().item(),
+        'train/mean_reward':  all_rewards_t.mean().item(),
+        'train/reward_std':   all_std_r.mean().item(),
+        'train/reward_max':   all_rewards_t.max().item(),
+        'train/reward_min':   all_rewards_t.min().item(),
         'train/entropy':      last_entropy,
-        'train/entropy_k0':   first_entropy,   # entropy before any optimizer step
-        'train/adv_abs_mean': advantages.abs().mean().item(),
-        # adv_mean_seq: mean of per-sequence advantage scalars [B*N].
-        #   Should be ≈0 (reward−group_mean; slight drift from top-N selection).
-        # adv_mean_tok: token-weighted mean (advantages broadcast over comp_mask).
-        #   Also ≈0 but reveals if longer completions skew the advantage sign.
-        'train/adv_mean_seq': advantages.mean().item(),
-        'train/adv_mean_tok': ((advantages * comp_mask).sum() / _n_tok).item(),
+        'train/entropy_k0':   first_entropy,
+        'train/adv_abs_mean': all_adv_cat.abs().mean().item(),
+        'train/adv_mean_seq': all_adv_cat.mean().item(),
+        'train/adv_mean_tok': _adv_tok_sum / _n_tok,
         'train/avg_gen_len':  avg_gen_len,
         'train/gen_seconds':  gen_seconds,
         'train/rew_seconds':  rew_seconds,
         'train/grad_seconds': grad_seconds,
-        '_rewards_list':      rewards,
-        '_reward_std_groups': std_r.tolist(),
+        '_rewards_list':      all_rewards,
+        '_reward_std_groups': all_std_r.tolist(),
         **diag,
     }
 
