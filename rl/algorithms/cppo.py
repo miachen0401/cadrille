@@ -562,6 +562,11 @@ def cppo_step(model, optimizer, items, processor, args,
         first_entropy = _ent_num / _ent_den
 
     n_nondegen_mb = sum(1 for mb in mb_ppo_list if mb is not None)
+    # Warn if mini-batches are unequal (last batch smaller) — normalising by count
+    # over-weights the smaller batch. Safe when B % mini_batch_size == 0.
+    if B % mini_batch_size != 0:
+        print(f'[cppo] WARNING: B={B} % mini_batch_size={mini_batch_size} != 0 — '
+              f'last mini-batch is smaller; gradient scale will be slightly biased.')
     if n_nondegen_mb == 0:
         return {
             'train/loss':         0.0,
@@ -651,7 +656,7 @@ def cppo_step(model, optimizer, items, processor, args,
 
         if is_last:
             last_loss = k_loss
-            if compute_diag and entropy_coef > 0 and last_mb_new_lp_list:
+            if compute_diag and last_mb_new_lp_list:
                 _en = 0.0; _ed = 0.0
                 for nlp, cm in zip(last_mb_new_lp_list, last_mb_comp_mask_list):
                     _en += (-(nlp * cm).sum().item())
