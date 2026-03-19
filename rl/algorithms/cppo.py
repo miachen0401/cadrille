@@ -58,7 +58,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from cadrille import Cadrille, collate
-from rl.reward import compute_rewards_parallel
+from rl.reward import compute_rewards_parallel, get_and_reset_pool_crashes
 from rl.eval import run_validation, log_eval
 
 try:
@@ -1018,6 +1018,7 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/gen_seconds':     metrics['train/gen_seconds'],
                         'train/rew_seconds':     metrics['train/rew_seconds'],
                         'train/grad_seconds':    metrics['train/grad_seconds'],
+                        'train/pool_crashes':    get_and_reset_pool_crashes(),
                         'train/lr':              lr,
                         'dist/rewards': _safe_histogram(metrics['_rewards_list']),
                         'dist/ratios':  _safe_histogram(metrics['_ratio_list']),

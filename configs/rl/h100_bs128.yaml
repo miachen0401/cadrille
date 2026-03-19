@@ -30,7 +30,7 @@ dpo_dataset: null
 # Training — effective batch_size=128 matches official 8-GPU setup
 # 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs
 max_steps: 3600
-lr: 3e-5                      # official lr; valid because effective batch_size=128 = official
+lr: 2e-5                      # official lr; valid because effective batch_size=128 = official
 
 # Dr. CPPO official settings
 G: 16
