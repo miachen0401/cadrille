@@ -35,6 +35,7 @@ git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 
 # 1. Install deps (uv, torch, huggingface_hub, wandb, pytorch3d, cadquery, flash-attn)
 bash scripts/setup.sh
+source ~/.local/bin/env 2>/dev/null || source ~/.bashrc  # reload PATH so 'uv' is found
 
 # 2. Set credentials — copy the example and fill in your tokens
 cp .env.example .env   # then edit .env with your HF_TOKEN and WANDB_API_KEY
@@ -52,7 +53,7 @@ PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
 # Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r rl
 
 # Resume after crash / session timeout
-PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \
+PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100_bs128.yaml \
     --checkpoint-path ./checkpoints/<run-name>/checkpoint-<N>
 ```
 
