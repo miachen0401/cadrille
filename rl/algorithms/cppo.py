@@ -377,7 +377,9 @@ _NAN_DIAG = {
     'train/ratio_std':       float('nan'),
     'train/kl_approx':       float('nan'),
     'train/adv_pos_frac':      float('nan'),
-    'train/neg_rew_loss_frac': float('nan'),
+    'train/neg_rew_loss_frac':   float('nan'),
+    'train/loss_contrib_neg_rew': float('nan'),
+    'train/loss_contrib_pos_rew': float('nan'),
     'train/kl_q_pp':           float('nan'),
     'train/kl_q_pn':         float('nan'),
     'train/kl_q_np':         float('nan'),
@@ -493,6 +495,8 @@ def cppo_step(model, optimizer, items, processor, args,
         mean_r   = rewards_t_mb.mean(dim=1, keepdim=True)        # [M, 1]
         std_r_mb = rewards_t_mb.std(dim=1)                       # [M]
         adv_raw  = rewards_t_mb - mean_r                         # [M, G]
+        if getattr(args, 'reward_normalization', False):
+            adv_raw = adv_raw / (std_r_mb.unsqueeze(1).clamp(min=1e-8))
         adv_raw  = torch.nan_to_num(adv_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
         all_rewards_t_list.append(rewards_t_mb)
@@ -763,9 +767,13 @@ def cppo_step(model, optimizer, items, processor, args,
             seq_loss_all = torch.cat(last_mb_seq_loss_list, dim=0)   # [B_nd*N]
             rew_seq_all  = torch.cat(last_mb_sel_rews_list,  dim=0)  # [B_nd*N]
             neg_rew_mask = rew_seq_all < 0
+            pos_rew_mask = ~neg_rew_mask
             _pos_loss_total   = (-seq_loss_all.clamp(max=0)).sum().item()
             _neg_rew_contrib  = (-seq_loss_all[neg_rew_mask].clamp(max=0)).sum().item()
             neg_rew_loss_frac = _neg_rew_contrib / max(1e-8, _pos_loss_total)
+            # Per-category average loss contribution (interpretable absolute values)
+            loss_contrib_neg_rew = (-seq_loss_all[neg_rew_mask]).mean().item() if neg_rew_mask.any() else 0.0
+            loss_contrib_pos_rew = (-seq_loss_all[pos_rew_mask]).mean().item() if pos_rew_mask.any() else 0.0
 
             diag = {
                 'train/clip_fraction':   _clip_num    / max(1.0, _total_tok),
@@ -775,7 +783,9 @@ def cppo_step(model, optimizer, items, processor, args,
                 'train/ratio_std':       ratio_seq_all.std().item(),
                 'train/kl_approx':       kl_approx,
                 'train/adv_pos_frac':    (all_adv_cat > 0).float().mean().item(),
-                'train/neg_rew_loss_frac': neg_rew_loss_frac,
+                'train/neg_rew_loss_frac':   neg_rew_loss_frac,
+                'train/loss_contrib_neg_rew': loss_contrib_neg_rew,
+                'train/loss_contrib_pos_rew': loss_contrib_pos_rew,
                 'train/kl_q_pp': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
                 'train/kl_q_pn': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all <= 1)].sum().item() / kl_total.item(),
                 'train/kl_q_np': kl_seq_all[(adv_seq_all <= 0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
@@ -1066,7 +1076,9 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/ratio_mean':      metrics['train/ratio_mean'],
                         'train/ratio_std':       metrics['train/ratio_std'],
                         'train/adv_pos_frac':      metrics['train/adv_pos_frac'],
-                        'train/neg_rew_loss_frac': metrics['train/neg_rew_loss_frac'],
+                        'train/neg_rew_loss_frac':    metrics['train/neg_rew_loss_frac'],
+                        'train/loss_contrib_neg_rew': metrics['train/loss_contrib_neg_rew'],
+                        'train/loss_contrib_pos_rew': metrics['train/loss_contrib_pos_rew'],
                         'train/adv_abs_mean':      metrics['train/adv_abs_mean'],
                         'train/adv_mean_seq':    metrics['train/adv_mean_seq'],
                         'train/adv_mean_tok':    metrics['train/adv_mean_tok'],
