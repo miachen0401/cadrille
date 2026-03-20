@@ -771,9 +771,10 @@ def cppo_step(model, optimizer, items, processor, args,
             _pos_loss_total   = (-seq_loss_all.clamp(max=0)).sum().item()
             _neg_rew_contrib  = (-seq_loss_all[neg_rew_mask].clamp(max=0)).sum().item()
             neg_rew_loss_frac = _neg_rew_contrib / max(1e-8, _pos_loss_total)
-            # Per-category average loss contribution (interpretable absolute values)
-            loss_contrib_neg_rew = (-seq_loss_all[neg_rew_mask]).mean().item() if neg_rew_mask.any() else 0.0
-            loss_contrib_pos_rew = (-seq_loss_all[pos_rew_mask]).mean().item() if pos_rew_mask.any() else 0.0
+            # Per-category loss contribution weighted by count fraction so that
+            # loss_contrib_neg_rew + loss_contrib_pos_rew == train/loss exactly.
+            loss_contrib_neg_rew = (-seq_loss_all * neg_rew_mask.float()).mean().item()
+            loss_contrib_pos_rew = (-seq_loss_all * pos_rew_mask.float()).mean().item()
 
             diag = {
                 'train/clip_fraction':   _clip_num    / max(1.0, _total_tok),
