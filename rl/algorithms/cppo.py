@@ -145,7 +145,7 @@ def compute_token_log_probs(logits: torch.Tensor, full_ids: torch.Tensor,
 
 def cppo_loss_fn(new_lp: torch.Tensor, old_lp: torch.Tensor,
                  advantages: torch.Tensor, completion_mask: torch.Tensor,
-                 eps_high: float, eps_low: float) -> torch.Tensor:
+                 eps_high: float, eps_low: float) -> tuple:
     """Clipped PPO surrogate loss.  Identical to grpo_mm.grpo_loss.
 
     Args:
@@ -155,7 +155,8 @@ def cppo_loss_fn(new_lp: torch.Tensor, old_lp: torch.Tensor,
         eps_high, eps_low: clip bounds
 
     Returns:
-        scalar loss (minimised during training)
+        (loss, seq_loss_detached) — scalar loss (minimised) and [B] per-sequence
+        surrogate values (detached, before negation) for contribution analysis.
     """
     ratio   = torch.exp(new_lp - old_lp)                          # [B, T]
     surr1   = ratio * advantages
@@ -166,7 +167,7 @@ def cppo_loss_fn(new_lp: torch.Tensor, old_lp: torch.Tensor,
     seq_loss = (per_tok * completion_mask).sum(dim=1) / n_tok      # [B]
     seq_loss = torch.nan_to_num(seq_loss, nan=0.0, posinf=0.0, neginf=0.0)
     seq_loss = torch.clamp(seq_loss, min=-1.0, max=1.0)
-    return -seq_loss.mean()
+    return -seq_loss.mean(), seq_loss.detach()
 
 
 def compute_policy_entropy(log_probs: torch.Tensor,
@@ -375,8 +376,9 @@ _NAN_DIAG = {
     'train/ratio_mean':      float('nan'),
     'train/ratio_std':       float('nan'),
     'train/kl_approx':       float('nan'),
-    'train/adv_pos_frac':    float('nan'),
-    'train/kl_q_pp':         float('nan'),
+    'train/adv_pos_frac':      float('nan'),
+    'train/neg_rew_loss_frac': float('nan'),
+    'train/kl_q_pp':           float('nan'),
     'train/kl_q_pn':         float('nan'),
     'train/kl_q_np':         float('nan'),
     'train/kl_q_nn':         float('nan'),
@@ -474,6 +476,10 @@ def cppo_step(model, optimizer, items, processor, args,
     mb_ppo_list:        list = []   # (sel_ids, full_attn, comp_mask, advantages,
                                     #  old_lp, sel_g_batch, logits_to_keep) or None
 
+    topN_neg_count  = 0   # # top-N selected sequences with reward < 0
+    topN_total      = 0   # total top-N selected sequences
+    topN_rews_list: list = []   # [M, N] per non-degenerate mini-batch (for prompt-level metrics)
+
     rew_offset = 0
     for mb_batch, mb_gen_ids, prompt_len, M in mb_gen_data:
         mb_rews   = all_rewards[rew_offset:rew_offset + M * G]
@@ -500,6 +506,12 @@ def cppo_step(model, optimizer, items, processor, args,
         _, top_idx = torch.topk(adv_raw.abs(), N, dim=1)                   # [M, N]
         flat_idx   = (torch.arange(M).unsqueeze(1) * G + top_idx).reshape(-1)  # [M*N]
 
+        # Track top-N reward distribution for topN_neg_frac and prompt-level metrics
+        sel_rews_mb = rewards_t_mb.reshape(-1)[flat_idx]   # [M*N]
+        topN_neg_count += (sel_rews_mb < 0).sum().item()
+        topN_total     += sel_rews_mb.numel()
+        topN_rews_list.append(sel_rews_mb.view(M, N))      # [M, N]
+
         sel_ids_cpu        = mb_gen_ids[flat_idx]                           # [M*N, full_len]
         comp_ids_cpu       = sel_ids_cpu[:, prompt_len:]                    # [M*N, T]
         logits_to_keep     = comp_ids_cpu.shape[1]
@@ -525,11 +537,38 @@ def cppo_step(model, optimizer, items, processor, args,
         del old_out  # logits [B, L, V] not needed after log_probs computed
 
         mb_ppo_list.append(
-            (sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep))
+            (sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep,
+             sel_rews_mb))   # sel_rews_mb [M*N]: raw reward per selected sequence
 
     # Aggregate reward tensors for global metrics
     all_rewards_t = torch.cat(all_rewards_t_list, dim=0)   # [B, G]
     all_std_r     = torch.cat(all_std_r_list,     dim=0)   # [B]
+
+    # Reward-distribution metrics (computed once, reused in both early-exit and normal return)
+    _flat_rews    = all_rewards_t.reshape(-1)                           # [B*G]
+    failure_rate  = (_flat_rews < 0).float().mean().item()
+    topN_neg_frac = topN_neg_count / max(1, topN_total)
+
+    # Prompt-level metrics based on top-N selected sequences (non-degenerate prompts only).
+    # topN_rews: [B_nd, N] — rewards of the N sequences that entered gradient update.
+    if topN_rews_list:
+        topN_rews            = torch.cat(topN_rews_list, dim=0)           # [B_nd, N]
+        _topN_pos            = topN_rews > 0                              # [B_nd, N]
+        fail_prompt_frac     = (topN_rews < 0).all(dim=1).float().mean().item()
+        prompt_all_pos_frac  = _topN_pos.all(dim=1).float().mean().item()
+        prompt_geq_half_pos  = (_topN_pos.sum(dim=1) > N / 2).float().mean().item()
+    else:
+        fail_prompt_frac    = float('nan')
+        prompt_all_pos_frac = float('nan')
+        prompt_geq_half_pos = float('nan')
+
+    _reward_dist_metrics = {
+        'train/failure_rate':          failure_rate,
+        'train/topN_neg_frac':         topN_neg_frac,
+        'train/fail_prompt_frac':      fail_prompt_frac,
+        'train/prompt_all_pos_frac':   prompt_all_pos_frac,
+        'train/prompt_geq_half_pos':   prompt_geq_half_pos,
+    }
 
     # ---- Debug: print per-mini-batch summary --------------------------------
     if debug_rollouts:
@@ -555,7 +594,7 @@ def cppo_step(model, optimizer, items, processor, args,
     for mb_ppo in mb_ppo_list:
         if mb_ppo is None:
             continue
-        _, _, comp_mask, _, old_lp, _, _ = mb_ppo
+        _, _, comp_mask, _, old_lp, _, _, _ = mb_ppo
         _ent_num += (-(old_lp * comp_mask).sum().item())
         _ent_den += comp_mask.sum().item()
     if _ent_den > 0:
@@ -577,6 +616,7 @@ def cppo_step(model, optimizer, items, processor, args,
             'train/entropy':      float('nan'),
             'train/entropy_k0':   float('nan'),
             'train/adv_abs_mean': 0.0,
+            **_reward_dist_metrics,
             'train/adv_mean_seq': 0.0,
             'train/adv_mean_tok': 0.0,
             'train/avg_gen_len':  avg_gen_len,
@@ -601,6 +641,8 @@ def cppo_step(model, optimizer, items, processor, args,
     last_mb_comp_mask_list: list = []
     last_mb_old_lp_list:  list = []
     last_mb_adv_list:     list = []
+    last_mb_seq_loss_list: list = []   # per-sequence surrogate values for neg-rew contribution
+    last_mb_sel_rews_list: list = []   # [M*N] raw rewards of selected sequences (last update)
 
     def _mem(tag, k_):
         if debug_rollouts:
@@ -619,11 +661,13 @@ def cppo_step(model, optimizer, items, processor, args,
             last_mb_comp_mask_list.clear()
             last_mb_old_lp_list.clear()
             last_mb_adv_list.clear()
+            last_mb_seq_loss_list.clear()
+            last_mb_sel_rews_list.clear()
 
         for mb_ppo in mb_ppo_list:
             if mb_ppo is None:
                 continue
-            sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep = mb_ppo
+            sel_ids, full_attn, comp_mask, advantages, old_lp, sel_g_batch, logits_to_keep, sel_rews = mb_ppo
             _mem('pre-fwd', k)
             new_out = model_forward(model, sel_ids, full_attn, sel_g_batch, device)
             _mem('post-fwd', k)
@@ -631,8 +675,8 @@ def cppo_step(model, optimizer, items, processor, args,
             del new_out  # logits [B, L, V] not needed for backward (log_softmax saves output)
             _mem('post-log_probs', k)
 
-            loss = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
-                                args.eps_high, args.eps_low)
+            loss, seq_loss_det = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
+                                              args.eps_high, args.eps_low)
             if entropy_coef > 0:
                 step_entropy = compute_policy_entropy(new_lp, comp_mask)
                 loss = loss - entropy_coef * step_entropy
@@ -649,6 +693,8 @@ def cppo_step(model, optimizer, items, processor, args,
                 last_mb_comp_mask_list.append(comp_mask)
                 last_mb_old_lp_list.append(old_lp)
                 last_mb_adv_list.append(advantages)
+                last_mb_seq_loss_list.append(seq_loss_det)  # [M*N] surrogate values
+                last_mb_sel_rews_list.append(sel_rews)      # [M*N] raw rewards
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
@@ -710,6 +756,17 @@ def cppo_step(model, optimizer, items, processor, args,
             mean_seq_len = _total_tok / max(1.0, _kl_n_seq)
             kl_approx    = (_kl_sum_seq / max(1.0, _kl_n_seq)) / max(1.0, mean_seq_len)
 
+            # neg_rew_loss_frac: fraction of total positive loss contribution
+            # that comes from sequences with raw reward < 0.
+            # seq_loss[i] < 0  → contributes positively to -seq_loss.mean() (loss goes up).
+            # neg_rew_loss_frac = sum(-seq[rew<0]) / sum(-seq.clamp(max=0))
+            seq_loss_all = torch.cat(last_mb_seq_loss_list, dim=0)   # [B_nd*N]
+            rew_seq_all  = torch.cat(last_mb_sel_rews_list,  dim=0)  # [B_nd*N]
+            neg_rew_mask = rew_seq_all < 0
+            _pos_loss_total   = (-seq_loss_all.clamp(max=0)).sum().item()
+            _neg_rew_contrib  = (-seq_loss_all[neg_rew_mask].clamp(max=0)).sum().item()
+            neg_rew_loss_frac = _neg_rew_contrib / max(1e-8, _pos_loss_total)
+
             diag = {
                 'train/clip_fraction':   _clip_num    / max(1.0, _total_tok),
                 'train/clip_lower_frac': _clip_lo_num / max(1.0, _total_tok),
@@ -718,6 +775,7 @@ def cppo_step(model, optimizer, items, processor, args,
                 'train/ratio_std':       ratio_seq_all.std().item(),
                 'train/kl_approx':       kl_approx,
                 'train/adv_pos_frac':    (all_adv_cat > 0).float().mean().item(),
+                'train/neg_rew_loss_frac': neg_rew_loss_frac,
                 'train/kl_q_pp': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
                 'train/kl_q_pn': kl_seq_all[(adv_seq_all >  0) & (ratio_seq_all <= 1)].sum().item() / kl_total.item(),
                 'train/kl_q_np': kl_seq_all[(adv_seq_all <= 0) & (ratio_seq_all >  1)].sum().item() / kl_total.item(),
@@ -754,6 +812,7 @@ def cppo_step(model, optimizer, items, processor, args,
         'train/grad_seconds': grad_seconds,
         '_rewards_list':      all_rewards,
         '_reward_std_groups': all_std_r.tolist(),
+        **_reward_dist_metrics,
         **diag,
     }
 
@@ -1006,8 +1065,9 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/clip_upper_frac': metrics['train/clip_upper_frac'],
                         'train/ratio_mean':      metrics['train/ratio_mean'],
                         'train/ratio_std':       metrics['train/ratio_std'],
-                        'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
-                        'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
+                        'train/adv_pos_frac':      metrics['train/adv_pos_frac'],
+                        'train/neg_rew_loss_frac': metrics['train/neg_rew_loss_frac'],
+                        'train/adv_abs_mean':      metrics['train/adv_abs_mean'],
                         'train/adv_mean_seq':    metrics['train/adv_mean_seq'],
                         'train/adv_mean_tok':    metrics['train/adv_mean_tok'],
                         'train/avg_gen_len':     metrics['train/avg_gen_len'],
@@ -1020,6 +1080,11 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/grad_seconds':    metrics['train/grad_seconds'],
                         'train/pool_crashes':    get_and_reset_pool_crashes(),
                         'train/lr':              lr,
+                        'train/failure_rate':         metrics['train/failure_rate'],
+                        'train/topN_neg_frac':        metrics['train/topN_neg_frac'],
+                        'train/fail_prompt_frac':     metrics['train/fail_prompt_frac'],
+                        'train/prompt_all_pos_frac':  metrics['train/prompt_all_pos_frac'],
+                        'train/prompt_geq_half_pos':  metrics['train/prompt_geq_half_pos'],
                         'dist/rewards': _safe_histogram(metrics['_rewards_list']),
                         'dist/ratios':  _safe_histogram(metrics['_ratio_list']),
                         'dist/advs':    _safe_histogram(metrics['_adv_list']),
