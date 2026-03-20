@@ -37,7 +37,8 @@ entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * ent
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 6
 max_new_tokens: 400
-rollout_temperature: 0.3    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
+rollout_temperature: 1.0    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
+reward_normalization: false  # true: A=(R-μ)/(R-σ) per prompt; false: A=R-μ (GRPO default)
 reward_workers: 24            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: false
 buffer_sample_size: 1

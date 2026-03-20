@@ -108,6 +108,7 @@ def resolve_args(args, cfg: dict) -> dict:
     args.sequential_generation  = bool(_seq)
     args.rollout_temperature    = cfg.get('rollout_temperature', 1.0)
     args.entropy_coef           = float(cfg.get('entropy_coef', 0.0))
+    args.reward_normalization   = bool(cfg.get('reward_normalization', False))
     args.debug_rollout_steps    = int(cfg.get('debug_rollout_steps', 0))
     args.freeze_vision_encoder  = bool(cfg.get('freeze_vision_encoder', False))
     args.seed                   = int(cfg.get('seed', 42))

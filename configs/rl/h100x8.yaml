@@ -32,6 +32,7 @@ batch_updates: 3
 batch_size: 2
 max_new_tokens: 1024
 rollout_temperature: 1.0    # sampling temp for G rollouts; 0=greedy
+reward_normalization: false  # true: A=(R-μ)/(R-σ) per prompt; false: A=R-μ (GRPO default)
 reward_workers: 16       # more workers for 8-GPU node (more CPU cores available)
 use_buffer: true
 buffer_sample_size: 2
