@@ -1062,42 +1062,58 @@ def train_cppo(model, optimizer, dataset, processor,
                     f.write(log_line + '\n')
 
                 if use_wandb:
+                    # W&B custom expressions → docs/wandb_expressions.md
                     wandb.log({
-                        'loss':           metrics['train/loss'],
+                        # ── Core ──────────────────────────────────────────────
+                        'loss':           metrics['train/loss'],           # = loss_contrib_neg_rew + loss_contrib_pos_rew
                         'average_reward': metrics['train/mean_reward'],
                         'train/reward_std':      metrics['train/reward_std'],
                         'train/reward_max':      metrics['train/reward_max'],
                         'train/reward_min':      metrics['train/reward_min'],
-                        'train/entropy':         metrics['train/entropy'],
-                        'train/entropy_k0':      metrics['train/entropy_k0'],
+                        # ── Policy entropy ────────────────────────────────────
+                        'train/entropy':         metrics['train/entropy'],   # H after last batch_update
+                        'train/entropy_k0':      metrics['train/entropy_k0'], # H before any gradient update
+                        # ── KL & ratio ────────────────────────────────────────
                         'train/kl_approx':       metrics['train/kl_approx'],
                         'train/clip_fraction':   metrics['train/clip_fraction'],
                         'train/clip_lower_frac': metrics['train/clip_lower_frac'],
                         'train/clip_upper_frac': metrics['train/clip_upper_frac'],
                         'train/ratio_mean':      metrics['train/ratio_mean'],
                         'train/ratio_std':       metrics['train/ratio_std'],
-                        'train/adv_pos_frac':      metrics['train/adv_pos_frac'],
-                        'train/neg_rew_loss_frac':    metrics['train/neg_rew_loss_frac'],
-                        'train/loss_contrib_neg_rew': metrics['train/loss_contrib_neg_rew'],
-                        'train/loss_contrib_pos_rew': metrics['train/loss_contrib_pos_rew'],
-                        'train/adv_abs_mean':      metrics['train/adv_abs_mean'],
+                        # ── KL quadrants (fraction of total KL mass) ──────────
+                        # expr: kl_q_pp+kl_q_nn = healthy frac; kl_q_np+kl_q_pn = unhealthy frac
+                        # collapse signal: kl_q_np → 1
+                        'train/kl_q_pp':         metrics['train/kl_q_pp'],  # adv>0 & ratio>1 ✓
+                        'train/kl_q_pn':         metrics['train/kl_q_pn'],  # adv>0 & ratio<1 ✗
+                        'train/kl_q_np':         metrics['train/kl_q_np'],  # adv<0 & ratio>1 ✗ collapse
+                        'train/kl_q_nn':         metrics['train/kl_q_nn'],  # adv<0 & ratio<1 ✓
+                        # ── Advantage ─────────────────────────────────────────
+                        'train/adv_pos_frac':    metrics['train/adv_pos_frac'],
+                        'train/adv_abs_mean':    metrics['train/adv_abs_mean'],
                         'train/adv_mean_seq':    metrics['train/adv_mean_seq'],
                         'train/adv_mean_tok':    metrics['train/adv_mean_tok'],
+                        # ── Loss contribution (neg+pos = loss) ────────────────
+                        # expr: neg / (0 - pos) = penalty_reward_ratio (>1 bad seqs dominate)
+                        'train/loss_contrib_neg_rew': metrics['train/loss_contrib_neg_rew'],  # >0 pushes loss up
+                        'train/loss_contrib_pos_rew': metrics['train/loss_contrib_pos_rew'],  # <0 pulls loss down
+                        'train/neg_rew_loss_frac':    metrics['train/neg_rew_loss_frac'],     # of loss-increasing seqs, frac with rew<0
+                        # ── Rollout distribution (top-N based) ────────────────
+                        # expr: 1-failure_rate = success_rate
+                        # expr: prompt_all_pos_frac / (1-fail_prompt_frac) = learnable_prompt_all_pos
+                        'train/failure_rate':         metrics['train/failure_rate'],          # rew<0 / B×G
+                        'train/topN_neg_frac':        metrics['train/topN_neg_frac'],         # rew<0 / B_nd×N
+                        'train/fail_prompt_frac':     metrics['train/fail_prompt_frac'],      # all-fail prompts / B
+                        'train/prompt_all_pos_frac':  metrics['train/prompt_all_pos_frac'],   # all-pass prompts / B
+                        'train/prompt_geq_half_pos':  metrics['train/prompt_geq_half_pos'],   # >N/2 pass prompts / B
+                        # ── Timing ────────────────────────────────────────────
+                        # expr: gen+rew+grad = total_step_seconds
                         'train/avg_gen_len':     metrics['train/avg_gen_len'],
-                        'train/kl_q_pp':         metrics['train/kl_q_pp'],
-                        'train/kl_q_pn':         metrics['train/kl_q_pn'],
-                        'train/kl_q_np':         metrics['train/kl_q_np'],
-                        'train/kl_q_nn':         metrics['train/kl_q_nn'],
                         'train/gen_seconds':     metrics['train/gen_seconds'],
                         'train/rew_seconds':     metrics['train/rew_seconds'],
                         'train/grad_seconds':    metrics['train/grad_seconds'],
                         'train/pool_crashes':    get_and_reset_pool_crashes(),
                         'train/lr':              lr,
-                        'train/failure_rate':         metrics['train/failure_rate'],
-                        'train/topN_neg_frac':        metrics['train/topN_neg_frac'],
-                        'train/fail_prompt_frac':     metrics['train/fail_prompt_frac'],
-                        'train/prompt_all_pos_frac':  metrics['train/prompt_all_pos_frac'],
-                        'train/prompt_geq_half_pos':  metrics['train/prompt_geq_half_pos'],
+                        # ── Distributions ─────────────────────────────────────
                         'dist/rewards': _safe_histogram(metrics['_rewards_list']),
                         'dist/ratios':  _safe_histogram(metrics['_ratio_list']),
                         'dist/advs':    _safe_histogram(metrics['_adv_list']),
