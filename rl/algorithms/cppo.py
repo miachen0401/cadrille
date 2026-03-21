@@ -496,7 +496,8 @@ def cppo_step(model, optimizer, items, processor, args,
         std_r_mb = rewards_t_mb.std(dim=1)                       # [M]
         adv_raw  = rewards_t_mb - mean_r                         # [M, G]
         if getattr(args, 'reward_normalization', False):
-            adv_raw = adv_raw / (std_r_mb.unsqueeze(1).clamp(min=1e-8))
+            norm_eps = getattr(args, 'reward_norm_eps', 0.01)
+            adv_raw = adv_raw / (std_r_mb.unsqueeze(1) + norm_eps)
         adv_raw  = torch.nan_to_num(adv_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
         all_rewards_t_list.append(rewards_t_mb)

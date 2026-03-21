@@ -3,9 +3,12 @@
 #
 # Official hyperparameters (Table 14, Cadrille paper): G=16, N=4, lr=3e-5,
 # batch_size=128 (8×H100 with 16 prompts/GPU), batch_updates=3, eps=0.1.
-# Single-GPU adaptation: batch_size=16, lr=4e-6 (linear scaling from bs=128 official lr=3e-5).
+# Single-GPU with gradient accumulation: effective batch_size=128 (8 mini-batches × 16),
+# matching the official 8-GPU setup. lr=3e-5 matches the official lr exactly.
 #
-# Usage: python rl/train.py --config configs/rl/h100_bs16.yaml
+# 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs.
+#
+# Usage: python rl/train.py --config configs/rl/h100_bs128.yaml
 #
 # Colab: update checkpoint_path and data paths below before running.
 
@@ -17,41 +20,39 @@ mode: cppo
 #   checkpoint_path: /content/models/cadrille-sft
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data — hard-mined examples from Hula0401/mine_CAD (22,970 examples at R_th=0.75)
+# Data — hard-mined examples from Hula0401/mine_CAD (22,939 examples after quality filter)
 # Download via scripts/setup.sh --data
 data_dir: null
 train_modality: img                   # paper: images only — pc training was unstable
 hard_examples_pkl: ./data/mined/combined_hard.pkl
 dpo_dataset: null
 
-# Training (paper Table 11, lr scaled for single-GPU batch_size=4 vs paper 16/GPU)
-max_steps: 29000
-lr: 4.e-6                    # paper: 3e-5 @ bs=128 → 4e-6 @ bs=16 (linear scaling)
+# Training — effective batch_size=128 matches official 8-GPU setup
+# 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs
+max_steps: 3600
+lr: 3e-5                      # official lr; valid because effective batch_size=128 = official
 
 # Dr. CPPO official settings
 G: 16
-top_N: 4
+top_N: 16
 eps_high: 0.1
 eps_low: 0.1
-entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
+entropy_coef: 0.00       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
-batch_size: 16
-max_new_tokens: 400
+batch_size: 128               # effective prompts per step (= 8 mini-batches × mini_batch_size)
+mini_batch_size: 4           # prompts per gradient-accumulation chunk; keeps VRAM flat
+max_new_tokens: 512
 rollout_temperature: 1.0    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
-reward_normalization: false  # true: A=(R-μ)/(σ+eps) per prompt (eps=reward_norm_eps, default 0.01); false: A=R-μ (GRPO default)
 reward_workers: 24            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: false
 buffer_sample_size: 1
 buffer_expand_frac: 0.5
 buffer_max_size: 4096
-eval_batch_size: 32
+eval_batch_size: 36
 eval_workers: 24
 eval_timeout: 120.0
-sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=16
+sequential_generation: false  # G=16 batched generation fits in 80 GB
 
-# DPO (unused)
-beta: 0.3
-dpo_epochs_per_round: 10
 
 # Validation — 50 DeepCAD + 50 Fusion360, img modality (matches training)
 # Update paths for Colab. Set val_fusion360_dir: null if data unavailable.
@@ -60,13 +61,12 @@ val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        pc,img
-eval_steps: 100
+eval_steps: 5
 
 # Logging & checkpoints
-# save_steps=300 → checkpoint every ~25 h at bs=16 (~5 min/step); 10 kept.
-# save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on Drive. Increase if Drive has space.
-log_steps: 10
-save_steps: 300
+# save_total_limit=10: 10 × 4.5 GB ≈ 45 GB on /ephemeral.
+log_steps: 2
+save_steps: 30
 save_total_limit: 10
 
 # HuggingFace checkpoint upload (optional — uploads each checkpoint in background)

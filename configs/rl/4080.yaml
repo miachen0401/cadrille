@@ -43,7 +43,7 @@ entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * ent
 batch_updates: 3         # official=3; OK here — gradient pass is only top_N=2 samples
 max_new_tokens: 1024     # official=400; 1024 needed for complete CadQuery scripts
 rollout_temperature: 1.0    # sampling temp for G rollouts; chosen by temp sweep (best pass@4)
-reward_normalization: false  # true: A=(R-μ)/(R-σ) per prompt; false: A=R-μ (GRPO default)
+reward_normalization: false  # true: A=(R-μ)/(σ+eps) per prompt (eps=reward_norm_eps, default 0.01); false: A=R-μ (GRPO default)
 debug_rollout_steps: 3      # print per-rollout codes+rewards, greedy comparison, and k=0/k=final entropy for first N steps (0=off)
 reward_workers: 4
 eval_batch_size: 8
