@@ -43,7 +43,7 @@ batch_size: 128               # effective prompts per step (= 8 mini-batches × 
 mini_batch_size: 16           # prompts per gradient-accumulation chunk; keeps VRAM flat
 max_new_tokens: 512
 rollout_temperature: 1.0    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
-reward_normalization: false  # true: A=(R-μ)/(R-σ) per prompt; false: A=R-μ (GRPO default)
+reward_normalization: true  # true: A=(R-μ)/(σ+eps) per prompt (eps=reward_norm_eps, default 0.01); false: A=R-μ (GRPO default)
 reward_workers: 24            # 28 CPU cores; 16 workers balances throughput vs OCP crash rate
 use_buffer: false
 buffer_sample_size: 1

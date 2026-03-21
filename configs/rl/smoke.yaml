@@ -33,7 +33,7 @@ entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * ent
 batch_updates: 1
 max_new_tokens: 512         # long enough for real CadQuery code
 rollout_temperature: 1.0
-reward_normalization: false  # true: A=(R-μ)/(R-σ) per prompt; false: A=R-μ (GRPO default)
+reward_normalization: false  # true: A=(R-μ)/(σ+eps) per prompt (eps=reward_norm_eps, default 0.01); false: A=R-μ (GRPO default)
 reward_workers: 4
 eval_workers: 2
 eval_timeout: 60.0
