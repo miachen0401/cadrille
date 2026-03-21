@@ -765,8 +765,8 @@ def cppo_step(model, optimizer, items, processor, args,
             # that comes from sequences with raw reward < 0.
             # seq_loss[i] < 0  → contributes positively to -seq_loss.mean() (loss goes up).
             # neg_rew_loss_frac = sum(-seq[rew<0]) / sum(-seq.clamp(max=0))
-            seq_loss_all = torch.cat(last_mb_seq_loss_list, dim=0)   # [B_nd*N]
-            rew_seq_all  = torch.cat(last_mb_sel_rews_list,  dim=0)  # [B_nd*N]
+            seq_loss_all = torch.cat(last_mb_seq_loss_list, dim=0)   # [B_nd*N] CUDA
+            rew_seq_all  = torch.cat(last_mb_sel_rews_list,  dim=0).to(seq_loss_all.device)  # [B_nd*N]
             neg_rew_mask = rew_seq_all < 0
             pos_rew_mask = ~neg_rew_mask
             _pos_loss_total   = (-seq_loss_all.clamp(max=0)).sum().item()
