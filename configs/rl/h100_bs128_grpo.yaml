@@ -8,7 +8,7 @@
 #
 # 22,939 examples → ceil(22939/128)=180 steps/epoch → 3,600 steps ≈ 20 epochs.
 #
-# Usage: python rl/train.py --config configs/rl/h100_bs128.yaml
+# Usage: python rl/train.py --config configs/rl/h100_bs128_grpo.yaml
 #
 # Colab: update checkpoint_path and data paths below before running.
 
