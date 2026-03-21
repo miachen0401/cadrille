@@ -376,6 +376,9 @@ _NAN_DIAG = {
     'train/ratio_mean':      float('nan'),
     'train/ratio_std':       float('nan'),
     'train/kl_approx':       float('nan'),
+    'train/kl_k1':           float('nan'),
+    'train/kl_k2':           float('nan'),
+    'train/kl_k3':           float('nan'),
     'train/adv_pos_frac':      float('nan'),
     'train/neg_rew_loss_frac':   float('nan'),
     'train/loss_contrib_neg_rew': float('nan'),
@@ -561,7 +564,7 @@ def cppo_step(model, optimizer, items, processor, args,
         _topN_pos            = topN_rews > 0                              # [B_nd, N]
         fail_prompt_frac     = (topN_rews < 0).all(dim=1).float().mean().item()
         prompt_all_pos_frac  = _topN_pos.all(dim=1).float().mean().item()
-        prompt_geq_half_pos  = (_topN_pos.sum(dim=1) > N / 2).float().mean().item()
+        prompt_geq_half_pos  = (_topN_pos.sum(dim=1) >= N / 2).float().mean().item()
     else:
         fail_prompt_frac    = float('nan')
         prompt_all_pos_frac = float('nan')
@@ -648,6 +651,7 @@ def cppo_step(model, optimizer, items, processor, args,
     last_mb_adv_list:     list = []
     last_mb_seq_loss_list: list = []   # per-sequence surrogate values for neg-rew contribution
     last_mb_sel_rews_list: list = []   # [M*N] raw rewards of selected sequences (last update)
+    kl_per_k:             list = []    # approx KL(new_k || old) scalar per batch_update
 
     def _mem(tag, k_):
         if debug_rollouts:
@@ -661,6 +665,7 @@ def cppo_step(model, optimizer, items, processor, args,
         model.train()
         optimizer.zero_grad()
         k_loss = 0.0
+        _k_kl_num = 0.0; _k_kl_seq = 0; _k_kl_tok = 0.0  # for kl_per_k
         if is_last:
             last_mb_new_lp_list.clear()
             last_mb_comp_mask_list.clear()
@@ -682,6 +687,16 @@ def cppo_step(model, optimizer, items, processor, args,
 
             loss, seq_loss_det = cppo_loss_fn(new_lp, old_lp, advantages, comp_mask,
                                               args.eps_high, args.eps_low)
+
+            # Accumulate per-k KL scalar before backward (new_lp freed after backward)
+            if compute_diag:
+                with torch.no_grad():
+                    r = torch.exp(new_lp.detach() - old_lp)
+                    kl_seq = ((r - 1 - torch.log(r.clamp(min=1e-8))) * comp_mask).sum(dim=1)
+                    _k_kl_num += kl_seq.sum().item()
+                    _k_kl_seq += kl_seq.shape[0]
+                    _k_kl_tok += comp_mask.sum().item()
+
             if entropy_coef > 0:
                 step_entropy = compute_policy_entropy(new_lp, comp_mask)
                 loss = loss - entropy_coef * step_entropy
@@ -704,6 +719,10 @@ def cppo_step(model, optimizer, items, processor, args,
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
         optimizer.step()
         _mem('post-opt-step', k)
+
+        if compute_diag and _k_kl_seq > 0:
+            mean_tok = _k_kl_tok / _k_kl_seq
+            kl_per_k.append(_k_kl_num / _k_kl_seq / max(1.0, mean_tok))
 
         if is_last:
             last_loss = k_loss
@@ -784,6 +803,9 @@ def cppo_step(model, optimizer, items, processor, args,
                 'train/ratio_mean':      ratio_seq_all.mean().item(),
                 'train/ratio_std':       ratio_seq_all.std().item(),
                 'train/kl_approx':       kl_approx,
+                'train/kl_k1':           kl_per_k[0] if len(kl_per_k) > 0 else float('nan'),
+                'train/kl_k2':           kl_per_k[1] if len(kl_per_k) > 1 else float('nan'),
+                'train/kl_k3':           kl_per_k[2] if len(kl_per_k) > 2 else float('nan'),
                 'train/adv_pos_frac':    (all_adv_cat > 0).float().mean().item(),
                 'train/neg_rew_loss_frac':   neg_rew_loss_frac,
                 'train/loss_contrib_neg_rew': loss_contrib_neg_rew,
@@ -1076,6 +1098,9 @@ def train_cppo(model, optimizer, dataset, processor,
                         'train/entropy_k0':      metrics['train/entropy_k0'], # H before any gradient update
                         # ── KL & ratio ────────────────────────────────────────
                         'train/kl_approx':       metrics['train/kl_approx'],
+                        'train/kl_k1':           metrics['train/kl_k1'],   # KL after 1st batch_update
+                        'train/kl_k2':           metrics['train/kl_k2'],   # KL after 2nd batch_update
+                        'train/kl_k3':           metrics['train/kl_k3'],   # KL after 3rd batch_update
                         'train/clip_fraction':   metrics['train/clip_fraction'],
                         'train/clip_lower_frac': metrics['train/clip_lower_frac'],
                         'train/clip_upper_frac': metrics['train/clip_upper_frac'],
