@@ -39,7 +39,7 @@ eps_high: 0.1
 eps_low: 0.1
 entropy_coef: 0.00       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
-batch_size: 128               # effective prompts per step (= 8 mini-batches × mini_batch_size)
+batch_size: 128               # effective prompts per step (= 32 mini-batches × mini_batch_size)
 mini_batch_size: 4           # prompts per gradient-accumulation chunk; keeps VRAM flat
 max_new_tokens: 512
 rollout_temperature: 1.0    # sampling temp; chosen by temp sweep (best pass@4 on SFT)
