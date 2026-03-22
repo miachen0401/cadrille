@@ -265,8 +265,16 @@ def _reward_worker_run(
     code_str: str,
     gt_mesh_path: str,
     timeout: float,
+    soft_invalid: float = -1.0,
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Run CadQuery + IoU inside a warm worker process."""
+    """Run CadQuery + IoU inside a warm worker process.
+
+    Failure modes (controlled by soft_invalid):
+      SyntaxError / timeout → returns (None, None)     → caller maps to -1.0
+      Code ran but CQ/mesh failed → returns (soft_invalid, None)
+        soft_invalid=-1.0: same hard penalty (default, backward-compat)
+        soft_invalid=-0.5: softer penalty — code structure existed but shape wrong
+    """
     import signal
     import io
     import warnings
@@ -281,11 +289,13 @@ def _reward_worker_run(
     signal.alarm(max(1, int(timeout) + 2))
     try:
         # Compile first to catch SyntaxErrors/SyntaxWarnings without exec noise.
+        # SyntaxError = model produced completely garbled output → hard penalty.
         try:
             code_obj = compile(code_str, '<string>', 'exec')
         except SyntaxError:
             signal.alarm(0)
             return None, None
+        # Code is syntactically valid — any failure from here gets soft_invalid.
         g = {}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -321,10 +331,12 @@ def _reward_worker_run(
         except Exception:
             pass
         signal.alarm(0)
-        return iou, None
+        # iou=None means mesh existed but boolean failed → still better than syntax error
+        return (iou if iou is not None else soft_invalid), None
     except Exception:
         signal.alarm(0)
-        return None, None
+        # Runtime CQ error (e.g. invalid operation) → soft_invalid
+        return soft_invalid, None
 
 
 def shutdown_pools() -> None:
@@ -607,6 +619,7 @@ def compute_rewards_parallel(
     gt_paths: List[str],
     workers: int = 4,
     timeout: float = 10.0,
+    soft_invalid: float = -1.0,
 ) -> List[float]:
     """Compute rewards for multiple codes in parallel.
 
@@ -615,23 +628,33 @@ def compute_rewards_parallel(
     Falls back to ThreadPoolExecutor + fresh subprocesses if pool is unavailable
     or if a worker crashes (BrokenProcessPool). Automatically restarts the pool
     after a crash so future batches are warm again.
+
+    Args:
+        soft_invalid: Reward for code that is syntactically valid but fails at
+            CadQuery build/mesh level.  Default -1.0 (backward-compat).
+            Set to e.g. -0.5 to give partial credit for "almost valid" code.
     """
     from concurrent.futures.process import BrokenProcessPool
 
     assert len(codes) == len(gt_paths), "codes and gt_paths must have the same length"
 
+    def _to_reward(iou: Optional[float]) -> float:
+        if iou is None:
+            return -1.0          # SyntaxError / timeout — hard penalty
+        return float(iou)        # IoU ∈ [0,1] on success; soft_invalid < 0 on CQ failure
+
     global _reward_pool
     if _reward_pool is not None:
         try:
             futures = [
-                _reward_pool.submit(_reward_worker_run, code, path, timeout)
+                _reward_pool.submit(_reward_worker_run, code, path, timeout, soft_invalid)
                 for code, path in zip(codes, gt_paths)
             ]
             results = []
             for f in futures:
                 try:
                     iou, _ = f.result(timeout=timeout + 5)
-                    results.append(-1.0 if iou is None else max(0.0, float(iou)))
+                    results.append(_to_reward(iou))
                 except BrokenProcessPool:
                     raise  # bubble up to outer handler
                 except Exception:

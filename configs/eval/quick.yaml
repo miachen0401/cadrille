@@ -1,0 +1,49 @@
+# Quick sanity-check eval — 100 samples, img+pc, deepcad only.
+# Tuned for RTX 4080 SUPER (16 GB). ~15 min.
+#
+# Usage:
+#   python3 -m eval.runner configs/eval/quick.yaml
+
+tag: quick
+
+checkpoints:
+  - path: checkpoints/cadrille-sft
+    label: "SFT"
+  - path: checkpoints/cadrille-rl
+    label: "RL-official"
+
+datasets:
+  deepcad:
+    path: data/deepcad_test_mesh
+    n_samples: 100
+
+modalities: [img, pc]
+max_new_tokens: 768
+base_model: Qwen/Qwen2-VL-2B-Instruct
+
+resources:
+  batch_size_img: 4      # 4080: img uses ~2.5GB per item in batch
+  batch_size_pc: 16      # pc much lighter on VRAM
+  score_workers: 4       # CadQuery subprocesses; leave ≥2 cores free
+  prep_threads_img: 2    # PNG load is IO-bound; 2 is enough
+  prep_threads_pc: 4     # mesh+pointcloud sampling; 4 to stay ahead of GPU
+  queue_size: 32
+  save_code: true
+  save_stl: false        # skip STL for quick eval (saves disk IO)
+
+pass_k:
+  enabled: false
+  k: [1, 5]
+  n_samples: 8
+  temperature: 0.8
+  iou_threshold: 0.95
+
+render:
+  enabled: true
+  n: 10
+  strategy: failures
+  comparison_grid: true
+  comparison_grid_n: 20
+  comparison_grid_cols: 5
+
+out_dir: eval_outputs

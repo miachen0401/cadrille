@@ -113,6 +113,25 @@ def resolve_args(args, cfg: dict) -> dict:
     args.freeze_vision_encoder  = bool(cfg.get('freeze_vision_encoder', False))
     args.seed                   = int(cfg.get('seed', 42))
 
+    # Curriculum learning — progressively expand training difficulty
+    args.curriculum             = bool(cfg.get('curriculum', False))
+    args.curriculum_score_paths = cfg.get('curriculum_score_paths', [
+        './data/mined/deepcad_hard_scores.jsonl',
+        './data/mined/fusion360_hard_scores.jsonl',
+    ])
+    args.curriculum_phase2_step     = int(cfg.get('curriculum_phase2_step', 5000))
+    args.curriculum_phase3_step     = int(cfg.get('curriculum_phase3_step', 15000))
+    args.curriculum_easy_threshold  = float(cfg.get('curriculum_easy_threshold', 0.75))
+    args.curriculum_medium_threshold = float(cfg.get('curriculum_medium_threshold', 0.3))
+
+    # Advantage std normalisation (divide by group std; helps with heterogeneous batches)
+    args.adv_std_norm           = bool(cfg.get('adv_std_norm', False))
+
+    # Soft invalid reward: penalty for code that runs but produces invalid CAD
+    # (separate from SyntaxError/timeout which always get -1.0)
+    # Default -1.0 = backward-compatible (no distinction).
+    args.soft_invalid_reward    = float(cfg.get('soft_invalid_reward', -1.0))
+
     # HuggingFace checkpoint upload (async, background thread)
     args.hf_upload_repo = cfg.get('hf_upload_repo', None)   # e.g. "YourOrg/cadrille-rl"
 

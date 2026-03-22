@@ -5,9 +5,14 @@
 .conda
 .cache
 *.pdf
+*.png
+*.stl
 *.zip
 checkpoints/
 __pycache__
+eval_outputs/
+logs/
+.claude/
 # Datasets — add new datasets here BEFORE downloading
 data/cad-recode-v1.5/
 data/text2cad/
@@ -32,3 +37,4 @@ DeepCAD/
 .bash_history
 .claude/uv.lock
 uv.lock
+data/analysis/

@@ -1,0 +1,60 @@
+# Multi-checkpoint comparison + pass@k.
+# Tuned for H100 (80 GB). Add new checkpoints below.
+#
+# Usage:
+#   python3 -m eval.runner configs/eval/compare.yaml
+#   python3 -m eval.runner configs/eval/compare.yaml --out eval_outputs/0321_compare
+
+tag: compare_0321
+
+checkpoints:
+  - path: checkpoints/cadrille-sft
+    label: "SFT"
+  - path: checkpoints/cadrille-rl
+    label: "RL-official"
+  # New H100 runs (uncomment as downloaded):
+  # - path: checkpoints/rl-s3600-lr2e-5-G16-cppo-0320-0313/checkpoint-90
+  #   label: "rl-0320-lr2e5-s90"
+  # - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0524/checkpoint-360
+  #   label: "rl-0320-lr1e5-s360-a"
+  # - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0531/checkpoint-360
+  #   label: "rl-0320-lr1e5-s360-b"
+
+datasets:
+  deepcad:
+    path: data/deepcad_test_mesh
+    n_samples: 500
+  fusion360:
+    path: data/fusion360_test_mesh
+    n_samples: 200
+
+modalities: [img, pc]
+max_new_tokens: 768
+base_model: Qwen/Qwen2-VL-2B-Instruct
+
+resources:                  # H100 settings
+  batch_size_img: 32
+  batch_size_pc: 64
+  score_workers: 8
+  prep_threads_img: 2
+  prep_threads_pc: 8
+  queue_size: 64
+  save_code: true
+  save_stl: true
+
+pass_k:
+  enabled: true
+  k: [1, 5, 10]
+  n_samples: 16
+  temperature: 0.8
+  iou_threshold: 0.95
+
+render:
+  enabled: true
+  n: 20
+  strategy: failures
+  comparison_grid: true
+  comparison_grid_n: 50
+  comparison_grid_cols: 5
+
+out_dir: eval_outputs

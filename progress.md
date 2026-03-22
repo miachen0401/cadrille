@@ -8,6 +8,41 @@
 
 ---
 
+## Phase 0 — Error Taxonomy (2026-03-21)
+
+### Step 0.1 — Full inference run ✅
+- [x] `tools/analyze_errors.py` 完成，覆盖 8 个 combo (2 models × 2 modalities × 2 datasets)
+- [x] Bug 修复过程：
+  - streaming pipeline 引入 (batch prep + GPU inference 并行)
+  - processor 从 ckpt 目录加载导致 img mode 推理错误 → 改为硬编码 `Qwen/Qwen2-VL-2B-Instruct`
+  - max_new_tokens 从 400 调整为 768 (与 eval_img.py 一致)
+- [x] 全部结果保存在 `data/analysis/{combo}/metadata.jsonl`
+
+### Step 0.2 — IoU distribution analysis ✅
+- [x] 完整统计见 plan.md Eval Results 表格
+- [x] 关键结论：
+  1. RL 同时提升 img 和 pc（全集评估，非小样本）
+  2. RL img/DC 92.7% 已超过论文目标 92.2%
+  3. RL 大幅减少 failure cases（runtime_error 降 18×）
+  4. img > pc after RL on DeepCAD（SFT 时 pc 更好，RL 逆转）
+
+### Step 0.3 — Manual error taxonomy [ ] TODO
+- [ ] 从 IoU < 0.5 的 success cases 各取 ~50 个手动分类
+- [ ] 分类维度：尺寸错/feature数量错/孔位置错/through-blind混淆/对称错/face绑定错/拓扑错
+- [ ] 重点对比 img vs pc failure pattern 差异
+
+### Step 0.4 — SFT vs RL delta analysis ✅ (2026-03-21)
+- [x] 脚本: `tools/analyze_sft_rl_delta.py`，报告: `docs/analysis/sft_rl_delta_0321.md`
+- [x] 关键结论（per case分类: fixed/boosted/stable/regressed/broken）：
+  - deepcad/img: fixed 6.6%, boosted 21.5%, stable 69.4%, regressed 2.3%, broken 0.3% → +7.10pp
+  - deepcad/pc:  fixed 6.0%, boosted 11.8%, stable 74.0%, regressed 6.9%, broken 1.2% → +4.55pp
+  - fusion360/img: fixed 12.0%, boosted 23.8%, stable 59.2%, regressed 4.3%, broken 0.6% → +9.61pp
+  - fusion360/pc:  fixed 11.2%, boosted 17.0%, stable 62.6%, regressed 7.1%, broken 2.0% → +8.35pp
+- [x] 核心模式: fixed >> broken (10-30×)，stable 是主体（60-74%）；RL 主要靠消灭 failure 而非精度提升
+- [x] Error-type 转移: runtime_error → success 128/132 (deepcad img)，zero_iou → success 94/125
+
+---
+
 ## 4080 OOM root-cause 调试 & 修复 (2026-03-14)
 
 ### 背景：bvnmuyho 空跑原因

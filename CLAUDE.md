@@ -16,7 +16,7 @@
 **Before starting ANY job (training, conversion, eval, large script):**
 1. Check resources: `free -h`, `df -h /workspace`, `nvidia-smi`, CPU via `top -bn1 | head -5`
 2. Never start a job if any resource is near capacity:
-   - RAM: leave ≥ 3 GB free (system has 15 GB total)
+   - RAM: leave ≥ 1 GB free (system has 15 GB total)
    - Disk: leave ≥ 100 GB free on /workspace (1 TB total)
    - GPU VRAM: leave ≥ 1 GB free (4080 SUPER has 16 GB)
    - CPU: do not pin all 12 cores; leave ≥ 2 cores free

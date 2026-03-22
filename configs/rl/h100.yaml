@@ -17,8 +17,8 @@ mode: cppo
 #   checkpoint_path: /content/models/cadrille-sft
 checkpoint_path: ./checkpoints/cadrille-sft
 
-# Data — hard-mined examples from Hula0401/mine_CAD (22,970 examples at R_th=0.75)
-# Download via scripts/setup.sh --data
+# Data — hard-mined examples from Hula0401/mine_CAD (6,861 examples at R_th=0.75)
+# Download via scripts/setup.sh --data then Quick Start step 2 in README.
 data_dir: null
 train_modality: img                   # paper: images only — pc training was unstable
 hard_examples_pkl: ./data/mined/combined_hard.pkl
@@ -31,8 +31,8 @@ lr: 1.0e-6                    # paper: 3e-5 @ batch=128/GPU → 1e-6 @ batch=4 (
 # Dr. CPPO official settings
 G: 16
 top_N: 4
-eps_high: 0.1
-eps_low: 0.1
+eps_high: 0.2                 # raised from 0.1 — allow larger policy steps (clip_frac was near 0)
+eps_low: 0.1                  # conservative on negative advantage samples
 entropy_coef: 0.01       # entropy bonus coefficient (loss -= entropy_coef * entropy); counters lazy-code collapse
 batch_updates: 3              # paper: 3 — restored; lr scaled down to compensate
 batch_size: 4
@@ -48,6 +48,21 @@ eval_batch_size: 32
 eval_workers: 24
 eval_timeout: 120.0
 sequential_generation: false  # G=16 batched generation fits in 80 GB with batch_size=4
+
+# Algorithm improvements (all off by default → set true to enable)
+adv_std_norm: false           # normalise advantages by group std (helps heterogeneous batches)
+soft_invalid_reward: -1.0     # -1.0=hard (default); -0.5=softer penalty for CQ runtime errors
+
+# Curriculum learning — progressive difficulty sampling
+# Phase1 (0→phase2_step):   easy-hard (SFT IoU 0.3-0.75) = 13,646 examples
+# Phase2 (phase2_step→ph3): + medium  (SFT IoU 0.3-0.5)  = 19,949 examples
+# Phase3 (phase3_step→end): full      (all 22,970)
+curriculum: false             # set true to enable curriculum; keep false for paper baseline
+curriculum_phase2_step: 5000
+curriculum_phase3_step: 15000
+curriculum_score_paths:
+  - ./data/mined/deepcad_hard_scores.jsonl
+  - ./data/mined/fusion360_hard_scores.jsonl
 
 # DPO (unused)
 beta: 0.3
