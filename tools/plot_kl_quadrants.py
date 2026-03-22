@@ -100,11 +100,11 @@ def smooth(arr, window):
 
 
 def plot_run(ax, steps, pp, np_, pn, nn, label, smooth_window=1):
-    pp  = smooth(pp,  smooth_window)
-    np_ = smooth(np_, smooth_window)
-    pn  = smooth(pn,  smooth_window)
-    nn  = smooth(nn,  smooth_window)
-    total = pp + np_ + pn + nn
+    pp  = np.exp(smooth(pp,  smooth_window))
+    np_ = np.exp(smooth(np_, smooth_window))
+    pn  = np.exp(smooth(pn,  smooth_window))
+    nn  = np.exp(smooth(nn,  smooth_window))
+    total = np.sum(np.array([pp, np_, pn, nn]), axis=0)
     total = np.where(total == 0, 1, total)
     pp, np_, pn, nn = pp/total*100, np_/total*100, pn/total*100, nn/total*100
     ax.stackplot(steps, pp, np_, pn, nn,

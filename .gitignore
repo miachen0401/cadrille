@@ -14,6 +14,7 @@ eval_outputs/
 logs/
 .claude/
 # Datasets — add new datasets here BEFORE downloading
+data/
 data/cad-recode-v1.5/
 data/text2cad/
 data/deepcad_test_mesh/

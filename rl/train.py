@@ -48,7 +48,7 @@ from transformers import AutoProcessor
 
 from cadrille import Cadrille
 from rl.config import load_yaml, resolve_args
-from rl.dataset import MeshDataset, RLDataset, CurriculumRLDataset, DPODataset
+from rl.dataset import MeshDataset, RLDataset, DPODataset
 from rl.eval import load_val_examples
 from rl.algorithms.cppo import train_cppo
 from rl.algorithms.dpo import train_dpo
@@ -471,18 +471,7 @@ def train(args, cfg_to_save=None):
                           f'({len(dataset) - len(dataset2)} + {len(dataset2)})')
         elif args.hard_examples_pkl:
             modality = getattr(args, 'train_modality', 'img')
-            if getattr(args, 'curriculum', False):
-                dataset = CurriculumRLDataset(
-                    args.hard_examples_pkl,
-                    score_paths=args.curriculum_score_paths,
-                    phase2_step=args.curriculum_phase2_step,
-                    phase3_step=args.curriculum_phase3_step,
-                    easy_threshold=args.curriculum_easy_threshold,
-                    medium_threshold=args.curriculum_medium_threshold,
-                    modality=modality,
-                )
-            else:
-                dataset = RLDataset(args.hard_examples_pkl, modality=modality)
+            dataset = RLDataset(args.hard_examples_pkl, modality=modality)
         else:
             raise ValueError('Provide data_dir (real meshes) or hard_examples_pkl in config')
 
