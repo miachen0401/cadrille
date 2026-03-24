@@ -8,6 +8,49 @@
 
 ---
 
+## Phase 1 — Action-Conditioned CAD Repair (2026-03-23)
+
+### Step 1 — Zero-shot feasibility (done)
+- [x] `tools/repair_feasibility.py`: 3 conditions (A/B/C), 100 wrong_primitive cases
+- [x] Result: all conditions valid_rate=2-3%, mean ΔIoU≈-0.76 — zero-shot fails
+- [x] Root cause: model treats `Broken code:` as context to continue, not task input
+- [x] Conclusion: repair requires fine-tuning, not prompting
+
+### Option 2 — from-scratch ceiling check (done)
+- [x] Confirmed: from-scratch generation (cadrille-rl baseline) achieves mean IoU=0.68 on these 100 cases
+- [x] 87% of cases have IoU > 0.5 from scratch → shapes are learnable, just wrong primitive family
+- [x] Conclusion: repair task has clear signal; ceiling exists → Step 2 justified
+
+### Step 2 — Synthetic LoRA SFT (done)
+- [x] `tools/gen_repair_data.py`: 400 pairs from 200 GT programs, 2 corruption types (type1+type2)
+  - 360 train + 40 val in `data/repair_sft/train.jsonl` + `val.jsonl`
+- [x] `tools/train_repair_lora.py`: LoRA r=16 α=32, 10 epochs, lr=1e-4, grad_accum=8
+  - Best: epoch 5, val_loss=0.1798 → `checkpoints/repair-lora/best`
+  - Training converged: val_loss 0.247→0.180 (ep5)→0.271 (ep10), overfitting from ep6
+
+### Step 3 — Transfer eval on real wrong_primitive cases (done)
+- [x] `tools/eval_repair_lora.py`: 100 real wrong_primitive cases
+- [x] Results (with trailing `)` post-processing fix):
+  - **Valid rate: 76/100 = 76%** (passes ≥70% threshold) ← but only after fixing `)` bug
+  - **Mean ΔIoU: -0.53** (FAILS — need > 0)
+  - **% ΔIoU > 0.05: 0%** (FAILS — need ≥ 20%)
+- [x] Failure mode: model generates syntactically-valid but geometry-incorrect codes
+  - Generates tiny placeholder shapes (1×1 rects, 1-unit extrusions) regardless of visual input
+  - Systematic trailing `)` bug: model appends extra `)` at EOS boundary (overfitting artifact)
+- [x] Diagnosis:
+  1. 360 training pairs too small for shape-conditioned generation
+  2. Model learned *structure* of sketch+extrude but NOT *content* (dimensions from image)
+  3. Simple 2-type corruption → mode collapse: model outputs generic short codes
+  4. Distribution mismatch: training uses high-IoU (≥0.95) synthetic GT; real cases are harder
+
+### Next steps
+- [ ] Option A: scale up training data (2000+ pairs, more corruption types, harder cases)
+- [ ] Option B: add a geometry-parsing step (extract bbox from image, then fill template)
+- [ ] Option C: pivot to a different failure family where repair is easier (e.g., dimension errors)
+- [ ] Fix trailing `)` bug in eval script before next run
+
+---
+
 ## Phase 0 — Error Taxonomy (2026-03-21)
 
 ### Step 0.1 — Full inference run ✅

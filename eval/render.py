@@ -65,12 +65,6 @@ def copy_gt_renders(case_ids: list[str], dataset_path: Path, gt_render_dir: Path
 
 
 def render_pred_stls(case_ids: list[str], combo_dir: Path, pred_render_dir: Path) -> int:
-    import sys
-    import tempfile
-
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from rl.dataset import render_stl_to_png
-
     pred_render_dir.mkdir(parents=True, exist_ok=True)
     n_rendered = 0
     for cid in case_ids:
@@ -112,8 +106,6 @@ def _render_stl_to_png(stl_path: Path, out_png: Path) -> None:
         tmp_stl = f.name
 
     try:
-        from rl.dataset import render_img as render_stl
-        # NOTE: render_img is used indirectly via _render_stl_direct
         _render_stl_direct(tmp_stl, str(out_png))
     finally:
         import os

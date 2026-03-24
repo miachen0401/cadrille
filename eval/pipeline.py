@@ -9,6 +9,13 @@ Core design (same as tools/analyze_errors.py, generalised):
 
 Entry point:
     run_combo(model, processor, cfg, ckpt_label, ds_name, ds_cfg, modality, out_dir)
+
+Gotchas:
+  - collate() must be called with eval=True (not is_train) for inference;
+    eval=False omits add_generation_prompt and includes the answer label (train mode).
+  - eos_token_id must be model.config.eos_token_id (<|im_end|>, 151645), NOT
+    model.config.video_token_id (151656). Using the video token as EOS causes the
+    model to never stop, producing repetitive garbled output and 0% IoU on all cases.
 """
 from __future__ import annotations
 
@@ -351,7 +358,7 @@ def run_combo(
                 for it in to_infer
             ]
 
-            b = collate(collate_items, processor, _N_POINTS, is_train=True)
+            b = collate(collate_items, processor, _N_POINTS, eval=True)
 
             with torch.no_grad():
                 out_ids = model.generate(
@@ -367,7 +374,7 @@ def run_combo(
                     temperature=None,
                     top_p=None,
                     top_k=None,
-                    eos_token_id=[[model.config.video_token_id]],
+                    eos_token_id=model.config.eos_token_id,
                 )
 
             prompt_len = b['input_ids'].shape[1]

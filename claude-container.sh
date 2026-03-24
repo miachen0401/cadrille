@@ -38,6 +38,8 @@ if ! docker image inspect "$IMAGE" &>/dev/null; then
     docker build -t "$IMAGE" -f Dockerfile.claude .
 fi
 
+mkdir -p "${HOME}/.claude-npm-global"
+
 exec docker run --rm -it \
     --gpus all \
     --user "$(id -u):$(id -g)" \
@@ -48,6 +50,7 @@ exec docker run --rm -it \
     -v "$(pwd):/workspace" \
     -v "${HOME}/.claude.json:/workspace/.claude.json" \
     -v "${HOME}/.claude:/workspace/.claude" \
+    -v "${HOME}/.claude-npm-global:/npm-global" \
     -w /workspace \
     "${IMAGE}" \
     claude --dangerously-skip-permissions "$@"

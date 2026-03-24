@@ -91,9 +91,8 @@ def run_passk(
 
 def _build_examples(stl_paths: list[str], modality: str) -> list[dict]:
     """Build example dicts for eval_passk (pc or img mode)."""
-    import trimesh
-    sys.path_insert = lambda *a: None  # quiet import
     import sys
+    import trimesh
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from dataset import mesh_to_point_cloud
     from rl.dataset import render_img

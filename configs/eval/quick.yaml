@@ -4,13 +4,19 @@
 # Usage:
 #   python3 -m eval.runner configs/eval/quick.yaml
 
-tag: quick
+tag: quick_0324
 
 checkpoints:
   - path: checkpoints/cadrille-sft
     label: "SFT"
   - path: checkpoints/cadrille-rl
     label: "RL-official"
+  - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0524/checkpoint-930
+    label: "rl-0320-lr1e5-s930-a"
+  - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0531/checkpoint-720
+    label: "rl-0320-lr1e5-s720-b"
+  - path: checkpoints/rl-s3600-lr3e-5-G16-cppo-0321-0209/checkpoint-180
+    label: "rl-0321-lr3e5-s180"
 
 datasets:
   deepcad:
@@ -39,7 +45,7 @@ pass_k:
   iou_threshold: 0.95
 
 render:
-  enabled: true
+  enabled: false
   n: 10
   strategy: failures
   comparison_grid: true

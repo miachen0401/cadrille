@@ -124,6 +124,37 @@ Both DeepCAD and Fusion360 test sets, 300 random samples each.
 
 ---
 
+## Quick Eval History (N=100, DeepCAD, `eval/` framework)
+
+All checkpoints evaluated on the **same 100 STLs** from DeepCAD test set using `eval/runner.py` (batch_size_img=4, batch_size_pc=16, greedy, max_new_tokens=768). Note: N=100 variance is ±1–2pp; different runs use different 100-sample draws.
+
+### 2026-03-24 (tag: `quick_0324`)
+
+| Checkpoint | DC/img | DC/pc | fail% img | fail% pc | Notes |
+|---|---|---|---|---|---|
+| `cadrille-sft` | 86.22% | 88.83% | 2.0% | 6.0% | Official SFT baseline |
+| `cadrille-rl` (official) | **92.66%** | **91.13%** | 2.0% | 1.0% | Official RL (paper target) |
+| `rl-0320-lr1e-5-s930-a` | 88.85% | 90.91% | 2.0% | 3.0% | H100, lr=1e-5, step=930, **no adv_std_norm** |
+| `rl-0320-lr1e-5-s720-b` | 88.54% | **92.65%** | 3.0% | 5.0% | H100, lr=1e-5, step=720, **adv_std_norm** |
+| `rl-0321-lr3e-5-s180` | 87.71% | 89.20% | 3.0% | 2.0% | H100, lr=3e-5, step=180 |
+
+### 2026-03-24 (tag: `quick`, step=840 for seed A)
+
+| Checkpoint | DC/img | DC/pc | fail% img | fail% pc | Notes |
+|---|---|---|---|---|---|
+| `cadrille-sft` | 86.22% | 90.89% | 2.0% | 5.0% | Official SFT baseline |
+| `cadrille-rl` (official) | **92.66%** | **90.41%** | 2.0% | 1.0% | Official RL (paper target) |
+| `rl-0320-lr1e-5-s840-a` | **90.01%** | 90.88% | 3.0% | 3.0% | H100, lr=1e-5, step=840, **no adv_std_norm** |
+| `rl-0320-lr1e-5-s720-b` | 88.54% | **92.17%** | 3.0% | 7.0% | H100, lr=1e-5, step=720, **adv_std_norm** |
+| `rl-0321-lr3e-5-s180` | 87.71% | 89.86% | 3.0% | 2.0% | H100, lr=3e-5, step=180 |
+
+**Takeaways:**
+- **no adv_std_norm**（0524）img: 90.01% (s840) → 88.85% (s930)，波动在 N=100 方差范围内（±1–2pp）
+- **adv_std_norm**（0531）pc: **92.65%**，持续超 official-rl（91.13%）；两者 img 相近
+- `rl-0321-lr3e-5-s180` img 稳定在 87.7%，lr=3e-5 后期无明显增益
+
+---
+
 ## Same-Config Comparison (2026-03-21, N=50, `eval/` framework)
 
 All checkpoints evaluated on the **same 50 STLs per dataset** using `eval/runner.py` (configs/eval/quick.yaml variant: batch_size_img=4, batch_size_pc=16, greedy, max_new_tokens=768, flash_attn2).
@@ -137,6 +168,9 @@ Directly comparable numbers — no dataset/sampling differences.
 | `rl-0320-lr1e-5-s360-a` | 85.04% | 87.76% | 77.09% | 79.08% | H100, lr=1e-5, step=360, seed A |
 | `rl-0320-lr1e-5-s360-b` | 86.16% | 83.53% | 77.32% | 81.52% | H100, lr=1e-5, step=360, seed B |
 | `rl-0321-lr3e-5-s60` | 84.11% | 83.05% | 78.22% | 82.65% | H100, lr=3e-5, step=60 (early) |
+| `rl-0320-lr1e-5-s450-a` | **89.60%** | **89.67%** | 79.42% | 78.44% | H100, lr=1e-5, step=450, seed A |
+| `rl-0320-lr1e-5-s450-b` | 89.31% | **90.34%** | 77.94% | 81.42% | H100, lr=1e-5, step=450, seed B |
+| `rl-0321-lr3e-5-s120` | 88.06% | 90.06% | 78.89% | 79.03% | H100, lr=3e-5, step=120 |
 
 **Notes:**
 - `rl-0320-lr2e-5-s90` degradation is **primarily caused by training temperature=0.3** (all other runs trained at temperature=1.0), not just the higher lr or low step count. Lower temperature during rollout generation reduces policy diversity and leads to faster entropy collapse.
@@ -152,9 +186,9 @@ Directly comparable numbers — no dataset/sampling differences.
 | `rl-s50k-lr1e-5-G4-cppo-0311-0259` | `4080.yaml` | RTX 4080S | 1e-5 | 4 | s50k | 4500–9000 | — | ❌ Done (overtrained) |
 | `rl-s50k-lr3.2e-6-G16-cppo-0318-0205` | A100 | A100 | 3.2e-6 | 16 | s50k | 900–1200 | — | ❌ Done |
 | `rl-s3600-lr2e-5-G16-cppo-0320-0313` | H100 | H100 | 2e-5 | 16 | s3600 | 90 | — | ❌ Crashed at 90 steps; **training temp=0.3** (bug — others use 1.0) |
-| `rl-s3600-lr1e-5-G16-cppo-0320-0524` | H100 | H100 | 1e-5 | 16 | s3600 | 360 | — | ❌ Done |
-| `rl-s3600-lr1e-5-G16-cppo-0320-0531` | H100 | H100 | 1e-5 | 16 | s3600 | 360 | 25fgf79l | ❌ Done |
-| `rl-s3600-lr3e-5-G16-cppo-0321-0209` | H100 | H100 | 3e-5 | 16 | s3600 | 60 | — | ❌ Early ckpt only |
+| `rl-s3600-lr1e-5-G16-cppo-0320-0524` | H100 | H100 | 1e-5 | 16 | s3600 | **930** | — | 🔄 In progress — **no adv_std_norm** |
+| `rl-s3600-lr1e-5-G16-cppo-0320-0531` | H100 | H100 | 1e-5 | 16 | s3600 | **720** | 25fgf79l | 🔄 In progress — **adv_std_norm** |
+| `rl-s3600-lr3e-5-G16-cppo-0321-0209` | H100 | H100 | 3e-5 | 16 | s3600 | **180** | — | 🔄 In progress |
 
 ---
 

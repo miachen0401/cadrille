@@ -5,6 +5,7 @@
 - Always use **uv** for Python package management. Never use `pip install` or `conda install` directly.
 - Run scripts with `uv run python ...` or activate the uv environment. The base conda env at `/opt/conda` is read-only.
 - Install packages with `uv pip install` or declare them in `pyproject.toml` and run `uv sync`.
+- 永远在回复和思考的时候说中文或者英语 不要说日语和韩语 
 
 ## Workflow
 

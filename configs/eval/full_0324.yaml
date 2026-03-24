@@ -1,0 +1,45 @@
+# Full test-set eval — 3 new checkpoints only (SFT/RL-official already in eval_results).
+# 4080 SUPER settings. Estimated ~10-12h.
+#
+# Usage:
+#   python3 -m eval.runner configs/eval/full_0324.yaml
+
+tag: full_0324
+
+checkpoints:
+  - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0524/checkpoint-930
+    label: "rl-0320-lr1e5-s930-noadvstd"
+  - path: checkpoints/rl-s3600-lr1e-5-G16-cppo-0320-0531/checkpoint-720
+    label: "rl-0320-lr1e5-s720-advstd"
+  - path: checkpoints/rl-s3600-lr3e-5-G16-cppo-0321-0209/checkpoint-180
+    label: "rl-0321-lr3e5-s180"
+
+datasets:
+  deepcad:
+    path: data/deepcad_test_mesh
+    n_samples: null         # full (8046 STLs)
+  fusion360:
+    path: data/fusion360_test_mesh
+    n_samples: null         # full (1725 STLs)
+
+modalities: [img, pc]
+max_new_tokens: 768
+base_model: Qwen/Qwen2-VL-2B-Instruct
+
+resources:
+  batch_size_img: 4
+  batch_size_pc: 16
+  score_workers: 4
+  prep_threads_img: 2
+  prep_threads_pc: 4
+  queue_size: 32
+  save_code: true
+  save_stl: false
+
+pass_k:
+  enabled: false
+
+render:
+  enabled: false
+
+out_dir: eval_outputs
