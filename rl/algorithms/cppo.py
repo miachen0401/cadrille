@@ -467,7 +467,8 @@ def cppo_step(model, optimizer, items, processor, args,
 
     t_rew = time.perf_counter()
     all_rewards = compute_rewards_parallel(all_code_strings, all_gt_paths,
-                                           workers=args.reward_workers)
+                                           workers=args.reward_workers,
+                                           soft_invalid=float(getattr(args, 'soft_invalid_reward', -1.0)))
     rew_seconds = time.perf_counter() - t_rew
 
     # ------------------------------------------------------------------
@@ -975,6 +976,17 @@ def train_cppo(model, optimizer, dataset, processor,
             rank_indices    = indices
             _start_in_epoch = 0
         epoch += 1
+        # Curriculum: update active pool at epoch boundaries (cheap operation).
+        if hasattr(dataset, 'set_step'):
+            phase = dataset.set_step(step)
+            # Rebuild indices for the (possibly expanded) pool each epoch.
+            indices = list(range(len(dataset)))
+            if not is_distributed:
+                rank_indices = indices
+                rng.shuffle(rank_indices)
+                _start_in_epoch = 0
+            if rank == 0:
+                print(f'[curriculum] step={step} phase={phase} pool={len(dataset)}')
         for start in range(_start_in_epoch, len(rank_indices), batch_size):
             if step >= args.max_steps:
                 break
