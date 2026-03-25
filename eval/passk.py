@@ -113,12 +113,9 @@ def _build_examples(stl_paths: list[str], modality: str) -> list[dict]:
                     "_modality": "pc",
                 })
             else:  # img
-                render_png = Path(gt_path).parent / f"{stem}_render.png"
-                if not render_png.exists():
-                    continue
-                video = render_img(str(render_png))
+                render_result = render_img(gt_path)
                 examples.append({
-                    "video": video,
+                    "video": render_result["video"],
                     "description": "Generate cadquery code",
                     "file_name": stem,
                     "gt_mesh_path": gt_path,

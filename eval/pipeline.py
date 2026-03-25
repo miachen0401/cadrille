@@ -101,42 +101,38 @@ def _score_case(code: str, gt_mesh_path: str, timeout: float = 32.0) -> dict:
     _SCORE_PY = Path(__file__).parent.parent / 'rl' / 'reward.py'
     # unused — kept for reference
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            '-c',
-            (
-                f"\nimport sys, json\n"
-                f"sys.path.insert(0, '{Path(__file__).parent.parent}')\n"
-                f"from rl.reward import compute_metrics\n"
-                f"code = {repr(code)}\n"
-                f"iou_reward, cd = compute_metrics(code, {repr(gt_mesh_path)}, timeout={timeout})\n"
-                f"if iou_reward <= -2.0:\n"
-                f"    print(json.dumps({{'error_type':'syntax_error','iou':None,'cd':None}}))\n"
-                f"elif iou_reward <= -1.0:\n"
-                f"    print(json.dumps({{'error_type':'runtime_error','iou':None,'cd':None}}))\n"
-                f"elif iou_reward == 0.0:\n"
-                f"    print(json.dumps({{'error_type':'zero_iou','iou':0.0,'cd':cd}}))\n"
-                f"else:\n"
-                f"    print(json.dumps({{'error_type':'success','iou':iou_reward,'cd':cd}}))\n"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout + 10,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                '-c',
+                (
+                    f"\nimport sys, json\n"
+                    f"sys.path.insert(0, '{Path(__file__).parent.parent}')\n"
+                    f"from rl.reward import compute_metrics\n"
+                    f"code = {repr(code)}\n"
+                    f"iou_reward, cd = compute_metrics(code, {repr(gt_mesh_path)}, timeout={timeout})\n"
+                    f"if iou_reward <= -2.0:\n"
+                    f"    print(json.dumps({{'error_type':'syntax_error','iou':None,'cd':None}}))\n"
+                    f"elif iou_reward <= -1.0:\n"
+                    f"    print(json.dumps({{'error_type':'runtime_error','iou':None,'cd':None}}))\n"
+                    f"elif iou_reward == 0.0:\n"
+                    f"    print(json.dumps({{'error_type':'zero_iou','iou':0.0,'cd':cd}}))\n"
+                    f"else:\n"
+                    f"    print(json.dumps({{'error_type':'success','iou':iou_reward,'cd':cd}}))\n"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 10,
+        )
+    except subprocess.TimeoutExpired:
+        return {'error_type': 'timeout', 'iou': None, 'cd': None}
+    except Exception:
+        return {'error_type': 'runtime_error', 'iou': None, 'cd': None}
 
     if result.returncode == 0 and result.stdout.strip():
         return json.loads(result.stdout.strip().splitlines()[-1])
-
-    if False:
-        pass
-    try:
-        pass
-    except subprocess.TimeoutExpired:
-        return {'error_type': 'timeout', 'iou': None, 'cd': None}
-    except Exception as e:
-        pass
 
     return {'error_type': 'runtime_error', 'iou': None, 'cd': None}
 

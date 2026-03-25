@@ -210,7 +210,7 @@ def _render_report(results: dict, run_dir: Path, cfg_yaml: str) -> str:
                     v = pk.get('pass_at_k', {}).get(str(k))
                     k_cells.append(f'{v:.3f}' if v is not None else '—')
                 mean_iou = pk.get('mean_iou')
-                if mean_iou:
+                if mean_iou is not None:
                     lines.append(
                         f'| {ckpt} | {ds}/{mod} | {thr} | {ns} | '
                         + ' | '.join(k_cells)
