@@ -1,0 +1,13 @@
+{
+        "exclude": [
+          "**/__pycache__",
+          "**/.git",
+          "**/.venv",
+          "data",
+          "runs",
+          "ref_data",
+          "eval_outputs",
+          "wandb",
+          "model"
+        ]
+      }

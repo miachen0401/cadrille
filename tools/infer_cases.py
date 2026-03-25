@@ -272,11 +272,17 @@ def main():
                 print(f'  {line}')
             samples.append(result)
 
-        if args.n > 1 and not args.no_score:
+        if not args.no_score:
             ious = [s['iou'] for s in samples if s['iou'] is not None]
-            if ious:
+            pos = [s for s in samples if s.get('iou') is not None and s['iou'] > 0]
+            if ious and args.n > 1:
                 print(f'\n  → best={max(ious):.4f}  mean={sum(ious)/len(ious):.4f}  '
                       f'valid={len(ious)}/{args.n}')
+            if pos:
+                max_len_pos = max(len(s['code']) for s in pos)
+                avg_len_iou = sum(len(s['code']) * s['iou'] for s in pos) / len(pos)
+                print(f'     max_len(IoU>0)={max_len_pos}  '
+                      f'avg(len×IoU)={avg_len_iou:.2f}')
 
         all_results.append({'case_id': case_id, 'stl': stl, 'samples': samples})
 
@@ -289,9 +295,15 @@ def main():
             if not ious:
                 print(f'  {r["case_id"]:40s}  no valid results')
             else:
+                pos = [s for s in r['samples'] if s.get('iou') is not None and s['iou'] > 0]
+                extra = ''
+                if pos:
+                    max_len_pos = max(len(s['code']) for s in pos)
+                    avg_len_iou = sum(len(s['code']) * s['iou'] for s in pos) / len(pos)
+                    extra = f'  max_len(IoU>0)={max_len_pos}  avg(len×IoU)={avg_len_iou:.2f}'
                 print(f'  {r["case_id"]:40s}  '
                       f'best={max(ious):.4f}  mean={sum(ious)/len(ious):.4f}  '
-                      f'valid={len(ious)}/{len(r["samples"])}')
+                      f'valid={len(ious)}/{len(r["samples"])}{extra}')
         print('=' * 64)
 
     # ── save to file ──────────────────────────────────────────────────────────

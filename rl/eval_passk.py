@@ -139,8 +139,11 @@ def _generate_one_batch(model, chunk: list, processor,
     batch = collate(collate_items, processor=processor, n_points=256, eval=True)
     prompt_len = batch['input_ids'].shape[1]
 
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=True,
-                      temperature=temperature, top_p=1.0, top_k=50)
+    if temperature == 0:
+        gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+    else:
+        gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=True,
+                          temperature=temperature, top_p=1.0, top_k=50)
 
     if not sequential:
         try:

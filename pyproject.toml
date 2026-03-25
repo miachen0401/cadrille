@@ -20,7 +20,6 @@ dependencies = [
     "cadquery-ocp==7.7.2",
     "trimesh==4.5.3",
     "manifold3d==3.0.0",
-    "open3d",
     "scipy==1.14.1",
     "scikit-image",
     # Utilities

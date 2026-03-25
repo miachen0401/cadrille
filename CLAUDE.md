@@ -5,6 +5,7 @@
 - Always use **uv** for Python package management. Never use `pip install` or `conda install` directly.
 - Run scripts with `uv run python ...` or activate the uv environment. The base conda env at `/opt/conda` is read-only.
 - Install packages with `uv pip install` or declare them in `pyproject.toml` and run `uv sync`.
+- 永远在回复和思考的时候说中文或者英语 不要说日语和韩语 
 
 ## Workflow
 
@@ -16,7 +17,7 @@
 **Before starting ANY job (training, conversion, eval, large script):**
 1. Check resources: `free -h`, `df -h /workspace`, `nvidia-smi`, CPU via `top -bn1 | head -5`
 2. Never start a job if any resource is near capacity:
-   - RAM: leave ≥ 3 GB free (system has 15 GB total)
+   - RAM: leave ≥ 1 GB free (system has 15 GB total)
    - Disk: leave ≥ 100 GB free on /workspace (1 TB total)
    - GPU VRAM: leave ≥ 1 GB free (4080 SUPER has 16 GB)
    - CPU: do not pin all 12 cores; leave ≥ 2 cores free

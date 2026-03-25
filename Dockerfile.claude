@@ -32,7 +32,8 @@ COPY pyproject.toml .
 RUN uv pip install --system -e . --no-build-isolation
 
 # pytorch3d: git-only; --no-deps avoids re-resolving torch/numpy already present
-RUN uv pip install --system --no-deps \
+# --no-build-isolation lets setup.py find the already-installed torch
+RUN uv pip install --system --no-deps --no-build-isolation \
     "git+https://github.com/facebookresearch/pytorch3d@06a76ef8ddd00b6c889768dfc990ae8cb07c6f2f"
 
 # cadquery: git version has fixes not yet on PyPI
@@ -42,11 +43,14 @@ RUN uv pip install --system \
 # flash-attn: separate step — needs torch CUDA headers visible at build time
 RUN uv pip install --system flash-attn==2.7.2.post1 --no-build-isolation
 
-# Node.js 20 + Claude Code
+# Node.js 20 + Claude Code — baked into image as fallback;
+# auto-updates persist via the /npm-global volume mount at runtime.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm config set prefix /npm-global \
+    && npm install -g @anthropic-ai/claude-code
+ENV PATH="/npm-global/bin:$PATH"
 
 WORKDIR /workspace
 CMD ["claude", "--dangerously-skip-permissions"]
