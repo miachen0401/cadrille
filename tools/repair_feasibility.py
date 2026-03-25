@@ -165,7 +165,8 @@ def score_code(code: str, gt_path: str) -> dict:
         proc = subprocess.run(
             [sys.executable, _get_worker()],
             input=payload, capture_output=True, text=True, timeout=50,
-            env={**os.environ, 'LD_LIBRARY_PATH': '/workspace/.local/lib'})
+            env={**os.environ,
+                 'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', '/workspace/.local/lib')})
         if proc.stdout.strip():
             return json.loads(proc.stdout.strip())
         return {'iou': None, 'cd': None, 'error_type': 'runtime_error',
