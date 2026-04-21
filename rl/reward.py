@@ -95,7 +95,10 @@ _WORKER_SCRIPT = textwrap.dedent('''\
 
         g = {}
         exec(code_str, g)
-        compound = g['r'].val()
+        _res = g.get('r') or g.get('result')
+        if _res is None:
+            raise KeyError("no 'r' or 'result' variable in generated code")
+        compound = _res.val()
 
         # Tessellate to mesh
         vertices, faces = compound.tessellate(0.001, 0.1)
@@ -300,7 +303,10 @@ def _reward_worker_run(
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             exec(code_obj, g)
-        compound = g['r'].val()
+        _res = g.get('r') or g.get('result')
+        if _res is None:
+            raise KeyError("no 'r' or 'result' variable in generated code")
+        compound = _res.val()
         vertices, faces = compound.tessellate(0.001, 0.1)
         pred_mesh = trimesh.Trimesh([(v.x, v.y, v.z) for v in vertices], faces)
         assert len(pred_mesh.faces) > 2
@@ -436,7 +442,10 @@ def _eval_worker_run(
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             exec(code_obj, g)
-        compound = g['r'].val()
+        _res = g.get('r') or g.get('result')
+        if _res is None:
+            raise KeyError("no 'r' or 'result' variable in generated code")
+        compound = _res.val()
 
         vertices, faces = compound.tessellate(0.001, 0.1)
         pred_mesh = trimesh.Trimesh([(v.x, v.y, v.z) for v in vertices], faces)

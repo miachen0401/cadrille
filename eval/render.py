@@ -65,6 +65,7 @@ def copy_gt_renders(case_ids: list[str], dataset_path: Path, gt_render_dir: Path
 
 
 def render_pred_stls(case_ids: list[str], combo_dir: Path, pred_render_dir: Path) -> int:
+    from rl.dataset import render_img
     pred_render_dir.mkdir(parents=True, exist_ok=True)
     n_rendered = 0
     for cid in case_ids:
@@ -73,86 +74,9 @@ def render_pred_stls(case_ids: list[str], combo_dir: Path, pred_render_dir: Path
         if dst.exists() or not stl_path.exists():
             continue
         try:
-            _render_stl_to_png(stl_path, dst)
+            result = render_img(str(stl_path))
+            result['video'][0].save(str(dst))
             n_rendered += 1
-        except Exception as e:
+        except Exception:
             continue
     return n_rendered
-
-
-def _render_stl_to_png(stl_path: Path, out_png: Path) -> None:
-    import tempfile
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-
-    import trimesh
-    import numpy as np
-
-    mesh = trimesh.load(str(stl_path))
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f'Not a valid mesh: {stl_path}')
-
-    bounds = mesh.bounds
-    scale = (bounds[1] - bounds[0]).max()
-    if scale < 1e-9:
-        raise ValueError('Degenerate mesh')
-
-    mesh.apply_translation(-bounds[0])
-    mesh.apply_scale(1.0 / scale)
-
-    with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as f:
-        mesh.export(f.name)
-        tmp_stl = f.name
-
-    try:
-        _render_stl_direct(tmp_stl, str(out_png))
-    finally:
-        import os
-        os.unlink(tmp_stl)
-
-
-def _render_stl_direct(stl_path: str, out_png: str) -> None:
-    import open3d as o3d
-    import numpy as np
-    from PIL import Image
-
-    mesh = o3d.io.read_triangle_mesh(stl_path)
-    mesh.compute_vertex_normals()
-
-    verts = np.asarray(mesh.vertices)
-    mn, mx = verts.min(0), verts.max(0)
-    scale = (mx - mn).max()
-    if scale < 1e-9:
-        raise ValueError('Degenerate mesh')
-
-    mesh.translate(-mn)
-    mesh.scale(1.0 / scale, center=[0, 0, 0])
-
-    views = [
-        ([2, 2, 2], [0, 0, 0]),
-        ([3, 0, 0], [0, 0, 0]),
-        ([0, 3, 0], [0, 0, 0]),
-        ([0, 0, 3], [0, 0, 0]),
-    ]
-
-    frames = []
-    for eye, center in views:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False, width=256, height=256)
-        vis.add_geometry(mesh)
-        ctr = vis.get_view_control()
-        ctr.set_lookat(center)
-        ctr.set_front(np.array(eye) - np.array(center))
-        ctr.set_up([0, 0, 1])
-        ctr.set_zoom(0.7)
-        vis.poll_events()
-        vis.update_renderer()
-        img = np.asarray(vis.capture_screen_float_buffer(do_render=True))
-        vis.destroy_window()
-        frames.append((img * 255).astype(np.uint8))
-
-    top = np.concatenate([frames[0], frames[1]], axis=1)
-    bot = np.concatenate([frames[2], frames[3]], axis=1)
-    grid = np.concatenate([top, bot], axis=0)
-    Image.fromarray(grid).save(out_png)
