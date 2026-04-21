@@ -10,3 +10,6 @@ Reusable scripts for evaluation and analysis. Each has a full docstring — run 
 | `bench_config.py` | Benchmark RL training throughput across configs. Reports step time, gen/rew/grad breakdown, steps/hr, GPU peak memory. Same model + data used for all configs so results are directly comparable. |
 | `bench_workers.py` | Sweep reward_workers concurrency to find optimal worker count. Generates fresh completions from the SFT model, then times compute_rewards_parallel() at 8/12/16/20/24 workers. Use --skip-generate for fast pool-overhead-only test. |
 | `smoke_eval.py` | Standalone smoke test: run inference on N smallest meshes, report IoU per checkpoint. |
+| `eval_bench.py` | Evaluate Cadrille (SFT or RL) on HF bench track (`Hula0401/test_bench`). Runs model inference, executes GT/gen code, computes IoU+CD. Resume-safe. |
+| `bench_visualize.py` | Visualize bench eval results: GT vs SFT vs RL (or any checkpoints). Renders generated STEP files, compares against GT composite PNG per sample. |
+| `render_singleview_grid.py` | Build single-view contact sheet from 4-view DeepCAD/Fusion360 renders. |
