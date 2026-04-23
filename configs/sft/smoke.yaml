@@ -1,0 +1,29 @@
+# Cadrille SFT — smoke test (600 steps, lr=3e-4, bs=2 acc=4, effective bs=8)
+# Quick sanity check: verifies the training loop runs end-to-end.
+# bf16: false — safe default for WSL2/4080 (bf16=True triggers AMP fp32 copies there).
+#   On A100/H100: bf16: true is fine; change it if running on server hardware.
+# DO NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments — breaks WSL2 GPU overcommit.
+
+data_path: ./data
+mode: pc_img
+use_text: false
+
+max_steps: 600
+batch_size: 2
+accumulation_steps: 4
+learning_rate: 0.0003
+
+bf16: false
+
+dataloader_workers: 4
+log_steps: 10
+save_steps: 600
+eval_steps: 300
+eval_on_start: true
+
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
+wandb_project: cadrille-sft
+# run_name is auto-generated from hyperparameters when not set

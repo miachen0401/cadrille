@@ -1,0 +1,52 @@
+# Secrets / local machine state — never commit
+.env
+.netrc
+.gitconfig
+.bash_history
+.claude/
+.claude.json
+.pytest_cache
+
+# Editor / cache
+.vscode
+.npm
+.local
+.conda
+.cache
+__pycache__
+
+# uv / venv
+.venv
+uv.lock
+
+# Build artefacts
+*.pdf
+*.zip
+
+# Runtime outputs
+checkpoints/
+eval_outputs/
+logs/
+wandb/
+work_dirs/
+
+# Datasets — add new dataset paths here BEFORE downloading
+data/
+data/cad-recode-v1.5/
+data/cad-recode-v1.5-bench/
+data/text2cad/
+data/text2cad-bench/
+data/deepcad_test_mesh/
+data/deepcad_test_mini/
+data/deepcad_test_mini30/
+data/fusion360_test_mesh/
+data/deepcad_train_mesh/
+data/fusion360_train_mesh/
+data/cadrille_training/
+data/_zips/
+data/cad_json/
+data/data.tar
+data/mined/
+data/render_assets/
+data/smoke_train/
+data/analysis/

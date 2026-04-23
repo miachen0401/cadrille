@@ -1,0 +1,55 @@
+[project]
+name = "cadrille"
+version = "0.1.0"
+description = "CAD reconstruction with SFT + RL fine-tuning (Dr. CPPO)"
+requires-python = ">=3.10"
+dependencies = [
+    # PyTorch — CUDA 12.4 build (index configured below)
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "torchaudio==2.5.1",
+    # Model / training
+    "transformers==4.50.3",
+    "accelerate==0.34.2",
+    "qwen-vl-utils==0.0.10",
+    "safetensors==0.4.5",
+    "einops==0.8.0",
+    "bitsandbytes>=0.43.0",
+    "huggingface-hub>=0.27.0",
+    # CAD geometry
+    "cadquery-ocp==7.7.2",
+    "trimesh==4.5.3",
+    "manifold3d==3.0.0",
+    "scipy==1.14.1",
+    "scikit-image",
+    # Utilities
+    "wandb",
+    "tqdm",
+    "pyyaml",
+    "numpy>=2.0",
+]
+
+# Three packages need special install steps — handled by scripts/setup.sh and Dockerfile:
+#
+#   pytorch3d  — git-only, must be built against the installed torch/CUDA:
+#                uv pip install --no-deps git+https://github.com/facebookresearch/pytorch3d@06a76ef
+#
+#   cadquery   — latest fixes not yet on PyPI; install from git:
+#                uv pip install git+https://github.com/CadQuery/cadquery@e99a15d
+#
+#   flash-attn — requires torch headers visible at build time:
+#                uv pip install flash-attn==2.7.2.post1 --no-build-isolation
+
+# ---------------------------------------------------------------------------
+# uv configuration
+# ---------------------------------------------------------------------------
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url  = "https://download.pytorch.org/whl/cu124"
+explicit = true          # only use this index for packages that explicitly opt in
+
+[tool.uv.sources]
+torch       = [{ index = "pytorch-cu124" }]
+torchvision = [{ index = "pytorch-cu124" }]
+torchaudio  = [{ index = "pytorch-cu124" }]

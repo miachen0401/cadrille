@@ -1,0 +1,34 @@
+tag: test
+
+checkpoints:
+  - path: checkpoints/cadrille-sft
+    label: "SFT"
+  - path: checkpoints/cadrille-rl
+    label: "RL-official"
+
+datasets:
+  deepcad:
+    path: data/deepcad_test_mesh
+    n_samples: 5
+
+modalities: [img]
+max_new_tokens: 768
+base_model: Qwen/Qwen2-VL-2B-Instruct
+
+resources:
+  batch_size_img: 4
+  batch_size_pc: 16
+  score_workers: 4
+  prep_threads_img: 2
+  prep_threads_pc: 4
+  queue_size: 16
+  save_code: true
+  save_stl: false
+
+pass_k:
+  enabled: false
+
+render:
+  enabled: false
+
+out_dir: eval_outputs

@@ -1,0 +1,33 @@
+# Cadrille SFT — production (120k steps, bs=28 acc=1, H100 or multi-GPU)
+# Usage: python train.py --config configs/sft/full.yaml
+# Run name is auto-generated: sft-s120k-lr2e-4-b28a1-pc_img-MMDD-HHMM
+# Override: python train.py --config configs/sft/full.yaml --run-name my-run-v1
+
+# run_name: null   # leave unset for auto-naming from hyperparams
+checkpoints_dir: ./checkpoints
+
+# Data
+data_path: ./data
+mode: pc_img          # pc_img | img | pc
+use_text: false       # set true to mix in Text2CAD (changes default batch to 8, accum to 4)
+
+# Model
+base_model: Qwen/Qwen2-VL-2B-Instruct
+
+# Training (official: batch_size=15, accumulation_steps=2, eff=30)
+max_steps: 120000
+batch_size: 15        # per-device; official single-GPU setting
+accumulation_steps: 2 # effective batch = 30, matches official
+learning_rate: 2.0e-4
+weight_decay: 0.01
+dataloader_workers: 8
+
+# Logging & checkpoints
+log_steps: 1000
+save_steps: 10000
+eval_steps: 10000
+eval_on_start: true   # run eval at step 0 for a pre-training baseline
+
+# W&B (set wandb_project: null to disable)
+wandb_project: cadrille-sft
+wandb_entity: null
