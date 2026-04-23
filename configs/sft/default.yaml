@@ -34,6 +34,10 @@ save_steps: 200               # must be a multiple of eval_steps; ~6h on 4080
 eval_steps: 200               # eval every ~3h on 4080 (val set takes ~50s)
 eval_on_start: true
 
+# Reproducibility
+seed: 42
+max_code_len: 1000            # drop samples with code length > 1000 chars
+
 # W&B
 wandb_project: cadrille-sft
 wandb_entity: null
