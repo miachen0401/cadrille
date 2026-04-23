@@ -101,6 +101,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
+        seed=42, max_code_len=None,
         base_model='Qwen/Qwen2-VL-2B-Instruct',
         resume_from_checkpoint=None, cfg_to_save=None):
 
@@ -138,14 +139,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         normalize_std_img=200,
         noise_scale_img=-1,
         num_imgs=4,
-        mode=mode)
+        mode=mode,
+        max_code_len=max_code_len)
     batch_size = batch_size_override or 28
     accumulation_steps = accum_steps_override or 1
 
     if use_text:
         text_dataset = Text2CADDataset(
             root_dir=os.path.join(data_path, 'text2cad'),
-            split='train')
+            split='train',
+            max_code_len=max_code_len)
         train_dataset = ConcatDataset([train_dataset, text_dataset])
         batch_size = batch_size_override or 8
         accumulation_steps = accum_steps_override or 4
@@ -163,7 +166,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         normalize_std_img=200,
         noise_scale_img=-1,
         num_imgs=4,
-        mode=mode) if has_val else None
+        mode=mode,
+        max_code_len=max_code_len) if has_val else None
 
     processor = AutoProcessor.from_pretrained(
         base_model,
@@ -225,6 +229,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             eval_steps=eval_steps if has_val else None,
             eval_on_start=eval_on_start and has_val,
             load_best_model_at_end=has_val,
+            seed=seed,
+            data_seed=seed,
             report_to=report_to),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
@@ -320,6 +326,9 @@ if __name__ == '__main__':
     tf32                  = bool(cfg.get('tf32',              False))
     gradient_checkpointing= bool(cfg.get('gradient_checkpointing', False))
     optim                 = cfg.get('optim', 'adamw_torch')
+    seed                  = int(cfg.get('seed', 42))
+    max_code_len          = cfg.get('max_code_len', None)
+    sft_mix_weights       = cfg.get('sft_mix_weights', None)  # metadata only — see README
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -362,6 +371,9 @@ if __name__ == '__main__':
         'eval_on_start':          eval_on_start,
         'wandb_project':          wandb_project,
         'base_model':             base_model,
+        'seed':                   seed,
+        'max_code_len':           max_code_len,
+        'sft_mix_weights':        sft_mix_weights,
     }
 
     print(f'Run name : {run_name}')
@@ -372,6 +384,7 @@ if __name__ == '__main__':
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
+        seed=seed, max_code_len=max_code_len,
         base_model=base_model,
         resume_from_checkpoint=resume_from_checkpoint,
         cfg_to_save=resolved_cfg)
