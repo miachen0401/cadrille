@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 import open3d
@@ -10,10 +11,10 @@ open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Error)
 
 import torch
 from torch.utils.data import Dataset
-from pytorch3d.ops import sample_farthest_points
 
 
 def mesh_to_point_cloud(mesh, n_points, n_pre_points=8192):
+    from pytorch3d.ops import sample_farthest_points
     vertices, faces = trimesh.sample.sample_surface(mesh, n_pre_points)
     _, ids = sample_farthest_points(torch.tensor(vertices).unsqueeze(0), K=n_points)
     ids = ids[0].numpy()
@@ -61,15 +62,47 @@ def mesh_to_image(mesh, camera_distance=-1.8, front=[1, 1, 1], width=500, height
     return Image.fromarray(image)
 
 
+def _filter_by_code_len(root_dir, split, annotations, max_code_len, py_path_fn):
+    """Drop annotations whose .py file exceeds max_code_len chars.
+
+    Caches the filtered index list to {root_dir}/.filter_cache/{split}_len{max}.json
+    so subsequent runs skip the full scan (~1 min for 980k files).
+    """
+    cache_dir = os.path.join(root_dir, '.filter_cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f'{split}_len{max_code_len}.json')
+    if os.path.exists(cache_file):
+        with open(cache_file) as f:
+            keep_idx = json.load(f)
+        return [annotations[i] for i in keep_idx]
+
+    keep_idx = []
+    for i, item in enumerate(annotations):
+        py = py_path_fn(item)
+        try:
+            with open(py) as f:
+                n = len(f.read())
+        except Exception:
+            continue
+        if n <= max_code_len:
+            keep_idx.append(i)
+    with open(cache_file, 'w') as f:
+        json.dump(keep_idx, f)
+    print(f'[filter] {split}: {len(keep_idx)}/{len(annotations)} kept '
+          f'(len<={max_code_len}) → {cache_file}')
+    return [annotations[i] for i in keep_idx]
+
+
 class CadRecodeDataset(Dataset):
     def __init__(self, root_dir, split, n_points, normalize_std_pc, noise_scale_pc, img_size,
-                normalize_std_img, noise_scale_img, num_imgs, mode, n_samples=None, ext='stl'):
+                normalize_std_img, noise_scale_img, num_imgs, mode, n_samples=None, ext='stl',
+                max_code_len=None):
         super().__init__()
         self.root_dir = root_dir
         self.split = split
         self.img_size = img_size
         self.n_samples = n_samples
-        self.n_points = n_points  
+        self.n_points = n_points
         self.normalize_std_pc = normalize_std_pc
         self.noise_scale_pc = noise_scale_pc
         self.normalize_std_img = normalize_std_img
@@ -80,6 +113,11 @@ class CadRecodeDataset(Dataset):
             pkl_path = os.path.join(self.root_dir, f'{self.split}.pkl')
             with open(pkl_path, 'rb') as f:
                 self.annotations = pickle.load(f)
+            if max_code_len is not None:
+                self.annotations = _filter_by_code_len(
+                    root_dir, split, self.annotations, max_code_len,
+                    lambda item: os.path.join(root_dir, item['py_path']),
+                )
         else:
             paths = os.listdir(os.path.join(self.root_dir, self.split))
             self.annotations = [
@@ -181,7 +219,7 @@ class CadRecodeDataset(Dataset):
 
 
 class Text2CADDataset(Dataset):
-    def __init__(self, root_dir, split, code_dir='cadquery', n_samples=None):
+    def __init__(self, root_dir, split, code_dir='cadquery', n_samples=None, max_code_len=None):
         super().__init__()
         self.root_dir = root_dir
         self.split = split
@@ -190,6 +228,11 @@ class Text2CADDataset(Dataset):
         pkl_path = os.path.join(self.root_dir, f'{self.split}.pkl')
         with open(pkl_path, 'rb') as f:
             self.annotations = pickle.load(f)
+        if max_code_len is not None:
+            self.annotations = _filter_by_code_len(
+                root_dir, f'text2cad_{split}', self.annotations, max_code_len,
+                lambda item: os.path.join(root_dir, code_dir, f'{item["uid"]}.py'),
+            )
 
     def __len__(self):
         return self.n_samples if self.n_samples is not None else len(self.annotations)

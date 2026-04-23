@@ -2,6 +2,15 @@
 
 Research codebase extending [cadrille (ICLR 2026)](https://arxiv.org/abs/2505.22914) with improved RL training infrastructure and richer reward signals for multi-modal CAD reconstruction.
 
+**Two-stage training recipe** (what this repo produces):
+
+1. **SFT** — supervised fine-tune Qwen2-VL-2B on a 3-source CAD corpus
+   (recode + text2cad + benchcad) to emit CadQuery code from an image.
+2. **RL post-train** — Dr. CPPO with mesh-IoU reward on top of the SFT checkpoint.
+
+Both stages are deterministic given a fixed seed (default `42`). All splits
+and dataloaders pin their RNG so any run reproduces byte-for-byte.
+
 ---
 
 ### Baseline results (cadrille, for comparison)
@@ -180,12 +189,31 @@ python data/cadrecode2mesh.py   # convert .py → .stl (takes ~2 hours)
 
 ### SFT Training
 
-Supervised fine-tuning on the CAD-Recode v1.5 dataset (~100k CadQuery scripts).
-Starting from scratch or use the public [cadrille SFT checkpoint](https://huggingface.co/maksimko123/cadrille) directly.
+Stage 1 of the recipe. The model learns to emit CadQuery code from an image
+(or point cloud). Training corpus is a 3-source mix:
+
+| source | rows (len ≤ 1000) | input | notes |
+|---|---|---|---|
+| **recode** — filapro/cad-recode-v1.5 | ~838k train + 822 val | rendered mesh → img/pc | AST-rewritten to bench shell, see `tools/rewrite_recode_to_bench.py` |
+| **text2cad** — cadquery subset | ~66k train + 5.9k val | description (text) | natural-language caption → code |
+| **benchcad** — BenchCAD/cad_bench | ~15k | `composite_png` | synthetic benchmark, rich metadata (family/difficulty/ops) |
+
+**Mixing ratio (metadata)**: `text2cad : recode : benchcad = 1 : 2 : 2`
+(recorded in `configs/sft/mix_1_2_2.yaml`; weighted-sampler enforcement is TODO —
+current `ConcatDataset` samples uniformly across concatenated rows).
+
+**Dataset archive on HuggingFace**: [BenchCAD/cad_sft_training](https://huggingface.co/datasets/BenchCAD/cad_sft_training)
+— contains the recode + text2cad code corpus in bench-shell style as parquet.
+The local training path still reads from `data/cad-recode-v1.5/` and
+`data/text2cad/` (images/meshes live there); the HF dataset is a text-only
+archive for reproducibility and downstream reuse.
 
 ```bash
 # Single GPU (RTX 4080, 16 GB) — 12k steps, effective batch 28
 bash scripts/run_sft.sh --config configs/sft/default.yaml
+
+# 3-source mix with 1:2:2 metadata + len filter
+bash scripts/run_sft.sh --config configs/sft/mix_1_2_2.yaml
 
 # Single H100 or multi-GPU — full 120k steps (matches cadrille paper)
 bash scripts/run_sft.sh --config configs/sft/full.yaml
@@ -198,7 +226,41 @@ Key SFT hyperparameters:
 ```
 optimizer:    AdamW  |  lr: 2e-4 (cosine)  |  warmup: 1000 steps
 max_steps:    120,000  |  batch: 28  |  precision: bfloat16 + flash_attention_2
+seed:         42 (dataloader + Trainer)  |  max_code_len: 1000 chars
 ```
+
+**Reproducibility.** All SFT configs pin `seed: 42` and `max_code_len: 1000`.
+`Trainer` consumes both `seed` and `data_seed`, so the dataloader shuffle
+order and model init are deterministic. The `max_code_len` filter caches the
+kept-index list under `{data_root}/.filter_cache/` so repeat runs skip the
+full scan.
+
+---
+
+### Rewriting / uploading the code corpus
+
+The HF archive was built with two tools; rerun them only if you regenerate
+the corpus from a different source snapshot.
+
+```bash
+# 1. Rewrite filapro/cad-recode-v1.5 .py files into bench-shell style
+uv run python tools/rewrite_recode_to_bench.py \
+    --input data/cad-recode-v1.5/train \
+    --output data/cad-recode-v1.5-bench/train --jobs 8
+
+# 2. Verify the rewrite preserves geometry (mesh IoU)
+uv run python tools/verify_recode_rewrite.py \
+    --original data/cad-recode-v1.5/train \
+    --rewritten data/cad-recode-v1.5-bench/train \
+    --n 1000 --jobs 8
+
+# 3. Package + push to HF (env needs BenchCAD_HF_TOKEN)
+uv run python tools/push_bench_to_hf.py --repo BenchCAD/cad_sft_training --private
+```
+
+Verification result on the current snapshot: **10,000 / 10,000** recode pairs
+pass (vol_rel = 0, IoU mean = 1.000000, min = 0.999999); **30 / 30** text2cad
+pairs pass. The rewrite is pure AST reformatting — no numerical changes.
 
 ---
 

@@ -16,7 +16,9 @@ logs/
 # Datasets — add new datasets here BEFORE downloading
 data/
 data/cad-recode-v1.5/
+data/cad-recode-v1.5-bench/
 data/text2cad/
+data/text2cad-bench/
 data/deepcad_test_mesh/
 data/deepcad_test_mini/
 data/deepcad_test_mini30/
