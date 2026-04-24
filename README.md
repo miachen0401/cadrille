@@ -74,27 +74,30 @@ dataset is a text-only archive for reproducibility and downstream reuse.
 
 ---
 
-### Running SFT
+### Running SFT — one-liner
 
 ```bash
-# Single RTX 4080 (16 GB) — 12k steps, effective batch 30
-bash scripts/run_sft.sh --config configs/sft/default.yaml
-
-# 3-source mix with 1:2:2 metadata + len ≤ 1000 filter
-bash scripts/run_sft.sh --config configs/sft/mix_1_2_2.yaml
-
-# Single A100 80 GB — paper hyperparameters, 120k steps
-bash scripts/run_sft.sh --config configs/sft/a100.yaml
-
-# 8× H100 — multi-GPU (torchrun)
-bash scripts/run_sft.sh --config configs/sft/h100.yaml
-
-# Full 120k-step production run (any GPU that fits)
-bash scripts/run_sft.sh --config configs/sft/full.yaml
-
-# Smoke test (600 steps, verifies setup in ~20 min on a 4080)
-bash scripts/run_sft.sh --config configs/sft/smoke.yaml
+# Smoke run — preps data + trains 600 steps (~25 min on a 4080, ~10 min on H100).
+# First call auto-generates STL meshes + train.pkl from the cad-recode val/
+# subset (982 files); subsequent calls skip prep.
+bash scripts/sft.sh
 ```
+
+That's it. Logs stream to stdout; training metrics go to W&B project `cadrille-sft`
+(set `WANDB_API_KEY` in `.env`).
+
+**Other configs:**
+
+```bash
+bash scripts/sft.sh --config configs/sft/default.yaml    # 12k steps, 4080
+bash scripts/sft.sh --config configs/sft/mix_1_2_2.yaml  # 3-source mix, 1:2:2
+bash scripts/sft.sh --config configs/sft/a100.yaml       # 120k, A100 80 GB
+bash scripts/sft.sh --config configs/sft/h100.yaml       # 8× H100 (torchrun auto)
+bash scripts/sft.sh --config configs/sft/full.yaml       # 120k, any GPU that fits
+```
+
+Multi-GPU is auto-detected — `scripts/sft.sh` launches `torchrun` when more
+than one CUDA device is visible, single-GPU `python train.py` otherwise.
 
 Key hyperparameters (match the cadrille paper):
 

@@ -1,0 +1,12 @@
+{
+  "exclude": [
+    "**/.git",
+    "**/__pycache__",
+    "**/node_modules",
+    "**/checkpoints",
+    "**/data",
+    "**/outputs",
+    "**/logs",
+    "**/.cursor-server"
+  ]
+}
