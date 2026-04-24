@@ -21,7 +21,7 @@ import torch
 from transformers import AutoProcessor
 
 from cadrille import Cadrille, collate
-from rl.eval import eval_one_pass, load_val_examples
+from train.rl.eval import eval_one_pass, load_val_examples
 
 # ── checkpoint list ───────────────────────────────────────────────────────────
 CKPTS = [

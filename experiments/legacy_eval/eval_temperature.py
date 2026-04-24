@@ -37,8 +37,8 @@ from tqdm import tqdm
 from transformers import AutoProcessor
 
 from cadrille import Cadrille, collate
-from rl.dataset import render_img
-from rl.reward import compute_rewards_parallel
+from common.meshio import render_img
+from common.metrics import compute_rewards_parallel
 
 
 def parse_args():

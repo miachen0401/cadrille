@@ -46,7 +46,7 @@ _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
 from cadrille import Cadrille, collate  # noqa: E402
-from rl.reward import compute_metrics   # noqa: E402
+from common.metrics import compute_metrics   # noqa: E402
 
 _N_POINTS    = 256
 _DESCRIPTION = 'Generate cadquery code'

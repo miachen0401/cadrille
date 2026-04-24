@@ -11,8 +11,8 @@ import torch
 from collections import defaultdict
 
 from cadrille import Cadrille, collate
-from train.rl.dataset import render_img
-from train.rl.reward import compute_metrics
+from common.meshio import render_img
+from common.metrics import compute_metrics
 
 try:
     import wandb

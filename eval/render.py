@@ -65,7 +65,7 @@ def copy_gt_renders(case_ids: list[str], dataset_path: Path, gt_render_dir: Path
 
 
 def render_pred_stls(case_ids: list[str], combo_dir: Path, pred_render_dir: Path) -> int:
-    from rl.dataset import render_img
+    from common.meshio import render_img
     pred_render_dir.mkdir(parents=True, exist_ok=True)
     n_rendered = 0
     for cid in case_ids:

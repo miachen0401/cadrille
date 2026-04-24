@@ -60,8 +60,8 @@ import torch
 from transformers import AutoProcessor
 
 from cadrille import Cadrille, collate
-from rl.dataset import render_img
-from rl.reward import _get_worker_path
+from common.meshio import render_img
+from common.metrics import _get_worker_path
 
 import subprocess
 import json as _json

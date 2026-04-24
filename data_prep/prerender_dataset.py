@@ -42,7 +42,7 @@ def _render_one(args):
         return stl_path, 'skip'
 
     try:
-        from rl.dataset import render_img
+        from common.meshio import render_img
         result = render_img(stl_path)
         img = result['video'][0]
         img.save(png_path)

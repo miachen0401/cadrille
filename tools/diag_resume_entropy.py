@@ -37,10 +37,11 @@ import torch.nn.functional as F
 from transformers import AutoProcessor
 
 from cadrille import Cadrille, collate
-from rl.config import load_yaml, resolve_args
-from rl.dataset import MeshDataset, RLDataset
-from rl.reward import init_reward_pool, compute_rewards_parallel
-from rl.algorithms.cppo import (
+from train.rl.config import load_yaml, resolve_args
+from common.meshio import MeshDataset
+from train.rl.dataset import RLDataset
+from common.metrics import init_reward_pool, compute_rewards_parallel
+from train.rl.algorithms.cppo import (
     generate_rollouts,
     model_forward,
     compute_token_log_probs,

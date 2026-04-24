@@ -68,7 +68,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     if not args.no_verify:
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
 
     examples = []
     n_tried = 0
