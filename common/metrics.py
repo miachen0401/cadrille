@@ -97,9 +97,13 @@ _WORKER_SCRIPT = textwrap.dedent('''\
         import trimesh
         import cadquery as cq  # noqa: F401 (used implicitly via exec)
 
-        g = {}
+        # Stub BenchCAD-style show_object(obj) so it also captures the result
+        # — benchcad training corpus ends with `show_object(result)` which would
+        # otherwise NameError inside our exec context.
+        _captured = {}
+        g = {'show_object': lambda obj, *a, **kw: _captured.setdefault('r', obj)}
         exec(code_str, g)
-        _res = g.get('r') or g.get('result')
+        _res = g.get('r') or g.get('result') or _captured.get('r')
         if _res is None:
             raise KeyError("no 'r' or 'result' variable in generated code")
         compound = _res.val()
@@ -303,11 +307,12 @@ def _reward_worker_run(
             signal.alarm(0)
             return None, None
         # Code is syntactically valid — any failure from here gets soft_invalid.
-        g = {}
+        _captured = {}
+        g = {'show_object': lambda obj, *a, **kw: _captured.setdefault('r', obj)}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             exec(code_obj, g)
-        _res = g.get('r') or g.get('result')
+        _res = g.get('r') or g.get('result') or _captured.get('r')
         if _res is None:
             raise KeyError("no 'r' or 'result' variable in generated code")
         compound = _res.val()
@@ -442,11 +447,12 @@ def _eval_worker_run(
         except SyntaxError:
             signal.alarm(0)
             return None, None
-        g = {}
+        _captured = {}
+        g = {'show_object': lambda obj, *a, **kw: _captured.setdefault('r', obj)}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             exec(code_obj, g)
-        _res = g.get('r') or g.get('result')
+        _res = g.get('r') or g.get('result') or _captured.get('r')
         if _res is None:
             raise KeyError("no 'r' or 'result' variable in generated code")
         compound = _res.val()
