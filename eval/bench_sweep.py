@@ -54,46 +54,61 @@ from eval.features import feature_recall, aggregate_feature_recall  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _load_benchcad(limit: int, seed: int = 42) -> dict[str, list[dict]]:
-    """Returns {split_name: [items]} for Hula0401/test_bench.
+    """Returns {'benchcad/val': [items]} from our local 90/10 held-out val.
 
-    Uses row['composite_png'] as the img input (matches training distribution).
-    GT STL materialised via subprocess exec of gt_code (eval/bench.py helper).
+    fetch_benchcad.py materialised data/benchcad/val/ (1,973 items) with .py +
+    .stl + _render.png already on disk. feature_tags are not in val.pkl, so we
+    join from BenchCAD/cad_bench parquet by stem.
     """
-    from datasets import load_dataset
-    token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
-    ds = load_dataset('Hula0401/test_bench', token=token)
+    val_pkl = Path('data/benchcad/val.pkl')
+    if not val_pkl.exists():
+        raise FileNotFoundError(
+            'data/benchcad/val.pkl missing — run data_prep/fetch_benchcad.py first')
+    import pickle
+    with val_pkl.open('rb') as f:
+        val_rows = pickle.load(f)
 
-    cache_dir = Path('data/_sweep_cache/benchcad')
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Build feature_tags lookup from BenchCAD/cad_bench (has extended metadata)
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+    token = os.environ.get('HF_TOKEN') or os.environ.get('BenchCAD_HF_TOKEN')
+    parquet_path = hf_hub_download(
+        'BenchCAD/cad_bench', 'data/test-00000-of-00001.parquet',
+        repo_type='dataset', token=token,
+        local_dir='data/_cache_benchcad')
+    bench_t = pq.read_table(parquet_path, columns=['stem', 'feature_tags'])
+    tags_by_stem: dict[str, str] = dict(zip(
+        bench_t.column('stem').to_pylist(),
+        bench_t.column('feature_tags').to_pylist(),
+    ))
 
-    out: dict[str, list[dict]] = {}
-    for split_name in ['test_iid', 'test_ood_family', 'test_ood_plane']:
-        sp_rows = list(ds[split_name])
-        rng = random.Random(seed)
-        rng.shuffle(sp_rows)
-        sp_rows = sp_rows[:limit] if limit else sp_rows
-        items: list[dict] = []
-        for row in sp_rows:
-            uid = row.get('stem') or row.get('uid') or row.get('file_name')
-            stl_path = cache_dir / f'{uid}.stl'
-            if not stl_path.exists():
-                from eval.bench import _exec_gt_code
-                p = _exec_gt_code(row['gt_code'], timeout=60.0)
-                if p is None:
-                    continue
-                os.rename(p, stl_path)
-            items.append({
-                'uid': uid,
-                'gt_mesh_path': str(stl_path),
-                'gt_code': row.get('gt_code'),
-                'feature_tags': row.get('feature_tags'),
-                'composite_png': row.get('composite_png'),
-                'dataset': 'benchcad',
-                'split': split_name,
-            })
-        out[f'benchcad/{split_name}'] = items
-        print(f'  benchcad/{split_name}: {len(items)} items', flush=True)
-    return out
+    rng = random.Random(seed)
+    shuffled = list(val_rows)
+    rng.shuffle(shuffled)
+    shuffled = shuffled[:limit] if limit else shuffled
+
+    items: list[dict] = []
+    root = Path('data/benchcad')
+    for row in shuffled:
+        uid = row['uid']
+        mesh_path = root / row['mesh_path']
+        png_path = root / row['png_path']
+        py_path = root / row['py_path']
+        if not mesh_path.exists():
+            continue
+        items.append({
+            'uid': uid,
+            'gt_mesh_path': str(mesh_path),
+            'gt_code': py_path.read_text() if py_path.exists() else None,
+            'feature_tags': tags_by_stem.get(uid),
+            # composite_png skipped — use {stem}_render.png via build_modality_inputs fallback
+            'local_png_path': str(png_path) if png_path.exists() else None,
+            'dataset': 'benchcad',
+            'split': 'val',
+        })
+    print(f'  benchcad/val: {len(items)} items  '
+          f'(of {len(val_rows)} held-out rows, seed={seed})', flush=True)
+    return {'benchcad/val': items}
 
 
 def _load_stl_dir(dir_path: str, dataset_name: str, limit: int, seed: int = 42) -> dict[str, list[dict]]:
@@ -150,7 +165,9 @@ def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dic
         # Strict: only use pre-rendered PNGs. NEVER fall back to on-the-fly Open3D
         # render — that would add a heavy step in the hot loop.
         from PIL import Image
+        # Priority: item-provided composite_png > local_png_path > {stem}_render.png next to STL
         cpng = item.get('composite_png')
+        local_png = item.get('local_png_path')
         if cpng is not None:
             if isinstance(cpng, dict):
                 img = Image.open(io.BytesIO(cpng['bytes']))
@@ -158,8 +175,9 @@ def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dic
                 img = Image.open(io.BytesIO(cpng))
             else:
                 img = cpng
+        elif local_png is not None and os.path.exists(local_png):
+            img = Image.open(local_png)
         else:
-            # DeepCAD / Fusion360: expect {stem}_render.png next to {stem}.stl
             stl = item['gt_mesh_path']
             png_path = stl[:-4] + '_render.png'
             if not os.path.exists(png_path):
