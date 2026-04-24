@@ -252,3 +252,91 @@ class Text2CADDataset(Dataset):
                 answer = f.read()
             input_item['answer'] = answer
         return input_item
+
+
+class BenchCadDataset(Dataset):
+    """BenchCAD/cad_bench → file-based loader. Mirrors CadRecodeDataset shape.
+
+    Built by tools/fetch_benchcad.py, which materializes the HF parquet into:
+        {root_dir}/{split}/{uid}.py           gt_code
+        {root_dir}/{split}/{uid}.stl          exec(gt_code) → tessellate
+        {root_dir}/{split}/{uid}_render.png   composite_png (4-view, 268×268 RGB)
+        {root_dir}/{split}.pkl                list[{uid, py_path, mesh_path, png_path, description}]
+
+    img mode loads the pre-rendered PNG (resized to img_size), skipping Open3D
+    render. pc mode samples from the STL via pytorch3d.
+    """
+
+    def __init__(self, root_dir, split, n_points=256, normalize_std_pc=100,
+                 noise_scale_pc=None, img_size=128, normalize_std_img=200,
+                 noise_scale_img=None, num_imgs=4, mode='pc_img',
+                 n_samples=None, max_code_len=None):
+        super().__init__()
+        self.root_dir = root_dir
+        self.split = split
+        self.n_points = n_points
+        self.normalize_std_pc = normalize_std_pc
+        self.noise_scale_pc = noise_scale_pc
+        self.img_size = img_size
+        self.normalize_std_img = normalize_std_img
+        self.noise_scale_img = noise_scale_img
+        self.num_imgs = num_imgs
+        self.mode = mode
+        self.n_samples = n_samples
+
+        pkl_path = os.path.join(root_dir, f'{split}.pkl')
+        with open(pkl_path, 'rb') as f:
+            self.annotations = pickle.load(f)
+        if max_code_len is not None:
+            self.annotations = _filter_by_code_len(
+                root_dir, f'benchcad_{split}', self.annotations, max_code_len,
+                lambda item: os.path.join(root_dir, item['py_path']),
+            )
+
+    def __len__(self):
+        return self.n_samples if self.n_samples is not None else len(self.annotations)
+
+    def __getitem__(self, index):
+        item = self.annotations[index]
+        if self.mode == 'pc':
+            input_item = self._get_point_cloud(item)
+        elif self.mode == 'img':
+            input_item = self._get_img(item)
+        elif self.mode == 'pc_img':
+            if np.random.rand() < 0.5:
+                input_item = self._get_point_cloud(item)
+            else:
+                input_item = self._get_img(item)
+        else:
+            raise ValueError(f'Invalid mode: {self.mode}')
+
+        input_item['file_name'] = item['uid']
+
+        py_path = os.path.join(self.root_dir, item['py_path'])
+        with open(py_path, 'r') as f:
+            input_item['answer'] = f.read()
+        return input_item
+
+    def _get_img(self, item):
+        png_path = os.path.join(self.root_dir, item['png_path'])
+        img = Image.open(png_path).convert('RGB')
+        if img.size != (self.img_size, self.img_size):
+            img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
+        # num_imgs is a no-op here because composite_png already bakes 4 views
+        # into a single image; mirror CadRecodeDataset's return shape.
+        return {
+            'video': [img],
+            'description': item.get('description', 'Generate cadquery code'),
+        }
+
+    def _get_point_cloud(self, item):
+        mesh = trimesh.load(os.path.join(self.root_dir, item['mesh_path']))
+        if self.noise_scale_pc is not None and np.random.rand() < 0.5:
+            mesh.vertices = mesh.vertices + np.random.normal(
+                loc=0, scale=self.noise_scale_pc, size=mesh.vertices.shape)
+        pc = mesh_to_point_cloud(mesh, self.n_points)
+        pc = pc / self.normalize_std_pc
+        return {
+            'point_cloud': pc,
+            'description': item.get('description', 'Generate cadquery code'),
+        }
