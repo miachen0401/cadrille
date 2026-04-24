@@ -1,5 +1,5 @@
-"""Shared layer used by train/, eval/, and tools/.
+"""Shared layer used by train/, eval/, scripts/.
 
-Split out of rl/ so eval/ and tools/ do not need to import from an RL-specific
-package. See docs/repo_simplification.md for the dependency-direction rationale.
+Split out of the old rl/ so eval/ and scripts/ do not need to import from an
+RL-specific package.
 """
