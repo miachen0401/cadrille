@@ -4,6 +4,10 @@
 .env
 .conda
 .cache
+.config/
+.profile
+.zshrc
+.claude.json
 *.pdf
 *.png
 *.stl
