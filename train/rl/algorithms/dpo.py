@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from cadrille import Cadrille, collate
-from rl.eval import run_validation, log_eval
+from train.rl.eval import run_validation, log_eval
 
 try:
     import wandb

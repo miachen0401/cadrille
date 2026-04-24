@@ -41,7 +41,7 @@ if [[ "$DISTRIBUTED" == "1" && "$N_GPUS" -gt 1 ]]; then
     for GPU_ID in $(seq 0 $((N_GPUS - 1))); do
         SHARD_NAME="shard${GPU_ID}"
         echo "  Starting shard $GPU_ID → --run-name suffix -${SHARD_NAME}"
-        CUDA_VISIBLE_DEVICES="$GPU_ID" python rl/train.py \
+        CUDA_VISIBLE_DEVICES="$GPU_ID" python -m train.rl.train \
             --config "$CONFIG" \
             --run-name "$(date +%m%d-%H%M)-rl-${SHARD_NAME}" \
             "$@" &
@@ -50,5 +50,5 @@ if [[ "$DISTRIBUTED" == "1" && "$N_GPUS" -gt 1 ]]; then
     wait
 else
     echo "Launching single RL process..."
-    python rl/train.py --config "$CONFIG" "$@"
+    python -m train.rl.train --config "$CONFIG" "$@"
 fi
