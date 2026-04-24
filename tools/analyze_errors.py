@@ -64,7 +64,7 @@ from transformers import AutoProcessor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cadrille import Cadrille, collate
-from rl.dataset import render_img
+from common.meshio import render_img
 
 _REPO = Path(__file__).parent.parent
 _CHECKPOINTS = {

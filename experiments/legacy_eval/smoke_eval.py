@@ -42,8 +42,8 @@ def short_name(path):
 
 def run_smoke(ckpt_path, examples, max_new_tokens, modality, device):
     from cadrille import Cadrille, collate
-    from rl.reward import _get_worker_path
-    from rl.dataset import render_img
+    from common.metrics import _get_worker_path
+    from common.meshio import render_img
     from transformers import AutoProcessor
 
     label = short_name(ckpt_path)

@@ -48,7 +48,8 @@ from transformers import AutoProcessor
 
 from cadrille import Cadrille
 from train.rl.config import load_yaml, resolve_args
-from train.rl.dataset import MeshDataset, RLDataset, DPODataset
+from common.meshio import MeshDataset
+from train.rl.dataset import RLDataset, DPODataset
 from train.rl.eval import load_val_examples
 from train.rl.algorithms.cppo import train_cppo
 from train.rl.algorithms.dpo import train_dpo

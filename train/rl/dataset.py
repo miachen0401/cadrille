@@ -1,10 +1,8 @@
 """RL-specific dataset classes.
 
-Shared mesh→input helpers (`render_img`, `MeshDataset`) now live in
-`common.meshio`; they are re-exported here for backwards compatibility so the
-existing `from rl.dataset import render_img, MeshDataset` callers keep working.
-Once all callers import from `common.meshio` directly, the shim will be removed
-(see step 6 of docs/repo_simplification.md).
+Shared mesh→input helpers (`render_img`, `MeshDataset`) live in `common.meshio`.
+RL training loads hard-mined examples (pkl) / preference pairs (jsonl) via the
+three classes below.
 """
 import os
 import json
@@ -12,14 +10,9 @@ import pickle
 
 import numpy as np
 
-from common.meshio import render_img, MeshDataset  # re-export shim — do not remove
+from common.meshio import render_img  # used by RLDataset.__getitem__ img branch
 
-__all__ = [
-    # shim
-    'render_img', 'MeshDataset',
-    # RL-only
-    'RLDataset', 'CurriculumRLDataset', 'DPODataset',
-]
+__all__ = ['RLDataset', 'CurriculumRLDataset', 'DPODataset']
 
 
 class RLDataset:

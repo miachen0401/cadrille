@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
-from rl.dataset import render_img
+from common.meshio import render_img
 
 random.seed(42)
 np.random.seed(42)

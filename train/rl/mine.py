@@ -51,8 +51,8 @@ from tqdm import tqdm
 from transformers import AutoProcessor
 
 from cadrille import Cadrille, collate
-from train.rl.dataset import MeshDataset
-from train.rl.reward import compute_rewards_parallel
+from common.meshio import MeshDataset
+from common.metrics import compute_rewards_parallel
 
 
 def parse_args():

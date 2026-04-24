@@ -107,7 +107,7 @@ class TestRender:
     @requires_deepcad
     def test_render_img_shape(self):
         """render_img returns 268×268 RGB image (4-view grid with 3px borders)."""
-        from rl.dataset import render_img
+        from common.meshio import render_img
         stl = os.path.join(_DEEPCAD_TEST, '00000093.stl')
         result = render_img(stl)
         assert 'video' in result
@@ -119,7 +119,7 @@ class TestRender:
     @requires_deepcad
     def test_render_img_not_blank(self):
         """render_img output must not be all-white or all-black."""
-        from rl.dataset import render_img
+        from common.meshio import render_img
         stl = os.path.join(_DEEPCAD_TEST, '00000093.stl')
         result = render_img(stl)
         arr = np.array(result['video'][0])
@@ -133,7 +133,7 @@ class TestRender:
     @requires_cadrecode
     def test_render_img_cadrecode_sample(self):
         """render_img works on a cad-recode STL (raw mm scale, not normalised)."""
-        from rl.dataset import render_img
+        from common.meshio import render_img
         stl = os.path.join(_CAD_RECODE, '0.stl')
         result = render_img(stl)
         arr = np.array(result['video'][0])
@@ -150,26 +150,26 @@ class TestReward:
     @requires_cadquery
     def test_gt_cube_iou_high(self, cube_stl):
         """GT cube code on GT cube mesh → IoU ≥ 0.95 via compute_reward."""
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
         iou = compute_reward(_CUBE_CODE, cube_stl, timeout=30.0)
         assert iou >= 0.95, f'expected IoU ≥ 0.95, got {iou:.4f}'
 
     @requires_cadquery
     def test_invalid_code_returns_minus1(self, cube_stl):
         """Invalid Python code → reward = -1.0."""
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
         assert compute_reward(_INVALID_CODE, cube_stl) == -1.0
 
     @requires_cadquery
     def test_empty_code_returns_minus1(self, cube_stl):
         """Empty string → reward = -1.0."""
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
         assert compute_reward(_EMPTY_CODE, cube_stl) == -1.0
 
     @requires_cadquery
     def test_metrics_iou_matches_reward(self, cube_stl):
         """compute_metrics IoU == compute_reward IoU (same subprocess path)."""
-        from rl.reward import compute_reward, compute_metrics
+        from common.metrics import compute_reward, compute_metrics
         iou_r = compute_reward(_CUBE_CODE, cube_stl, timeout=30.0)
         iou_m, cd = compute_metrics(_CUBE_CODE, cube_stl, timeout=30.0, use_pool=False)
         assert abs(iou_r - iou_m) < 0.01, (
@@ -181,7 +181,7 @@ class TestReward:
     @requires_cadrecode
     def test_gt_cadrecode_pair_iou_high(self):
         """GT .py code on its own .stl from cad-recode → IoU ≥ 0.95."""
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
         py_path  = os.path.join(_CAD_RECODE, '0.py')
         stl_path = os.path.join(_CAD_RECODE, '0.stl')
         code = open(py_path).read()
@@ -201,7 +201,7 @@ class TestEvaluatePyConsistency:
 
         Allowed difference: ≤ 0.02  (tessellation + normalisation floating-point).
         """
-        from rl.reward import compute_reward
+        from common.metrics import compute_reward
 
         # 1. IoU via compute_reward (reward.py subprocess)
         iou_reward = compute_reward(_CUBE_CODE, cube_stl, timeout=30.0)

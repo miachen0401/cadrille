@@ -41,7 +41,7 @@ from qwen_vl_utils import process_vision_info
 _REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO))
 
-from rl.reward import compute_metrics   # noqa: E402
+from common.metrics import compute_metrics   # noqa: E402
 from experiments.cadevolve.render import render_stl  # noqa: E402
 
 _LD = os.environ.get('LD_LIBRARY_PATH', '/workspace/.local/lib')

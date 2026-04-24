@@ -25,7 +25,7 @@ from PIL import Image, ImageDraw
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
 
-from rl.dataset import render_img
+from common.meshio import render_img
 
 
 _VIEW_TO_INDEX = {
