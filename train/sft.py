@@ -235,21 +235,47 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         else:
             print(f'[sft_mix_weights] enforced via WeightedRandomSampler: {active}')
 
-    # val.pkl is optional — skip evaluation when it doesn't exist
-    val_pkl = os.path.join(cad_recode_path, 'val.pkl')
-    has_val = os.path.exists(val_pkl)
-    eval_dataset = CadRecodeDataset(
-        root_dir=cad_recode_path,
-        split='val',
-        n_points=256,
-        normalize_std_pc=100,
-        noise_scale_pc=None,
-        img_size=128,
-        normalize_std_img=200,
-        noise_scale_img=-1,
-        num_imgs=4,
-        mode=mode,
-        max_code_len=max_code_len) if has_val else None
+    # val set selection: prefer benchcad when it's the dominant source
+    # (weight > 0 and any other source is 0); else fall back to cad-recode.
+    eval_dataset = None
+    benchcad_dominant = (
+        sft_mix_weights
+        and float(sft_mix_weights.get('benchcad', 0)) > 0
+        and float(sft_mix_weights.get('recode', 0)) == 0
+        and float(sft_mix_weights.get('text2cad', 0)) == 0
+    )
+    benchcad_val_pkl = os.path.join(benchcad_path, 'val.pkl')
+    if benchcad_dominant and os.path.exists(benchcad_val_pkl):
+        eval_dataset = BenchCadDataset(
+            root_dir=benchcad_path,
+            split='val',
+            n_points=256,
+            normalize_std_pc=100,
+            noise_scale_pc=None,
+            img_size=128,
+            normalize_std_img=200,
+            noise_scale_img=-1,
+            num_imgs=4,
+            mode=mode,
+            max_code_len=max_code_len)
+        print(f'[eval] using benchcad val ({len(eval_dataset)} samples)')
+    else:
+        val_pkl = os.path.join(cad_recode_path, 'val.pkl')
+        if os.path.exists(val_pkl):
+            eval_dataset = CadRecodeDataset(
+                root_dir=cad_recode_path,
+                split='val',
+                n_points=256,
+                normalize_std_pc=100,
+                noise_scale_pc=None,
+                img_size=128,
+                normalize_std_img=200,
+                noise_scale_img=-1,
+                num_imgs=4,
+                mode=mode,
+                max_code_len=max_code_len)
+            print(f'[eval] using cad-recode val ({len(eval_dataset)} samples)')
+    has_val = eval_dataset is not None
 
     processor = AutoProcessor.from_pretrained(
         base_model,
