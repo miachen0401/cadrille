@@ -49,13 +49,26 @@ Config: `configs/sft/mix_bc_r20k_t2c.yaml` (to write)
 - Start after current run completes.
 
 ### T4 — Extended eval sweep with feature preservation
-Run: `python -m eval.bench_sweep --ckpt <new-run>/checkpoint-final`
+Fire the moment T3 finishes (or earlier on checkpoint-<N> for progress checks):
 
-- Metrics: IoU, exec_rate, max_iou@16 at temps {0, 0.4, 0.5, 0.75, 1.0, 1.25}
-- Datasets: benchcad (our 90/10 val split), deepcad (test), fusion360 (test)
-- BenchCAD-only: feature_recall per feature (has_hole / has_fillet /
-  has_chamfer / has_slot / rotational) — reuses `eval/features.py`
-- Target limit: ~50 per split with seed=42 (user signed off at 50-100)
+```bash
+set -a; source .env; set +a
+CKPT=checkpoints/sft-s10k-lr2e-4-b6a5-img-0424-2001/checkpoint-final
+OUT=eval_outputs/sweep_t3_$(date +%Y%m%d_%H%M)
+nohup uv run python -u -m eval.bench_sweep \
+    --ckpt "$CKPT" \
+    --datasets benchcad,deepcad,fusion360 \
+    --temps 0,0.4,0.5,0.75,1.0,1.25 \
+    --n-samples 16 --limit 50 --seed 42 \
+    --modality img --batch-size 8 --score-workers 16 \
+    --out "$OUT" \
+    --label "sft-t3-bc2-r20k1-t2c1-final" > logs/sweep_t3.log 2>&1 &
+```
+
+Output: `<out>/summary.md` + `summary.json` + `full.json`. Includes
+feature_recall (benchcad): has_hole, has_fillet, has_chamfer, has_slot,
+rotational. Cost: ~60 min generation + ~60 min scoring (tunable with
+fewer samples or temps).
 
 ### T5 — From-zero one-click verification
 - After the moves above are in, smoke-test:
