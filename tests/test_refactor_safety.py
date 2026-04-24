@@ -20,11 +20,11 @@ import pytest
 
 # ── 1. Import smoke ──────────────────────────────────────────────────────────
 
-_PACKAGES_TO_WALK = ["train", "eval", "tools", "common", "data_prep", "bench", "experiments", "scripts"]
+_PACKAGES_TO_WALK = ["train", "eval", "common", "data_prep", "bench", "experiments", "scripts"]
 _EXCLUDE = {
     # Stand-alone scripts with heavy imports that are out-of-scope for the
     # refactor. Re-evaluate if they become library code.
-    "tools.check_env.check_model",                 # loads Qwen2-VL-2B
+    "scripts.check_env.check_model",               # loads Qwen2-VL-2B
     "experiments.data_prep_cadlib.deepcad2mesh",   # requires `cadlib`
     "experiments.cadevolve.eval",                  # requires `pyvista`
     "experiments.cadevolve.render",                # requires `pyvista`

@@ -45,7 +45,7 @@ import csv
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools.parse_cq import parse_cq_script, load_cq_dir
+from scripts.analysis.parse_cq import parse_cq_script, load_cq_dir
 
 try:
     import matplotlib
