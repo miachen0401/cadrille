@@ -9,13 +9,22 @@
 ### T1 — Diversity analysis script vs GT (in progress)
 File: `scripts/analysis/diversity_analysis.py`
 
-- Pull N items from `data/benchcad/val/` with fixed seed
-- For each item, generate K samples at a small temperature sweep (e.g. t=0,0.5,1.0)
-- Emit three views:
-  1. **Op-level recall**: for every GT op/feature_tag, is it in pred code? Per-sample hit, aggregate recall per op.
-  2. **Sample-to-sample diversity** (temp > 0 only): K samples per item → count distinct op sequences and distinct full-code hashes.
-  3. **GT vs best pred diff**: side-by-side ops list for human inspection.
-- Output: `eval_outputs/diversity_<tag>/summary.md` + `per_item.jsonl`.
+**Step 1 (now):** aggregate-only — op distribution over a fixed bench subset.
+  - Pull N items from `data/benchcad/val/` with seed=42
+  - For each item, generate K samples at a small temperature sweep (e.g.
+    t=0, 0.5, 1.0)
+  - Build **two distributions**:
+    - GT op frequency: how many items in the sample have op X (`.cylinder`,
+      `.revolve`, `.fillet`, `.cut`, `.hole`, etc.)
+    - Pred op frequency: same count on generated code (after exec succeeds
+      OR on raw regex — start regex, no exec dependency)
+  - Emit a markdown table: op | GT count | pred count | delta
+  - Also: distinct-code-hash count per (item × temp) to quantify raw diversity
+  - Output: `eval_outputs/diversity_<tag>/summary.md`
+
+**Step 2 (later, deferred per user):** per-item side-by-side ops diff for human
+  inspection — only after aggregate view is in place.
+
 - Target ckpt: current run's `checkpoint-1000` (sft-s5k from earlier was
   deleted to free disk).
 
