@@ -1,0 +1,48 @@
+# Cadrille SFT — BenchCAD + cad-recode-20k mix (both img-ready).
+#
+# Dataset: ~18k benchcad + ~19k recode20k = ~37k items, all with pre-rendered
+# _render.png. Equal 1:1 weights so the sampler draws ~half from each source.
+# At bs=8 that's ~4,625 steps per epoch.
+#
+# Intent: dilute the benchcad-only overfit we saw at 5k steps on 18k items
+# (greedy decode ok but any sampling collapses). Training on twice the data
+# at the same step count should land us better diversity.
+
+checkpoints_dir: ./checkpoints
+
+data_path: ./data
+mode: img                              # recode20k has no STL, so pc is off the table
+use_text: false                        # text2cad uses mode=text which is orthogonal
+
+# Training
+max_steps: 8000                        # ~1.7 epochs on 37k at bs=8
+batch_size: 4
+accumulation_steps: 2                  # effective batch = 8
+learning_rate: 2.0e-4
+warmup_steps: 500
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: true                             # A100 native
+gradient_checkpointing: false
+
+dataloader_workers: 4
+
+# Logging + checkpoints
+log_steps: 20
+save_steps: 2000
+eval_steps: 500
+eval_on_start: true
+
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
+# Mix — benchcad + recode20k at 1:1 (others zeroed out).
+sft_mix_weights:
+  recode:     0                        # old cad-recode-v1.5 no longer materialised
+  text2cad:   0                        # text-only, not wired for img training here
+  benchcad:   1
+  recode20k:  1
+
+wandb_project: cadrille-sft
