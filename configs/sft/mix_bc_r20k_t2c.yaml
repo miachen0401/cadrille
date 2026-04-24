@@ -1,0 +1,58 @@
+# Cadrille SFT — 2:1:1 mix (benchcad : recode20k : text2cad), A100 80GB.
+#
+# Adds text2cad to broaden op coverage — diversity_analysis.py on the prior
+# benchcad+recode20k-only ckpt-1000 showed a severe greedy mode collapse:
+# pred used only sketch/segment/extrude across all 30 items; GT ops like
+# workplane/hole/cut/fillet/chamfer/revolve never appeared. text2cad's
+# long-description → code samples should inject natural-language grounding
+# and broader syntax coverage.
+#
+# Dataset scale: 18k benchcad + 19k recode20k + 76k text2cad ≈ 113k items.
+# At effective batch 30, one epoch ≈ 3,770 steps. 10k steps ≈ 2.65 epochs.
+
+checkpoints_dir: ./checkpoints
+
+data_path: ./data
+mode: img                     # only matters for sources with visual input;
+                              # text2cad passes through as pure text in collate()
+use_text: true                # wires Text2CADDataset
+
+# Training — cadrille/configs/sft/a100.yaml values
+max_steps: 10000
+batch_size: 15
+accumulation_steps: 2         # effective batch = 30
+learning_rate: 2.0e-4
+warmup_steps: 1000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: true
+gradient_checkpointing: false
+dataloader_workers: 4
+
+# Logging + checkpoints
+log_steps: 50
+save_steps: 2000              # 5 saves across the run
+eval_steps: 1000              # online eval every 1k steps (incl. IoU + failures)
+eval_on_start: true
+
+# Auto-resume — train.sft picks newest checkpoint-<N>/ in output_dir
+resume_from_checkpoint: latest
+
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
+# Mix: benchcad=2, recode20k=1, text2cad=1 (total weight 4)
+# text2cad rows are text-only; collate() auto-routes them to the text branch
+sft_mix_weights:
+  recode:    0
+  text2cad:  1
+  benchcad:  2
+  recode20k: 1
+
+# HF ckpt upload during training (non-blocking; drains at train end)
+hf_upload_repo: Hula0401/cadrille-sft-bc2-r20k1-t2c1
+hf_upload_private: true
+
+wandb_project: cadrille-sft

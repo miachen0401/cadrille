@@ -75,6 +75,22 @@ class PrintToFileCallback(TrainerCallback):
                 f.write(str(logs) + '\n')
 
 
+def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private):
+    from train.sft_online_eval import OnlineIoUEvalCallback
+    cbs = [
+        PrintToFileCallback(),
+        WandbRunSaverCallback(),
+        OnlineIoUEvalCallback(processor, n_per_dataset=30, seed=seed),
+    ]
+    if hf_upload_repo:
+        from train.hf_ckpt_uploader import HFCheckpointUploadCallback
+        cbs.append(HFCheckpointUploadCallback(
+            repo_id=hf_upload_repo, private=hf_upload_private))
+        print(f'[callbacks] HF ckpt upload to {hf_upload_repo} '
+              f'(private={hf_upload_private})', flush=True)
+    return cbs
+
+
 class WandbRunSaverCallback(TrainerCallback):
     """Write W&B run URL to output_dir/wandb_run.txt at training start."""
 
@@ -140,7 +156,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         bf16, tf32, gradient_checkpointing, optim,
         seed=42, max_code_len=None, sft_mix_weights=None,
         base_model='Qwen/Qwen2-VL-2B-Instruct',
-        resume_from_checkpoint=None, cfg_to_save=None):
+        resume_from_checkpoint=None, cfg_to_save=None,
+        hf_upload_repo=None, hf_upload_private=True):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -248,13 +265,13 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             print(f'[sft_mix_weights] enforced via WeightedRandomSampler: {active}')
 
     # val set selection: prefer benchcad when it's the dominant source
-    # (weight > 0 and any other source is 0); else fall back to cad-recode.
+    # Prefer benchcad val whenever benchcad is in the mix (weight > 0) — that's
+    # the metric we're tracking. Fall back to cad-recode only when benchcad is
+    # absent entirely.
     eval_dataset = None
     benchcad_dominant = (
         sft_mix_weights
         and float(sft_mix_weights.get('benchcad', 0)) > 0
-        and float(sft_mix_weights.get('recode', 0)) == 0
-        and float(sft_mix_weights.get('text2cad', 0)) == 0
     )
     benchcad_val_pkl = os.path.join(benchcad_path, 'val.pkl')
     if benchcad_dominant and os.path.exists(benchcad_val_pkl):
@@ -358,14 +375,11 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         data_collator=partial(collate, processor=processor, n_points=256),
         tokenizer=processor,
         sample_weights=sample_weights,
-        callbacks=[
-            PrintToFileCallback(),
-            WandbRunSaverCallback(),
-            # Online IoU/Failures eval on fixed subsets of benchcad/deepcad/fusion360.
-            # Runs on the same schedule as HF Trainer's default eval_loss pass.
-            __import__('train.sft_online_eval', fromlist=['OnlineIoUEvalCallback'])
-                .OnlineIoUEvalCallback(processor, n_per_dataset=30, seed=seed),
-        ])
+        callbacks=_build_callbacks(
+            processor=processor, seed=seed,
+            hf_upload_repo=hf_upload_repo,
+            hf_upload_private=hf_upload_private,
+        ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
@@ -458,6 +472,8 @@ if __name__ == '__main__':
     seed                  = int(cfg.get('seed', 42))
     max_code_len          = cfg.get('max_code_len', None)
     sft_mix_weights       = cfg.get('sft_mix_weights', None)  # {source: weight}; enforced via WeightedSamplerTrainer
+    hf_upload_repo        = cfg.get('hf_upload_repo', None)   # e.g. 'Hula0401/cadrille-<tag>'; null = disabled
+    hf_upload_private     = bool(cfg.get('hf_upload_private', True))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -503,6 +519,8 @@ if __name__ == '__main__':
         'seed':                   seed,
         'max_code_len':           max_code_len,
         'sft_mix_weights':        sft_mix_weights,
+        'hf_upload_repo':         hf_upload_repo,
+        'hf_upload_private':      hf_upload_private,
     }
 
     print(f'Run name : {run_name}')
@@ -516,4 +534,6 @@ if __name__ == '__main__':
         seed=seed, max_code_len=max_code_len, sft_mix_weights=sft_mix_weights,
         base_model=base_model,
         resume_from_checkpoint=resume_from_checkpoint,
-        cfg_to_save=resolved_cfg)
+        cfg_to_save=resolved_cfg,
+        hf_upload_repo=hf_upload_repo,
+        hf_upload_private=hf_upload_private)
