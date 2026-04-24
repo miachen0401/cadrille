@@ -71,16 +71,19 @@ eval/
   bench.py bench_visualize.py   # BenchCAD benchmark eval
   others/            # paper-original: evaluate.py + test.py (do not modify)
 
-tools/               # model-behaviour analysis (see tools/README.md)
-data_prep/           # one-time dataset preparation
-bench/               # training throughput benchmarks (bench_config, bench_workers)
+tools/               # infra helpers (parse_cq, check_env) — NOT analysis scripts
+data_prep/           # one-time dataset preparation (10 files)
+bench/               # training throughput benchmarks
 experiments/
-  cadevolve/
+  cadevolve/         # off-main CAD-evolve experiment
   repair_lora/       # repair-LoRA mini-experiment
-  legacy_eval/       # 6 ad-hoc legacy eval scripts
+  data_prep_cadlib/  # DeepCAD/Fusion360 mesh gen (needs cadlib, not in pyproject)
 
 configs/             # YAML configs (one per GPU tier: a100, h100, 4080, smoke)
-scripts/             # shell entry points (run_sft.sh, run_rl.sh, run_eval.sh, run_passk.sh, setup.sh)
+scripts/             # entry points
+  run_{sft,rl,eval,passk}.sh  setup.sh  mine_and_train.sh  pack_datasets.sh
+  analysis/          # one-off research analysis (plot_kl_quadrants, analyze_*,
+                     #   mining_analysis, render_{comparison,singleview}_grid, …)
 tests/               # test_refactor_safety + test_iou + test_pipeline + test_cppo_step
 data/                # datasets (gitignored large files)
 checkpoints/         # model checkpoints (gitignored)
