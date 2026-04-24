@@ -94,14 +94,14 @@ Existing `test_iou.py` / `test_pipeline.py` / `test_cppo_step.py` cover deeper p
 
 | # | Step | Surface | Status |
 |---|---|---|---|
-| 0 | Write `tests/test_refactor_safety.py` + install pytest in uv env | new file | TODO |
-| 1 | Extract `common/`: move `render_img`, `MeshDataset`, `compute_metrics`, `compute_reward` to `common/`. Leave re-export shims in `rl/dataset.py` and `rl/reward.py` so the 17 callers keep working unchanged | new dir + 2 shim files | TODO |
-| 2 | Move `evaluate.py` + `test.py` → `eval/others/`. Update `scripts/run_eval.sh` paths | 2 file moves + 1 script | TODO |
-| 3 | Merge `rl/eval_passk.py` into `eval/passk.py`. Update `scripts/run_passk.sh` to call `python -m eval.passk` | 1 deletion + 1 file + 1 script | TODO |
-| 4 | Fold `train/`: rename `train.py` → `train/sft.py`, move `rl/` → `train/rl/`. Rewrite all `from rl...` imports across rl-internal files (~15 lines). Update `scripts/run_sft.sh` and `scripts/run_rl.sh` paths | ~15 internal imports + 2 scripts | TODO |
-| 5 | tools/ split: merge `viz/` into `tools/`, split out `data_prep/`, `bench/`, `experiments/repair_lora/`, `experiments/legacy_eval/`. Rewrite `tools/README.md` | ~28 file moves | TODO |
-| 6 | Cleanup: delete `tmp_comunication.md`, `viz/plots/*.png`, `new_eval.md` (or merge into docs). Drop `common/` re-export shims once nothing imports the old paths | deletes | TODO |
-| 7 | Doc sync: update `CLAUDE.md` Canonical layout, `tools/README.md`, `plan.md` paths | 3 .md files | TODO |
+| 0 | Write `tests/test_refactor_safety.py` + install pytest in uv env | new file | DONE |
+| 1 | Extract `common/`: move `render_img`, `MeshDataset`, `compute_metrics`, `compute_reward` to `common/`. Leave re-export shims in `rl/dataset.py` and `rl/reward.py` so the 17 callers keep working unchanged | new dir + 2 shim files | DONE |
+| 2 | Move `evaluate.py` + `test.py` → `eval/others/`. Update `scripts/run_eval.sh` paths | 2 file moves + 1 script | DONE |
+| 3 | Merge `rl/eval_passk.py` into `eval/passk.py`. Update `scripts/run_passk.sh` to call `python -m eval.passk` | 1 deletion + 1 file + 1 script | DONE |
+| 4 | Fold `train/`: rename `train.py` → `train/sft.py`, move `rl/` → `train/rl/`. Rewrite all `from rl...` imports across rl-internal files (~15 lines). Update `scripts/run_sft.sh` and `scripts/run_rl.sh` paths | ~15 internal imports + 2 scripts | DONE |
+| 5 | tools/ split: merge `viz/` into `tools/`, split out `data_prep/`, `bench/`, `experiments/repair_lora/`, `experiments/legacy_eval/`. Rewrite `tools/README.md` | ~28 file moves | DONE |
+| 6 | Cleanup: delete `tmp_comunication.md`, `viz/plots/*.png`, `new_eval.md` (or merge into docs). Drop `common/` re-export shims once nothing imports the old paths | deletes | DONE |
+| 7 | Doc sync: update `CLAUDE.md` Canonical layout, `tools/README.md`, `plan.md` paths | 3 .md files | DONE |
 
 After every step: `pytest tests/test_refactor_safety.py` must be green before moving on.
 
