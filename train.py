@@ -10,7 +10,7 @@ from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
 from cadrille import Cadrille, collate
-from dataset import Text2CADDataset, CadRecodeDataset
+from dataset import Text2CADDataset, CadRecodeDataset, BenchCadDataset
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +191,21 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             max_code_len=max_code_len)
         batch_size = batch_size_override or 8
         accumulation_steps = accum_steps_override or 4
+
+    benchcad_path = os.path.join(data_path, 'benchcad')
+    if os.path.isdir(benchcad_path) and os.path.exists(os.path.join(benchcad_path, 'train.pkl')):
+        sources['benchcad'] = BenchCadDataset(
+            root_dir=benchcad_path,
+            split='train',
+            n_points=256,
+            normalize_std_pc=100,
+            noise_scale_pc=0.01,
+            img_size=128,
+            normalize_std_img=200,
+            noise_scale_img=-1,
+            num_imgs=4,
+            mode=mode,
+            max_code_len=max_code_len)
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
