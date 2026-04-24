@@ -171,6 +171,13 @@ class WeightedSamplerTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.sample_weights = sample_weights
 
+    def _get_eval_sampler(self, eval_dataset):
+        # HF Trainer tries to infer lengths from 'input_ids' when
+        # group_by_length=True, which fails for our custom datasets. Always
+        # use a plain sequential sampler for eval — group_by_length is only
+        # a training-throughput trick.
+        return torch.utils.data.SequentialSampler(eval_dataset)
+
     def _get_train_sampler(self, *args, **kwargs):
         if self.sample_weights is None:
             return super()._get_train_sampler(*args, **kwargs)
