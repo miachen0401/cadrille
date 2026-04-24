@@ -340,3 +340,56 @@ class BenchCadDataset(Dataset):
             'point_cloud': pc,
             'description': item.get('description', 'Generate cadquery code'),
         }
+
+
+class CadRecode20kDataset(Dataset):
+    """Hula0401/cad-sft → cad-recode-20k → file-based loader. Img-mode only.
+
+    Materialised by data_prep/fetch_cad_sft.py:
+        {root}/{split}/{uid}.py              code
+        {root}/{split}/{uid}_render.png      pre-rendered 4-view composite
+        {root}/{split}.pkl                   [{uid, py_path, png_path}]
+
+    No STL, no mesh — pc mode is not supported. The `mode` arg is accepted for
+    API uniformity with the other loaders but only 'img' works.
+    """
+
+    def __init__(self, root_dir, split, img_size=128, n_samples=None,
+                 max_code_len=None, mode='img', **_unused):
+        super().__init__()
+        if mode != 'img':
+            raise ValueError(
+                f'CadRecode20kDataset supports img only (got mode={mode!r}); '
+                'no STL is materialised for this corpus.')
+        self.root_dir = root_dir
+        self.split = split
+        self.img_size = img_size
+        self.n_samples = n_samples
+
+        pkl_path = os.path.join(root_dir, f'{split}.pkl')
+        with open(pkl_path, 'rb') as f:
+            self.annotations = pickle.load(f)
+        if max_code_len is not None:
+            self.annotations = _filter_by_code_len(
+                root_dir, f'recode20k_{split}', self.annotations, max_code_len,
+                lambda item: os.path.join(root_dir, item['py_path']),
+            )
+
+    def __len__(self):
+        return self.n_samples if self.n_samples is not None else len(self.annotations)
+
+    def __getitem__(self, index):
+        item = self.annotations[index]
+        img = Image.open(os.path.join(self.root_dir, item['png_path'])).convert('RGB')
+        if img.size != (self.img_size, self.img_size):
+            img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
+
+        input_item = {
+            'video': [img],
+            'description': 'Generate cadquery code',
+            'file_name': item['uid'],
+        }
+        if self.split in ('train', 'val'):
+            with open(os.path.join(self.root_dir, item['py_path'])) as f:
+                input_item['answer'] = f.read()
+        return input_item

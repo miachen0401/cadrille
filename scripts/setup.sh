@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# scripts/setup.sh — install deps and (optionally) download data for RL training
+# scripts/setup.sh — install deps and (optionally) download training + eval data.
 #
 # Usage:
 #   bash scripts/setup.sh            # install Python deps only
-#   bash scripts/setup.sh --data     # deps + download checkpoint + mesh data from HF
+#   bash scripts/setup.sh --data     # deps + SFT data (BenchCAD + cad-sft) + eval meshes
+#   bash scripts/setup.sh --full     # --data + RL hard-mined examples + full training meshes
+#
+# Env: .env must contain HF_TOKEN and BenchCAD_HF_TOKEN (for private repos).
 #
 set -euo pipefail
 
@@ -62,19 +65,39 @@ for i in range(n):
     print(f"  GPU {i}: {p.name}  {p.total_memory // 1024**3} GB")
 EOF
 
-# ── 4. Data + checkpoint (optional) ───────────────────────────────────────────
+# ── 4. Data (optional) ────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--data" || "${1:-}" == "--full" ]]; then
-    echo "[4/4] Downloading checkpoint and mesh data from HuggingFace ..."
-    # --full also downloads the full training meshes (84k DeepCAD + 30k Fusion360 STLs)
-    # needed only for mining new hard examples; adds ~2 GB and several minutes.
+    echo "[4/4] Downloading data from HuggingFace ..."
     [[ "${1:-}" == "--full" ]] && export DOWNLOAD_TRAIN_MESHES=1
 
-    # SFT checkpoint — small number of files, no rate-limit issue
-    uv run huggingface-cli download maksimko123/cadrille \
-        --repo-type model --local-dir checkpoints/cadrille-sft
+    # Source .env so HF_TOKEN / BenchCAD_HF_TOKEN are present for private repos.
+    if [ -f .env ]; then set -a; source .env; set +a; fi
 
-    # Mesh datasets + hard examples — all downloaded as single zips to avoid HF's
-    # 5000 req/5min rate limit (deepcad_test_mesh has 8048 files alone).
+    # 4.A — BenchCAD training corpus (18k .py/.stl/_render.png + metadata)
+    echo "[4.A] BenchCAD training corpus ..."
+    if [ -f data/benchcad/train.pkl ]; then
+        echo "  data/benchcad already present, skipping"
+    else
+        uv run python -m data_prep.fetch_benchcad --workers 8
+    fi
+
+    # 4.B — cad-sft (cad-recode-20k with pre-rendered PNGs + text2cad descriptions)
+    echo "[4.B] Hula0401/cad-sft (cad-recode-20k + text2cad) ..."
+    if [ -f data/cad-recode-20k/train.pkl ]; then
+        echo "  data/cad-recode-20k already present, skipping"
+    else
+        uv run python -m data_prep.fetch_cad_sft --what all
+    fi
+
+    # 4.C — Test meshes for eval (DeepCAD 8046 + Fusion360 1725, both with _render.png)
+    # Reference SFT checkpoint — only fetched under --full to save bandwidth for SFT-only users
+    if [[ "${1:-}" == "--full" ]]; then
+        echo "[4.C-full] reference SFT checkpoint ..."
+        uv run huggingface-cli download maksimko123/cadrille \
+            --repo-type model --local-dir checkpoints/cadrille-sft
+    fi
+
+    echo "[4.C] Eval test meshes (DeepCAD + Fusion360) ..."
     uv run python - <<'EOF'
 import os, sys, zipfile, pickle
 from huggingface_hub import hf_hub_download
@@ -110,8 +133,11 @@ download_zip("Hula0401/deepCAD_test",        "deepcad_test_renders.zip",   "data
 download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_mesh.zip",    "data/fusion360_test_mesh")
 download_zip("Hula0401/fusion360_test_mesh", "fusion360_test_renders.zip", "data/fusion360_test_mesh", skip_if_ext='_render.png')
 
-# Hard-mined examples — required for RL training (h100/a100/4080 configs all use hard_examples_pkl)
-if os.path.exists("data/mined/combined_hard.pkl"):
+# Hard-mined examples — only needed for RL. Gated on --full.
+_FULL = bool(os.environ.get("DOWNLOAD_TRAIN_MESHES"))
+if not _FULL:
+    print("  Skipping RL hard-mined examples (only needed for RL training). Re-run with --full.")
+elif os.path.exists("data/mined/combined_hard.pkl"):
     print("  data/mined/combined_hard.pkl already present, skipping")
 else:
     os.makedirs("data/mined", exist_ok=True)
@@ -146,6 +172,15 @@ fi
 
 echo ""
 echo "Setup complete."
-echo "  Train : PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml"
-echo "  Resume: PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml \\"
-echo "              --checkpoint-path checkpoints/<run-name>/checkpoint-<N>"
+echo ""
+echo "  SFT (BenchCAD + cad-recode-20k):"
+echo "    uv run python -m train.sft --config configs/sft/benchcad_full.yaml"
+echo ""
+echo "  Eval on SFT ckpt:"
+echo "    uv run python -m eval.bench_sweep \\"
+echo "      --ckpt checkpoints/<run-name>/checkpoint-final \\"
+echo "      --datasets benchcad,deepcad,fusion360 --limit 30 \\"
+echo "      --out eval_outputs/<tag>"
+echo ""
+echo "  RL (needs --full data):"
+echo "    uv run python -m train.rl.train --config configs/rl/h100.yaml"

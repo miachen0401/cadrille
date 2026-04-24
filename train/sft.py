@@ -10,7 +10,7 @@ from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
 from cadrille import Cadrille, collate
-from dataset import Text2CADDataset, CadRecodeDataset, BenchCadDataset
+from dataset import Text2CADDataset, CadRecodeDataset, BenchCadDataset, CadRecode20kDataset
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +206,17 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             num_imgs=4,
             mode=mode,
             max_code_len=max_code_len)
+
+    recode20k_path = os.path.join(data_path, 'cad-recode-20k')
+    if os.path.isdir(recode20k_path) and os.path.exists(os.path.join(recode20k_path, 'train.pkl')):
+        # Img-only corpus; silently skip if mode is 'pc' (loader will raise).
+        if mode != 'pc':
+            sources['recode20k'] = CadRecode20kDataset(
+                root_dir=recode20k_path,
+                split='train',
+                img_size=128,
+                max_code_len=max_code_len,
+                mode='img')
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
