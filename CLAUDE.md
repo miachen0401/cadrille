@@ -88,7 +88,6 @@ scripts/             # all scripts — shells at root, python in subdirs
 tests/               # test_refactor_safety + test_iou + test_pipeline + test_cppo_step
 data/                # datasets (gitignored large files)
 checkpoints/         # model checkpoints (gitignored)
-docs/                # design documents and paper notes
 ```
 
 **Rules:**
@@ -96,5 +95,5 @@ docs/                # design documents and paper notes
 - No debug scripts in the repo root or `train/rl/`. One-off scripts → delete after use.
 - Putting a new script somewhere? `data_prep/` if it prepares data once, `bench/` if it times training, `experiments/` if it is an off-main-path investigation, `tools/` if it analyzes trained models. Full argparse docstring required; add to `tools/README.md` if going there.
 - No scratch notebooks committed (use `colab.ipynb` only for the public demo).
-- `plan.md` tracks current work; `eval_results.md` tracks paper vs. ours metrics.
+- `plan.md` tracks current work.
 - Prefer flat module structure: add to an existing file before creating a new one.

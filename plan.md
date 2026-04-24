@@ -1,11 +1,9 @@
 # Cadrille SFT + RL — Environment & Smoke Plan
 
-> **Repo simplification**: `docs/repo_simplification.md` — 7-step reorg completed
-> 2026-04-24 on branch `revision` (commits 764c96b..cd0e2f2). Canonical layout
-> now in CLAUDE.md reflects the new `common/`, `train/`, `eval/`, `data_prep/`,
-> `bench/`, `experiments/` structure.
->
-> Session source: `notes/sft_setup_2026-04-24.md` (prior container session).
+> **Repo simplification**: 7-step reorg completed 2026-04-24 on branch
+> `revision`. Canonical layout now in CLAUDE.md reflects the new `common/`,
+> `train/`, `eval/`, `data_prep/`, `bench/`, `experiments/`, `scripts/`
+> structure.
 
 ## Host state (2026-04-24 brave-hubble)
 
@@ -118,13 +116,9 @@ Our target is tighter: SFT (with BenchCAD mix) BEFORE RL, so `setup.sh --data` w
 
 ## Open questions (deferred until smoke passes)
 
-1. Do we need to set `bf16: true` in `configs/sft/smoke.yaml` for A100, or override via CLI? (notes say smoke default is `false` to be safe on 4080/WSL2)
-2. Should `scripts/setup.sh` gain a `--sft-data` flag that calls `data/cadrecode2mesh.py` after downloading? (see notes)
-3. Slim-down of master: delete `experiments/cadevolve/`, `eval/` standalone, `viz/`, old logs — defer per `docs/repo_simplification.md`.
+1. Do we need to set `bf16: true` in `configs/sft/smoke.yaml` for A100, or override via CLI? (smoke default is `false` to be safe on 4080/WSL2)
+2. Should `scripts/setup.sh` gain a `--sft-data` flag that calls `data/cadrecode2mesh.py` after downloading?
 
 ## Reference files
 
 - `CLAUDE.md` — env rules (uv, wandb, no PyPI open3d, train_modality=img non-negotiable)
-- `notes/sft_setup_2026-04-24.md` — previous session memo with container context
-- `docs/repo_simplification.md` — parallel reorg effort, doesn't block this plan
-- `install_open3d_apt.sh` — apt-install script for the Open3D headless build deps (already run)
