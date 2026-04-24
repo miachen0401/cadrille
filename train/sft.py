@@ -169,18 +169,19 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # Source-labeled datasets; keeps per-source lengths so WeightedRandomSampler
     # can convert sft_mix_weights (source-level ratios) into per-sample weights.
     sources = {}
-    sources['recode'] = CadRecodeDataset(
-        root_dir=cad_recode_path,
-        split='train',
-        n_points=256,
-        normalize_std_pc=100,
-        noise_scale_pc=0.01,
-        img_size=128,
-        normalize_std_img=200,
-        noise_scale_img=-1,
-        num_imgs=4,
-        mode=mode,
-        max_code_len=max_code_len)
+    if os.path.isdir(cad_recode_path) and os.path.exists(os.path.join(cad_recode_path, 'train.pkl')):
+        sources['recode'] = CadRecodeDataset(
+            root_dir=cad_recode_path,
+            split='train',
+            n_points=256,
+            normalize_std_pc=100,
+            noise_scale_pc=0.01,
+            img_size=128,
+            normalize_std_img=200,
+            noise_scale_img=-1,
+            num_imgs=4,
+            mode=mode,
+            max_code_len=max_code_len)
     batch_size = batch_size_override or 28
     accumulation_steps = accum_steps_override or 1
 
