@@ -112,13 +112,59 @@ class WandbRunSaverCallback(TrainerCallback):
 # Weighted-sampler trainer (enforces sft_mix_weights across ConcatDataset)
 # ---------------------------------------------------------------------------
 
+class LengthGroupedWeightedSampler(torch.utils.data.Sampler):
+    """WeightedRandomSampler + mega-batch length sort.
+
+    Draw indices per `sample_weights` (with replacement), then within every
+    `batch_size * mega_batch_mult` chunk sort by length. Similar spirit to
+    HF's `LengthGroupedSampler` but wraps our mix sampler so both coexist.
+
+    Mega-batches mean items of similar length land in the same mini-batches
+    → less padding waste. Text2CAD's long descriptions vs. BenchCAD's short
+    metadata otherwise share batches and inflate seq_len for the whole batch.
+    """
+
+    def __init__(self, weights, num_samples: int, lengths: list,
+                 batch_size: int, mega_batch_mult: int = 100):
+        self.weights = torch.as_tensor(weights, dtype=torch.float)
+        self.num_samples = num_samples
+        self.lengths = lengths
+        self.batch_size = max(1, batch_size)
+        self.mega_batch_size = self.batch_size * mega_batch_mult
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self):
+        indices = torch.multinomial(self.weights, self.num_samples,
+                                    replacement=True).tolist()
+        # Shuffle already randomised; sort inside each mega-batch.
+        out = []
+        for i in range(0, len(indices), self.mega_batch_size):
+            chunk = indices[i:i + self.mega_batch_size]
+            chunk.sort(key=lambda idx: self.lengths[idx], reverse=True)
+            out.extend(chunk)
+        return iter(out)
+
+
+def _collect_lengths(dataset) -> list:
+    """Concat per-dataset .lengths lists; fall back to uniform if a source has none."""
+    if isinstance(dataset, ConcatDataset):
+        out = []
+        for d in dataset.datasets:
+            out.extend(getattr(d, 'lengths', [1] * len(d)))
+        return out
+    return getattr(dataset, 'lengths', [1] * len(dataset))
+
+
 class WeightedSamplerTrainer(Trainer):
-    """HF Trainer with an optional WeightedRandomSampler.
+    """HF Trainer with optional WeightedRandomSampler + length-grouped batches.
 
     When `sample_weights` is provided, uses it instead of the default
     RandomSampler, so sft_mix_weights (e.g. recode:text2cad:benchcad = 2:1:2)
-    actually shapes batch composition. Falls back to Trainer's default
-    sampler when `sample_weights` is None (single-source or unweighted runs).
+    actually shapes batch composition. When `group_by_length=True` AND lengths
+    are available, also sorts within mega-batches to cut padding waste on
+    mixed-length corpora.
     """
 
     def __init__(self, *args, sample_weights=None, **kwargs):
@@ -129,19 +175,29 @@ class WeightedSamplerTrainer(Trainer):
         if self.sample_weights is None:
             return super()._get_train_sampler(*args, **kwargs)
         if self.args.world_size > 1:
-            # WeightedRandomSampler draws independently per rank; ratios still
-            # hold in expectation but shards overlap. Fine for SFT; flagged
-            # so multi-GPU runs don't silently diverge from single-GPU ones.
             import warnings
             warnings.warn(
                 'sft_mix_weights: using WeightedRandomSampler per rank '
                 '(no DistributedSampler wrapper). Mix ratios hold in '
                 'expectation but rank shards are not disjoint.'
             )
+        n = len(self.train_dataset)
+        if self.args.group_by_length:
+            lengths = _collect_lengths(self.train_dataset)
+            if len(lengths) == n and len(set(lengths)) > 1:
+                print(f'[sampler] LengthGroupedWeightedSampler: '
+                      f'n={n}, batch={self.args.train_batch_size}, '
+                      f'length range [{min(lengths)}, {max(lengths)}]',
+                      flush=True)
+                return LengthGroupedWeightedSampler(
+                    weights=self.sample_weights, num_samples=n,
+                    lengths=lengths,
+                    batch_size=self.args.train_batch_size,
+                )
+            print('[sampler] group_by_length set but lengths unavailable/uniform; '
+                  'falling back to plain WeightedRandomSampler', flush=True)
         return WeightedRandomSampler(
-            weights=self.sample_weights,
-            num_samples=len(self.train_dataset),
-            replacement=True,
+            weights=self.sample_weights, num_samples=n, replacement=True,
         )
 
 
@@ -157,7 +213,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         seed=42, max_code_len=None, sft_mix_weights=None,
         base_model='Qwen/Qwen2-VL-2B-Instruct',
         resume_from_checkpoint=None, cfg_to_save=None,
-        hf_upload_repo=None, hf_upload_private=True):
+        hf_upload_repo=None, hf_upload_private=True,
+        group_by_length=False):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -351,6 +408,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             warmup_steps=warmup_steps,
             weight_decay=0.01,
             gradient_accumulation_steps=accumulation_steps,
+            group_by_length=group_by_length,
             bf16=bf16,
             tf32=tf32 if tf32 else None,
             gradient_checkpointing=gradient_checkpointing,
@@ -474,6 +532,7 @@ if __name__ == '__main__':
     sft_mix_weights       = cfg.get('sft_mix_weights', None)  # {source: weight}; enforced via WeightedSamplerTrainer
     hf_upload_repo        = cfg.get('hf_upload_repo', None)   # e.g. 'Hula0401/cadrille-<tag>'; null = disabled
     hf_upload_private     = bool(cfg.get('hf_upload_private', True))
+    group_by_length       = bool(cfg.get('group_by_length', False))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -521,6 +580,7 @@ if __name__ == '__main__':
         'sft_mix_weights':        sft_mix_weights,
         'hf_upload_repo':         hf_upload_repo,
         'hf_upload_private':      hf_upload_private,
+        'group_by_length':        group_by_length,
     }
 
     print(f'Run name : {run_name}')
@@ -536,4 +596,5 @@ if __name__ == '__main__':
         resume_from_checkpoint=resume_from_checkpoint,
         cfg_to_save=resolved_cfg,
         hf_upload_repo=hf_upload_repo,
-        hf_upload_private=hf_upload_private)
+        hf_upload_private=hf_upload_private,
+        group_by_length=group_by_length)
