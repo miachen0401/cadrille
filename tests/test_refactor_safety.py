@@ -20,7 +20,7 @@ import pytest
 
 # ── 1. Import smoke ──────────────────────────────────────────────────────────
 
-_PACKAGES_TO_WALK = ["rl", "eval", "tools", "common"]  # add "train" after step 4
+_PACKAGES_TO_WALK = ["train", "rl", "eval", "tools", "common"]
 _EXCLUDE = {
     # Stand-alone scripts with heavy imports that are out-of-scope for the
     # refactor. Re-evaluate if they become library code.

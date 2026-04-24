@@ -47,11 +47,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoProcessor
 
 from cadrille import Cadrille
-from rl.config import load_yaml, resolve_args
-from rl.dataset import MeshDataset, RLDataset, DPODataset
-from rl.eval import load_val_examples
-from rl.algorithms.cppo import train_cppo
-from rl.algorithms.dpo import train_dpo
+from train.rl.config import load_yaml, resolve_args
+from train.rl.dataset import MeshDataset, RLDataset, DPODataset
+from train.rl.eval import load_val_examples
+from train.rl.algorithms.cppo import train_cppo
+from train.rl.algorithms.dpo import train_dpo
 
 try:
     import wandb
