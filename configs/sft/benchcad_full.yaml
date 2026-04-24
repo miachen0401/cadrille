@@ -27,8 +27,7 @@ dataloader_workers: 4
 
 # Logging + checkpoints — keep disk usage bounded
 log_steps: 20
-save_steps: 1000
-save_total_limit: 2                  # at most 2 on-disk ckpts (newest + best)
+save_steps: 2500                     # fewer saves; each is ~4 GB (save_only_model)
 eval_steps: 500
 eval_on_start: true
 
