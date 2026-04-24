@@ -1,8 +1,11 @@
 # Cadrille SFT + RL — Environment & Smoke Plan
 
-> **Repo simplification (active, branch `revision`)**: see `docs/repo_simplification.md` for the train/eval/tools reorg plan. This plan is about getting env + training running on host.
+> **Repo simplification**: `docs/repo_simplification.md` — 7-step reorg completed
+> 2026-04-24 on branch `revision` (commits 764c96b..cd0e2f2). Canonical layout
+> now in CLAUDE.md reflects the new `common/`, `train/`, `eval/`, `data_prep/`,
+> `bench/`, `experiments/` structure.
 >
-> Session source: `notes/sft_setup_2026-04-24.md` (from the prior container session).
+> Session source: `notes/sft_setup_2026-04-24.md` (prior container session).
 
 ## Host state (2026-04-24 brave-hubble)
 

@@ -34,13 +34,13 @@
 - **`train_modality` must always be `img`** in all RL configs (4080, a100, h100, smoke). Never switch to `pc` mode to work around rendering issues — fix the rendering instead.
 - **`val_modalities` must always include `img`** (e.g. `pc,img`). Never drop img from validation.
 - Rendering uses the custom conda open3d (`0.18.0+8e434558a`) via `Visualizer(visible=False)` — no EGL or Xvfb needed. The PyPI open3d requires EGL and **must not be installed** (`pip install open3d` breaks rendering).
-- Run `tools/prerender_dataset.py` to pre-render STLs to `{stem}_render.png` PNGs; `render_img()` loads the PNG if it exists, otherwise falls back to on-the-fly rendering.
+- Run `data_prep/prerender_dataset.py` to pre-render STLs to `{stem}_render.png` PNGs; `common.meshio.render_img` loads the PNG if it exists, otherwise falls back to on-the-fly rendering.
 
 ## Training Visualization
 
 - Always use **Weights & Biases (wandb)** for training visualization. Never use TensorBoard or log-only approaches.
 - Pass `report_to="wandb"` in `TrainingArguments` (for HuggingFace Trainer).
-- For custom training loops (e.g. `rl_train.py`), call `wandb.log(...)` each step with at minimum: loss, reward/advantage metrics, learning rate, and step count.
+- For custom training loops (e.g. `train/rl/train.py`), call `wandb.log(...)` each step with at minimum: loss, reward/advantage metrics, learning rate, and step count.
 - Initialize with `wandb.init(project="cadrille", ...)` at the start of each training script.
 
 ## Repository Structure
@@ -50,19 +50,38 @@ Keep the repo clean and structured — think of it as a Meta Research codebase.
 **Canonical layout:**
 ```
 cadrille.py          # model definition (single file)
-train.py             # SFT entry point
-evaluate.py          # paper's reference metric script (do not modify)
-test.py              # paper's reference inference script (do not modify)
-dataset.py           # shared dataset utilities
-rl/                  # RL fine-tuning
-  train.py           # RL training entry point
-  algorithms/        # CPPO and other RL algorithms
-  dataset.py         # RL-specific data loading
-  reward.py          # reward computation
-  eval.py            # training-time eval
-  eval_passk.py      # pass@k eval
+dataset.py           # shared SFT dataset classes (CadRecode, Text2CAD, BenchCad)
+
+common/              # shared across train, eval, tools
+  meshio.py          # render_img, MeshDataset
+  metrics.py         # compute_metrics, compute_reward, worker pools
+
+train/
+  sft.py             # SFT entry point (python -m train.sft)
+  rl/
+    train.py         # RL entry point (python -m train.rl.train)
+    algorithms/      # CPPO, DPO
+    dataset.py       # RLDataset, CurriculumRLDataset, DPODataset
+    eval.py eval_passk.py  (eval_passk re-exported via eval/passk.py)
+    config.py mine.py filter_scores.py
+
+eval/
+  pipeline.py runner.py config.py render.py report.py
+  passk.py           # pass@k runner + CLI (python -m eval.passk)
+  bench.py bench_visualize.py   # BenchCAD benchmark eval
+  others/            # paper-original: evaluate.py + test.py (do not modify)
+
+tools/               # model-behaviour analysis (see tools/README.md)
+data_prep/           # one-time dataset preparation
+bench/               # training throughput benchmarks (bench_config, bench_workers)
+experiments/
+  cadevolve/
+  repair_lora/       # repair-LoRA mini-experiment
+  legacy_eval/       # 6 ad-hoc legacy eval scripts
+
 configs/             # YAML configs (one per GPU tier: a100, h100, 4080, smoke)
-tools/               # reusable CLI scripts (each with --help docstring)
+scripts/             # shell entry points (run_sft.sh, run_rl.sh, run_eval.sh, run_passk.sh, setup.sh)
+tests/               # test_refactor_safety + test_iou + test_pipeline + test_cppo_step
 data/                # datasets (gitignored large files)
 checkpoints/         # model checkpoints (gitignored)
 docs/                # design documents and paper notes
@@ -70,8 +89,8 @@ docs/                # design documents and paper notes
 
 **Rules:**
 - **Always add new dataset paths to `.gitignore` before downloading data.** Datasets are never committed.
-- No debug scripts in the repo root or rl/. One-off scripts → delete after use.
-- If a script is worth keeping, put it in `tools/` with a full argparse docstring and add it to `tools/README.md`.
+- No debug scripts in the repo root or `train/rl/`. One-off scripts → delete after use.
+- Putting a new script somewhere? `data_prep/` if it prepares data once, `bench/` if it times training, `experiments/` if it is an off-main-path investigation, `tools/` if it analyzes trained models. Full argparse docstring required; add to `tools/README.md` if going there.
 - No scratch notebooks committed (use `colab.ipynb` only for the public demo).
-- `plan.md` and `progress.md` track current work; `eval_results.md` tracks paper vs. ours metrics.
+- `plan.md` tracks current work; `eval_results.md` tracks paper vs. ours metrics.
 - Prefer flat module structure: add to an existing file before creating a new one.
