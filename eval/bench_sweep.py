@@ -147,19 +147,29 @@ def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dic
             'gt_mesh_path': item['gt_mesh_path'],
         }
     elif modality == 'img':
-        # Prefer the training-distribution composite_png when available (BenchCAD);
-        # otherwise render from STL on the fly (DeepCAD/Fusion360).
+        # Strict: only use pre-rendered PNGs. NEVER fall back to on-the-fly Open3D
+        # render — that would add a heavy step in the hot loop.
+        from PIL import Image
         cpng = item.get('composite_png')
         if cpng is not None:
-            from PIL import Image
-            png_bytes = cpng.get('bytes') if isinstance(cpng, dict) else cpng
-            img = Image.open(io.BytesIO(png_bytes)).convert('RGB').resize((128, 128))
-            video = [img]
+            if isinstance(cpng, dict):
+                img = Image.open(io.BytesIO(cpng['bytes']))
+            elif isinstance(cpng, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(cpng))
+            else:
+                img = cpng
         else:
-            rendered = render_img(item['gt_mesh_path'])
-            video = rendered['video']
+            # DeepCAD / Fusion360: expect {stem}_render.png next to {stem}.stl
+            stl = item['gt_mesh_path']
+            png_path = stl[:-4] + '_render.png'
+            if not os.path.exists(png_path):
+                raise FileNotFoundError(
+                    f'img modality requires pre-rendered PNG but {png_path} is missing. '
+                    f'Download *_test_renders.zip from HF or drop the item.')
+            img = Image.open(png_path)
+        img = img.convert('RGB').resize((128, 128))
         return {
-            'video': video,
+            'video': [img],
             'description': 'Generate cadquery code',
             'file_name': item['uid'],
             'gt_mesh_path': item['gt_mesh_path'],
