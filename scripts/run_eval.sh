@@ -52,7 +52,7 @@ echo ""
 
 # --- Step 1: Generate CadQuery scripts ---
 echo "=== Step 1: Generating CadQuery scripts ==="
-python test.py \
+python -m eval.others.test \
     --checkpoint-path "$CKPT" \
     --data-path "$DATA_PATH" \
     --split "$SPLIT" \
@@ -62,7 +62,7 @@ python test.py \
 # --- Step 2: Compute metrics (IoU + CD) ---
 echo ""
 echo "=== Step 2: Computing metrics ==="
-python evaluate.py --py-path "$PY_PATH"
+python -m eval.others.evaluate --py-path "$PY_PATH"
 
 echo ""
 echo "Done. Results in: $PY_PATH"
