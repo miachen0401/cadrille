@@ -358,7 +358,14 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         data_collator=partial(collate, processor=processor, n_points=256),
         tokenizer=processor,
         sample_weights=sample_weights,
-        callbacks=[PrintToFileCallback(), WandbRunSaverCallback()])
+        callbacks=[
+            PrintToFileCallback(),
+            WandbRunSaverCallback(),
+            # Online IoU/Failures eval on fixed subsets of benchcad/deepcad/fusion360.
+            # Runs on the same schedule as HF Trainer's default eval_loss pass.
+            __import__('train.sft_online_eval', fromlist=['OnlineIoUEvalCallback'])
+                .OnlineIoUEvalCallback(processor, n_per_dataset=30, seed=seed),
+        ])
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
