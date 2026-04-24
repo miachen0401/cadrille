@@ -4,7 +4,7 @@
 set -euo pipefail
 
 IMAGE="cadrille-claude"
-DOCKERFILE="Dockerfile.claude"
+DOCKERFILE="docker/Dockerfile.claude"
 
 if ! docker info &>/dev/null; then
     echo "ERROR: cannot reach Docker daemon."
