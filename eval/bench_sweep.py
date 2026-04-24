@@ -56,8 +56,8 @@ from eval.features import feature_recall, aggregate_feature_recall  # noqa: E402
 def _load_benchcad(limit: int, seed: int = 42) -> dict[str, list[dict]]:
     """Returns {split_name: [items]} for Hula0401/test_bench.
 
-    GT STL is materialised on the fly (via the same subprocess exec used by
-    eval/bench.py) so `compute_metrics` can score against it.
+    Uses row['composite_png'] as the img input (matches training distribution).
+    GT STL materialised via subprocess exec of gt_code (eval/bench.py helper).
     """
     from datasets import load_dataset
     token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
@@ -77,7 +77,6 @@ def _load_benchcad(limit: int, seed: int = 42) -> dict[str, list[dict]]:
             uid = row.get('stem') or row.get('uid') or row.get('file_name')
             stl_path = cache_dir / f'{uid}.stl'
             if not stl_path.exists():
-                # reuse eval/bench.py:_exec_gt_code
                 from eval.bench import _exec_gt_code
                 p = _exec_gt_code(row['gt_code'], timeout=60.0)
                 if p is None:
@@ -88,6 +87,7 @@ def _load_benchcad(limit: int, seed: int = 42) -> dict[str, list[dict]]:
                 'gt_mesh_path': str(stl_path),
                 'gt_code': row.get('gt_code'),
                 'feature_tags': row.get('feature_tags'),
+                'composite_png': row.get('composite_png'),
                 'dataset': 'benchcad',
                 'split': split_name,
             })
@@ -147,9 +147,19 @@ def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dic
             'gt_mesh_path': item['gt_mesh_path'],
         }
     elif modality == 'img':
-        rendered = render_img(item['gt_mesh_path'])
+        # Prefer the training-distribution composite_png when available (BenchCAD);
+        # otherwise render from STL on the fly (DeepCAD/Fusion360).
+        cpng = item.get('composite_png')
+        if cpng is not None:
+            from PIL import Image
+            png_bytes = cpng.get('bytes') if isinstance(cpng, dict) else cpng
+            img = Image.open(io.BytesIO(png_bytes)).convert('RGB').resize((128, 128))
+            video = [img]
+        else:
+            rendered = render_img(item['gt_mesh_path'])
+            video = rendered['video']
         return {
-            'video': rendered['video'],
+            'video': video,
             'description': 'Generate cadquery code',
             'file_name': item['uid'],
             'gt_mesh_path': item['gt_mesh_path'],
@@ -300,7 +310,8 @@ def main() -> None:
                     help='Samples per item at non-zero temperature')
     ap.add_argument('--limit', type=int, default=20,
                     help='Items per dataset split (BenchCAD has 3 splits, so total=3*limit for benchcad)')
-    ap.add_argument('--modality', default='pc', choices=['pc', 'img'])
+    ap.add_argument('--modality', default='img', choices=['pc', 'img'],
+                    help='Img matches the strongest eval path (training composite_png for BenchCAD).')
     ap.add_argument('--batch-size', type=int, default=4)
     ap.add_argument('--max-new-tokens', type=int, default=768)
     ap.add_argument('--score-workers', type=int, default=4)
