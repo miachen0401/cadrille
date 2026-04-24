@@ -6,7 +6,7 @@ from functools import partial
 from argparse import ArgumentParser
 
 import torch
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
 from cadrille import Cadrille, collate
@@ -93,6 +93,43 @@ class WandbRunSaverCallback(TrainerCallback):
 
 
 # ---------------------------------------------------------------------------
+# Weighted-sampler trainer (enforces sft_mix_weights across ConcatDataset)
+# ---------------------------------------------------------------------------
+
+class WeightedSamplerTrainer(Trainer):
+    """HF Trainer with an optional WeightedRandomSampler.
+
+    When `sample_weights` is provided, uses it instead of the default
+    RandomSampler, so sft_mix_weights (e.g. recode:text2cad:benchcad = 2:1:2)
+    actually shapes batch composition. Falls back to Trainer's default
+    sampler when `sample_weights` is None (single-source or unweighted runs).
+    """
+
+    def __init__(self, *args, sample_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_weights = sample_weights
+
+    def _get_train_sampler(self, *args, **kwargs):
+        if self.sample_weights is None:
+            return super()._get_train_sampler(*args, **kwargs)
+        if self.args.world_size > 1:
+            # WeightedRandomSampler draws independently per rank; ratios still
+            # hold in expectation but shards overlap. Fine for SFT; flagged
+            # so multi-GPU runs don't silently diverge from single-GPU ones.
+            import warnings
+            warnings.warn(
+                'sft_mix_weights: using WeightedRandomSampler per rank '
+                '(no DistributedSampler wrapper). Mix ratios hold in '
+                'expectation but rank shards are not disjoint.'
+            )
+        return WeightedRandomSampler(
+            weights=self.sample_weights,
+            num_samples=len(self.train_dataset),
+            replacement=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -101,7 +138,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
-        seed=42, max_code_len=None,
+        seed=42, max_code_len=None, sft_mix_weights=None,
         base_model='Qwen/Qwen2-VL-2B-Instruct',
         resume_from_checkpoint=None, cfg_to_save=None):
 
@@ -129,7 +166,10 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             print(f'Config snapshot saved → {cfg_path}')
 
     cad_recode_path = os.path.join(data_path, 'cad-recode-v1.5')
-    train_dataset = CadRecodeDataset(
+    # Source-labeled datasets; keeps per-source lengths so WeightedRandomSampler
+    # can convert sft_mix_weights (source-level ratios) into per-sample weights.
+    sources = {}
+    sources['recode'] = CadRecodeDataset(
         root_dir=cad_recode_path,
         split='train',
         n_points=256,
@@ -145,13 +185,40 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     accumulation_steps = accum_steps_override or 1
 
     if use_text:
-        text_dataset = Text2CADDataset(
+        sources['text2cad'] = Text2CADDataset(
             root_dir=os.path.join(data_path, 'text2cad'),
             split='train',
             max_code_len=max_code_len)
-        train_dataset = ConcatDataset([train_dataset, text_dataset])
         batch_size = batch_size_override or 8
         accumulation_steps = accum_steps_override or 4
+
+    train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
+        else next(iter(sources.values()))
+
+    # Convert sft_mix_weights (source-level ratios) → per-sample weights.
+    # weight_per_sample = mix[source] / len(source_dataset), so the total
+    # probability mass of each source equals its configured mix weight.
+    sample_weights = None
+    if sft_mix_weights:
+        missing = [s for s in sft_mix_weights if s not in sources]
+        if missing:
+            print(f'[sft_mix_weights] WARNING: {missing} not loaded; '
+                  f'effective mix uses only {list(sources.keys())}')
+        sample_weights = []
+        active = {}
+        for src, ds in sources.items():
+            w = float(sft_mix_weights.get(src, 0.0))
+            active[src] = w
+            if w > 0:
+                sample_weights.extend([w / len(ds)] * len(ds))
+            else:
+                sample_weights.extend([0.0] * len(ds))
+        if sum(sample_weights) <= 0:
+            print('[sft_mix_weights] WARNING: all active weights are 0; '
+                  'falling back to uniform sampler')
+            sample_weights = None
+        else:
+            print(f'[sft_mix_weights] enforced via WeightedRandomSampler: {active}')
 
     # val.pkl is optional — skip evaluation when it doesn't exist
     val_pkl = os.path.join(cad_recode_path, 'val.pkl')
@@ -202,7 +269,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         else:
             os.environ.setdefault('WANDB_RESUME', 'allow')
 
-    trainer = Trainer(
+    trainer = WeightedSamplerTrainer(
         model=model,
         args=TrainingArguments(
             output_dir=output_dir,
@@ -236,6 +303,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         eval_dataset=eval_dataset,
         data_collator=partial(collate, processor=processor, n_points=256),
         tokenizer=processor,
+        sample_weights=sample_weights,
         callbacks=[PrintToFileCallback(), WandbRunSaverCallback()])
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
@@ -328,7 +396,7 @@ if __name__ == '__main__':
     optim                 = cfg.get('optim', 'adamw_torch')
     seed                  = int(cfg.get('seed', 42))
     max_code_len          = cfg.get('max_code_len', None)
-    sft_mix_weights       = cfg.get('sft_mix_weights', None)  # metadata only — see README
+    sft_mix_weights       = cfg.get('sft_mix_weights', None)  # {source: weight}; enforced via WeightedSamplerTrainer
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -384,7 +452,7 @@ if __name__ == '__main__':
         dataloader_workers, log_steps,
         save_steps, eval_steps, wandb_project, eval_on_start,
         bf16, tf32, gradient_checkpointing, optim,
-        seed=seed, max_code_len=max_code_len,
+        seed=seed, max_code_len=max_code_len, sft_mix_weights=sft_mix_weights,
         base_model=base_model,
         resume_from_checkpoint=resume_from_checkpoint,
         cfg_to_save=resolved_cfg)

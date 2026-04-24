@@ -198,9 +198,12 @@ Stage 1 of the recipe. The model learns to emit CadQuery code from an image
 | **text2cad** — cadquery subset | ~66k train + 5.9k val | description (text) | natural-language caption → code |
 | **benchcad** — BenchCAD/cad_bench | ~15k | `composite_png` | synthetic benchmark, rich metadata (family/difficulty/ops) |
 
-**Mixing ratio (metadata)**: `text2cad : recode : benchcad = 1 : 2 : 2`
-(recorded in `configs/sft/mix_1_2_2.yaml`; weighted-sampler enforcement is TODO —
-current `ConcatDataset` samples uniformly across concatenated rows).
+**Mixing ratio**: `text2cad : recode : benchcad = 1 : 2 : 2`
+(set in `configs/sft/mix_1_2_2.yaml` under `sft_mix_weights`). Enforced at
+sample time by `WeightedSamplerTrainer` in `train.py`: per-sample weight is
+`mix[source] / len(source_dataset)`, so each source's probability mass equals
+its configured ratio. Sources listed but not loaded (e.g. `benchcad` until a
+loader is wired) are dropped with a warning and the remaining ratios apply.
 
 **Dataset archive on HuggingFace**: [BenchCAD/cad_sft_training](https://huggingface.co/datasets/BenchCAD/cad_sft_training)
 — contains the recode + text2cad code corpus in bench-shell style as parquet.

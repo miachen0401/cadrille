@@ -1,7 +1,10 @@
 # Cadrille SFT — 3-source mix (recode + text2cad + benchcad)
-# Mixing ratio recorded as metadata: text2cad : recode : benchcad = 1 : 2 : 2
-# (loader enforcement is a TODO — currently uses ConcatDataset; weighted sampler
-# is the next step. See README "SFT Training" section for details.)
+# Mixing ratio enforced at sample time: text2cad : recode : benchcad = 1 : 2 : 2.
+# train.py builds a ConcatDataset and wires WeightedRandomSampler so each
+# source's probability mass matches its sft_mix_weights entry. Sources listed
+# in sft_mix_weights but not loaded by train.py are dropped with a warning —
+# this repo currently loads recode + text2cad only; benchcad loader + corpus
+# path are still pending.
 #
 # Usage: uv run python train.py --config configs/sft/mix_1_2_2.yaml
 
@@ -31,8 +34,11 @@ seed: 42
 # Filter — drop long code (>1000 chars) before training, enforces ≤512-token targets
 max_code_len: 1000
 
-# Mixing metadata (text2cad : recode : benchcad = 1 : 2 : 2)
-# Used as documentation for now. WeightedRandomSampler enforcement is pending.
+# Mixing ratios (text2cad : recode : benchcad = 1 : 2 : 2).
+# Enforced by WeightedSamplerTrainer in train.py — each source's per-sample
+# weight is mix[source] / len(source_dataset), so the total probability mass
+# of a source equals its ratio here. Unloaded sources (e.g. benchcad while
+# no loader wired) are dropped with a warning.
 sft_mix_weights:
   recode:   2
   text2cad: 1
