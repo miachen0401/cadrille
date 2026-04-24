@@ -83,6 +83,8 @@ def main():
     parser.add_argument('--out', default='data/cadrecode_hf_10k', help='Output directory')
     parser.add_argument('--upload', default=None, help='HF repo ID to upload to')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--offset', type=int, default=0,
+                        help='Skip first N candidates (use same seed to get next batch)')
     args = parser.parse_args()
 
     # Collect all .py files
@@ -92,9 +94,11 @@ def main():
     # Sample
     rng = random.Random(args.seed)
     rng.shuffle(all_py)
-    # Over-sample to account for failures
-    candidates = all_py[:int(args.n * 1.3)]
-    print(f'Sampling {len(candidates)} candidates (target {args.n})')
+    # Over-sample to account for failures, skip offset
+    start = int(args.offset * 1.3)
+    end = start + int(args.n * 1.3)
+    candidates = all_py[start:end]
+    print(f'Sampling {len(candidates)} candidates (offset={args.offset}, target {args.n})')
 
     os.makedirs(args.out, exist_ok=True)
 
