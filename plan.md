@@ -1,233 +1,127 @@
-# Research Plan — Cadrille NeurIPS 2026
+# Cadrille SFT + RL — Environment & Smoke Plan
 
-## Goal
+> **Repo simplification (active, branch `revision`)**: see `docs/repo_simplification.md` for the train/eval/tools reorg plan. This plan is about getting env + training running on host.
+>
+> Session source: `notes/sft_setup_2026-04-24.md` (from the prior container session).
 
-Push Cadrille beyond the CPPO baseline (img/DeepCAD 92.2%) with better multimodal grounding.
-**Deadline**: ~50 days (submission ~May 2026).
-**Strategy**: empirical-first — understand failure modes before proposing fixes.
+## Host state (2026-04-24 brave-hubble)
 
----
+- A100 80GB, 118 GB RAM, 48 GB free on `/`
+- Ubuntu, user `ubuntu` with passwordless sudo, NOT in container
+- `/home/ubuntu/cadrille` — repo, tip `a13a104`
+- `.env` at `/home/ubuntu/cadrille/.env` has HF_TOKEN, WANDB_API_KEY, GITHUB_PAT_TOKEN, BenchCAD_HF_TOKEN
+- apt deps for Open3D headless build **already installed** (libosmesa6-dev, libgl1-mesa-dev, libglu1-mesa-dev, libglew-dev)
+- `uv 0.11.7` installed at `~/.local/bin/uv`
 
-## Phase 0 — Error Taxonomy (CURRENT)
+## Execution order (one-by-one; parallel where marked ⇢)
 
-**Focus: official `cadrille-sft` vs `cadrille-rl` only.**
-Our H100 training runs are just steps-limited (~360 steps vs official ~3600+); treat them as future work.
-The research question here is: what are the residual bottlenecks in the *official* RL model?
+### Phase 1 — venv rebuild  ✅ DONE
 
-### Step 0.1 — Full inference run ✅ COMPLETE (2026-03-21)
+- [x] **1.1** Delete stale `.venv` (shebangs pointed to `/workspace/.venv` from container copy)
+- [x] **1.2** `uv sync --no-install-project` — torch 2.5.1+cu124, transformers 4.50.3, etc.
+- [x] **1.3** `uv pip install setuptools`
+- [x] **1.4** pytorch3d 0.7.8 (git 06a76ef, nvcc built for sm_80)
+- [x] **1.5** cadquery 2.5.0.dev0 (git e99a15d)
+- [x] **1.6** flash-attn 2.7.2.post1
+- [x] **1.7** GPU sanity: A100 80GB ✓
+- [x] **1.8** `scripts/setup.sh` patched with `uv pip install setuptools` before git installs
 
-Script: `tools/analyze_errors.py`. All 8046/1725 cases × 2 models × 2 modalities.
-Output: `data/analysis/{dataset}_{model}_{modality}/metadata.jsonl` + `{stem}_pred.py` + `{stem}_pred.stl`.
+Log: `logs/git_installs_20260424_053833.log`
 
-### Step 0.2 — IoU distribution analysis ✅ COMPLETE (2026-03-21)
+### Phase 2 — Open3D headless (source build)  ✅ DONE
 
-See `docs/analysis/phase0_analysis_0321.md`. Key finding: official RL img/DC = **92.7% > 92.2% paper target**.
-RL's main gain is failure elimination (runtime_error −18×), not precision improvement.
+- [x] **2.1** Clone `isl-org/Open3D.git` → `/tmp/Open3D-build`, checkout `8e434558a`
+- [x] **2.2** cmake 3.28.3 + make -j4 with `-DENABLE_HEADLESS_RENDERING=ON -DBUILD_GUI=OFF`
+- [x] **2.3** Install wheel `open3d_cpu-0.18.0+8e43455-...whl` via `uv pip install` (bypassing `make install-pip-package` which dumped to ~/.local — needs venv pip on PATH)
+- [x] **2.4** Verified: headless=True, `Visualizer().create_window(visible=False)`=True, rendered box 256×256 mean=0.906
 
-### Step 0.3 — Error taxonomy (n=200, automated rule-based) ✅ COMPLETE (2026-03-21)
+⚠️ Side effect: `open3d-cpu` pins `numpy<2` — venv numpy was downgraded from 2.2.6 → 1.26.4. pyproject says `numpy>=2.0`. Monitor for breakage; may need to force-upgrade numpy after install if other packages balk.
 
-See `docs/analysis/error_taxonomy_0321.md`. Key finding:
+Follow-up: `scripts/setup.sh` should gain a Phase-2 block (apt deps + cmake 3.28 download + Open3D source build + wheel install via uv pip). Deferred until SFT smoke passes.
 
+### Phase 3 — smoke verification tests  ✅ DONE
+
+All 5 scripts pass:
+
+- [x] **3.1** `check_torch.py` — torch 2.5.1+cu124, A100 80GB sm_80, bf16, pytorch3d _C, flash-attn, transformers 4.50.3
+- [x] **3.2** `check_open3d.py` — open3d 0.18.0+8e43455, HEADLESS=True, box rendered (256, 256, 3) mean=0.906
+- [x] **3.3** `check_cadquery.py` — cadquery 2.5.0.dev0, tessellate 24v/12f, STL 684 bytes
+- [x] **3.4** `check_dataset.py` — sample `0.py` → 400v/364f → rendered mean=0.979
+- [x] **3.5** `check_model.py` — Qwen/Qwen2-VL-2B-Instruct on cuda:0 bf16 + flash_attention_2, forward logits (1, 103, 151936)
+
+### Phase 4 — SFT dataset setup (route β: conservative, keep file-based loaders)
+
+Target: `configs/sft/mix_1_2_2.yaml` — `sft_mix_weights: recode:2 text2cad:1 benchcad:2`.
+
+**Decision**: keep existing `CadRecodeDataset` / `Text2CADDataset` as-is (file-based). Write a new `BenchCadDataset` that mirrors that API. text2cad weight → 0 for first mix smoke (no local text2cad data yet).
+
+**Data sources discovered (2026-04-24 session):**
+- `BenchCAD/cad_sft_training` (private, needs `BenchCAD_HF_TOKEN`) — parquet packaging of recode + text2cad. Used by route α only. **Route β ignores this.**
+- `BenchCAD/cad_bench` (public) — 20143 rows × `{stem, family, difficulty, base_plane, feature_tags, feature_count, ops_used, gt_code, composite_png, qa_pairs, iso_tags}`. Used as the **benchcad** training source.
+- `filapro/cad-recode-v1.5` (public) — per-file `.py`; already have 1673/~3700 train + 8/982 val locally.
+- text2cad — upstream location unknown; **defer**.
+
+**val set**: train.py only evals from `cad-recode-v1.5/val.pkl` (line 223-237). mix has no val contribution.
+
+#### 4.A — recode train.pkl + val.pkl (from already-downloaded `.py`)
+- [ ] **4.A.1** Download the full val split (982 files; small, no rate-limit issue)
+- [ ] **4.A.2** Run `data/cadrecode2mesh.py --path data/cad-recode-v1.5 --workers 8` — `.py` → `.stl` + `train.pkl` / `val.pkl`. Partial train (1673 of ~1M) is fine for smoke.
+- [ ] **4.A.3** Sanity: `pickle.load(open('data/cad-recode-v1.5/train.pkl','rb'))` shows a list of `{py_path, mesh_path}` dicts; sample `.stl` exists.
+
+#### 4.B — benchcad materialization + loader
+- [ ] **4.B.1** Write `tools/fetch_benchcad.py` — downloads `BenchCAD/cad_bench/data/test-00000-of-00001.parquet`, splits into `train/` + `val/` 90/10 by stem hash, materializes:
+    - `data/benchcad/{split}/{stem}.py` — gt_code
+    - `data/benchcad/{split}/{stem}_render.png` — composite_png bytes
+    - `data/benchcad/{split}/{stem}.stl` — exec(gt_code) → tessellate → export (may skip failures; log count)
+    - `data/benchcad/{split}.pkl` — list of `{uid: stem, py_path, mesh_path, png_path, description: family+ops_used}`
+- [ ] **4.B.2** Add `BenchCadDataset` class in `dataset.py`. API: takes `(root_dir, split, mode, img_size, n_points, normalize_std_*, max_code_len)`. For img mode: load pre-rendered PNG directly (no Open3D render needed — major speedup). For pc mode: load STL, sample point cloud. Emits `{description, file_name, answer, video OR point_cloud}`.
+- [ ] **4.B.3** Wire into `train.py` between line 185 (`text2cad`) and line 194 (ConcatDataset). Source key = `'benchcad'`, matching `sft_mix_weights` key.
+- [ ] **4.B.4** Smoke: instantiate BenchCadDataset, fetch item 0 in pc / img / pc_img modes; confirm return shape matches what `Cadrille.forward` expects.
+
+#### 4.C — text2cad (defer)
+- Skip for this pass. In mix_1_2_2 smoke, text2cad weight will fire a `[sft_mix_weights] WARNING: ['text2cad'] not loaded` line (by design — train.py line 201-205).
+
+### Phase 5 — SFT mix smoke  ✅ DONE (benchcad-only)
+
+- [x] **5.1** `configs/sft/a100_mix_smoke.yaml` (benchcad-only, recode:0 benchcad:1 text2cad:0) passed end-to-end.
+    - train_loss 1.22 → 0.55 over 100 steps
+    - eval_loss fires at 0/50/100 (baseline 2.45 → 5.45 expected — model is learning training distribution, eval set is pc_img over different samples)
+    - train_runtime 231s, samples/s 3.46
+    - ckpt-final 4.2 GB saved to `checkpoints/sft-s100-lr2e-4-b4a2-pc_img-0424-0658/checkpoint-final/`
+    - wandb: https://wandb.ai/hula-the-cat/cadrille-sft/runs/lvwzb165 (no entity hardcode; apikey bound to `hula-the-cat` org)
+
+**Fixes landed during smoke:**
+- `accelerate==0.34.2` → `1.3.0` (transformers 4.50.3 needs 1.1+ for `data_seed` kwarg).
+
+Next up for actual training run:
+- [ ] **5.2** 3-source mix: after recode 全量 download + text2cad 本地化, set `sft_mix_weights: {recode:2, text2cad:1, benchcad:2}` and run full `configs/sft/mix_1_2_2.yaml` (12k steps).
+
+### Phase 6 — RL smoke (only if Phase 5 passes)
+
+- [ ] **6.1** `bash scripts/setup.sh --data` — downloads `maksimko123/cadrille` SFT ckpt + test meshes + `data/mined/combined_hard.pkl`. (Packed as zips to avoid HF rate limit — same pattern as the smooth 87c91d3 path.)
+- [ ] **6.2** `uv run python rl/train.py --config configs/rl/smoke.yaml`
+
+## Reference — the previous "smooth" RL launch (commit 87c91d3)
+
+Three commands after Dockerfile.official base was built:
+```bash
+bash scripts/setup.sh           # uv sync + 3 git packages
+bash scripts/setup.sh --data    # SFT ckpt + test meshes + hard examples (zips, not per-file)
+uv run python rl/train.py --config configs/rl/h100.yaml
 ```
-dim_error       72%   ← model gets topology right, numbers wrong
-wrong_primitive 13%   ← box() fallback instead of sketch+extrude (flat plates)
-degenerate       6%
-wrong_plane      5%
-partial_geom     4%
-feature_count    1%
-```
+Smoothness came from: (a) Dockerfile already had Open3D source-built, (b) RL started from public `maksimko123/cadrille` ckpt (no SFT training), (c) zip downloads bypassed HF rate limit.
 
-RL reduces structural errors (wrong_plane 7→3, partial_geom 5→2) but dim_error fraction grows
-(69%→74%): as structural failures are fixed, numeric precision is now the bottleneck.
+Our target is tighter: SFT (with BenchCAD mix) BEFORE RL, so `setup.sh --data` won't cover the BenchCAD corpus — needs its own fetcher.
 
-### Step 0.4 — SFT vs RL per-case delta ✅ COMPLETE (2026-03-21)
+## Open questions (deferred until smoke passes)
 
-See `docs/analysis/sft_rl_delta_0321.md`. All 8046/1725 cases.
+1. Do we need to set `bf16: true` in `configs/sft/smoke.yaml` for A100, or override via CLI? (notes say smoke default is `false` to be safe on 4080/WSL2)
+2. Should `scripts/setup.sh` gain a `--sft-data` flag that calls `data/cadrecode2mesh.py` after downloading? (see notes)
+3. Slim-down of master: delete `experiments/cadevolve/`, `eval/` standalone, `viz/`, old logs — defer per `docs/repo_simplification.md`.
 
-| Combo | fixed | boosted | stable | regressed | broken | net ΔIoU |
-|---|---|---|---|---|---|---|
-| deepcad/img | 6.6% | 21.5% | 69.4% | 2.3% | 0.3% | **+7.10pp** |
-| deepcad/pc | 6.0% | 11.8% | 74.0% | 6.9% | 1.2% | **+4.55pp** |
-| fusion360/img | 12.0% | 23.8% | 59.2% | 4.3% | 0.6% | **+9.61pp** |
-| fusion360/pc | 11.2% | 17.0% | 62.6% | 7.1% | 2.0% | **+8.35pp** |
+## Reference files
 
-RL improves both modalities. img benefits more (train_modality=img).
-PC: 17.8% improve vs 8.1% degrade → still net positive, but RL is less efficient at improving PC.
-
-### Step 0.5 — dim_error sub-classification ✅ COMPLETE (2026-03-21)
-
-Script: `tools/analyze_dim_errors.py`. Full run: n=2816 dim_error cases across all 8 combos.
-See `docs/analysis/dim_error_analysis_0321.md`.
-
-**Key findings:**
-- **local_feat = 98%** — normalised bounding box matches; IoU low due to internal structure (holes, cutouts, features)
-- aspect_ratio (wrong proportions): only **1%** → rules out Option B (scale cue)
-- vol_ratio breakdown (split for local_feat cases):
-  - over_material (>1.1): **47–54%** — pred more solid than GT, consistent with missing subtractive ops
-  - under_material (<0.9): **32–38%** — pred less solid, missing solid features or over-carved
-  - near_volume_match (±10%): **14–20%** — vol matches but IoU low, feature position/size wrong
-- RL PC mode wrong_primitive: **15% → 23%** — RL img training amplifies box() fallback on PC
-
-**Note on vol_ratio**: "missing holes" is the most common story (over_material 47–54%) but NOT the only one.
-Under_material (35%) means some cases the model generates too little material (missing bosses/features
-or over-subtracted). CD reward handles all three sub-types because it is bidirectional (penalises both
-extra pred surfaces and missing GT surfaces), including position-offset cases.
-
-**Decision locked**: Option A (CD reward) is the right Phase 1 main route.
-Option B (scale cue) ruled out. Option C (wrong_primitive curriculum) confirmed as orthogonal second line.
-
-### Step 0.6 — pred code subtractive analysis ← OPTIONAL quick win (2h)
-
-For over_material dim_error cases (vol_ratio > 1.1), parse pred `.py`:
-- If **no `mode='s'`** in pred → model completely skipped subtractive op → over_material from missing cut
-- If **has `mode='s'`** → model tried to subtract but got dimensions/position wrong
-
-This tells us whether the problem is "model forgot to make a hole" vs "made hole with wrong params".
-Informs curriculum design for Phase 1 (targeted vs general).
-Not required before starting Phase 1 — can be done in parallel with implementation.
-
----
-
-## Phase 1 — Targeted Fixes (direction confirmed by Step 0.5)
-
-**Principle**: one minimal change at a time for clean ablation. Two parallel lines:
-- **Main line**: CD precision reward (addresses 98% local_feat dim_error)
-- **Side line**: wrong_primitive curriculum (addresses RL PC mode 23% box fallback)
-
-### Option A ✅ SELECTED: Chamfer Distance precision reward
-
-**Why**: local_feat = 98% of dim_error; vol distribution shows over/under/near — CD handles all three.
-CD is bidirectional: penalises extra pred surfaces (over_material), missing GT surfaces (under_material),
-and position-offset local features (near_volume_match). IoU alone gives weak signal when topology is right.
-
-Formula: `R = α·R_iou + (1−α)·exp(−β·CD)` where CD already computed in scoring pipeline.
-CD already available in metadata.jsonl (`mean_cd` field from evaluate.py).
-
-**Hyperparams to sweep**: α ∈ {0.8, 0.9}, β ∈ {5, 10, 20}. Start with α=0.9, β=10.
-Change: `rl/reward.py` only. No architecture, data, or curriculum changes.
-
-### Option B ❌ RULED OUT: Scale cue in input
-
-aspect_ratio only 1% of dim_error → proportions are already correct. Scale is not the bottleneck.
-
-### Option C ✅ SELECTED (side line): Wrong_primitive curriculum
-
-RL PC mode wrong_primitive 15% → 23% (RL img training amplifies box fallback on PC).
-Implementation: over-sample thin/flat GT shapes in RL training data; soft penalty if pred has no `.sketch()`.
-Orthogonal to Option A — can implement and ablate independently.
-Change: `rl/dataset.py` (sampling weights) + minor soft-reward in `rl/reward.py`.
-
-### Option D: View augmentation (do before first H100 training run)
-
-1-line change in `rl/dataset.py`. Random ±30° camera perturbation during rollout generation.
-Reduces wrong_plane (5% of residual). Free, no compute overhead.
-Add to first Phase 1 training run as baseline enhancement.
-
----
-
-## Eval Results
-
-### Full-set analysis (analyze_errors.py, n=8046/1725, 2026-03-21)
-
-
-| Checkpoint             | img/DeepCAD | img/Fusion360 | pc/DeepCAD | pc/Fusion360 |
-| ---------------------- | ----------- | ------------- | ---------- | ------------ |
-| cadrille-sft           | 87.9%       | 79.6%         | 90.1%      | 83.8%        |
-| cadrille-rl (official) | **92.7%**   | **85.6%**     | **90.7%**  | **86.0%**    |
-
-
-Error breakdown (full test set):
-
-
-| Combo             | success  | zero_iou | runtime_err | syntax_err |
-| ----------------- | -------- | -------- | ----------- | ---------- |
-| deepcad_sft_img   | 7785     | 127      | 132         | 2          |
-| deepcad_rl_img    | **8001** | **38**   | **7**       | 0          |
-| deepcad_sft_pc    | 7631     | 218      | 178         | 19         |
-| deepcad_rl_pc     | **7986** | **46**   | **10**      | **4**      |
-| fusion360_sft_img | 1625     | 54       | 46          | 0          |
-| fusion360_rl_img  | **1705** | **18**   | **2**       | 0          |
-| fusion360_sft_pc  | 1566     | 76       | 68          | 15         |
-| fusion360_rl_pc   | **1693** | **22**   | **5**       | **5**      |
-
-
-### Key findings from Step 0.2
-
-1. **RL improves BOTH img and pc** — contrary to earlier (smaller-sample) eval showing img regression.
-  Official rl checkpoint: +4.8pp img/DC, +6.0pp img/F360, +0.6pp pc/DC, +2.2pp pc/F360.
-2. **RL dramatically reduces failures** — runtime_error drops 18× on img/DC (132→7), zero_iou drops 3×.
-  This is the main driver of IoU gain: model generates executable code far more reliably.
-3. **img > pc after RL on DeepCAD** (92.7% vs 90.7%) — surprising reversal from SFT (87.9% vs 90.1%).
-  RL training (train_modality=img) specifically optimises img mode, possibly at minor pc cost.
-4. **Fusion360 gap persists** — RL img 85.6% vs pc 86.0% (near parity). SFT img 79.6% vs pc 83.8%.
-  F360 shapes are generally harder; both modalities near parity after RL.
-5. **Paper target gap** — official rl img/DC = 92.7%. Our training target = 92.2% (Table 2). Already met.
-
----
-
-## Key Observations (from 0319 session)
-
-- `clip_fraction ≈ 0.001–0.005` in run p0ui4ehg: policy barely moving (lr too low)
-- Training reward rising (0.33→0.46) but validation flat → overfitting to 22,970 hard examples
-- img/DeepCAD −0.8pp after RL (small-sample eval was misleading — full set shows +4.8pp)
-- **REVISED**: img and pc both improve under RL; img improves MORE than pc on DeepCAD
-
-## Code Changes Already Made (in Docker /workspace, 2026-03-19)
-
-- `rl/dataset.py`: `CurriculumRLDataset` (3-phase difficulty expansion)
-- `rl/algorithms/cppo.py`: `adv_std_norm`, `soft_invalid` param
-- `rl/reward.py`: `soft_invalid` distinction (syntax=-1.0, runtime=configurable)
-- `rl/config.py`: new config fields for curriculum/adv_std_norm/soft_invalid_reward
-- `configs/rl/h100.yaml`: `eps_high=0.2`, curriculum options
-- **Note**: these changes are in Docker container, may not be on host
-
----
-
-## Data & Checkpoints
-
-
-| Item            | Location                                 |
-| --------------- | ---------------------------------------- |
-| DeepCAD test    | `data/deepcad_test_mesh/` (8,047 STLs)   |
-| Fusion360 test  | `data/fusion360_test_mesh/` (1,726 STLs) |
-| cadrille-sft    | `checkpoints/cadrille-sft/`              |
-| cadrille-rl     | `checkpoints/cadrille-rl/`               |
-| Analysis output | `data/analysis/` (gitignored)            |
-| W&B             | `hula-the-cat/cadrille-rl`               |
-
-
----
-
-## Immediate Next Steps
-
-**Phase 0 (analysis):**
-- [x] Step 0.1: Full inference run (8046/1725 cases × 2 models × 2 modalities)
-- [x] Step 0.2: IoU distribution + failure breakdown
-- [x] Step 0.3: Error taxonomy (200 cases, automated, 6 categories)
-- [x] Step 0.4: SFT vs RL per-case delta (all cases, full breakdown)
-- [x] **Step 0.5**: dim_error sub-classification → `tools/analyze_dim_errors.py`, results in `docs/analysis/dim_error_analysis_0321.md`
-  - **local_feat = 98%** of all dim_error cases (n=2816); aspect_ratio only 1%
-  - Model gets overall proportions right; fails on holes/cutouts/internal features
-  - Vol ratio > 1.0 (median 1.07–1.15): model over-generates material → missing subtractive ops
-  - RL PC mode: wrong_primitive rises from 15% → 23% (box fallback worsens in PC under img RL)
-- [ ] **Step 0.6** (optional): Predicted parameter distribution analysis (SFT vs RL)
-
-**Phase 1 (training — direction confirmed, ready to implement):**
-- [ ] **Step 1a**: Implement CD reward in `rl/reward.py` (Option A, main line)
-- [ ] **Step 1b**: Add view augmentation in `rl/dataset.py` (Option D, free win)
-- [ ] **Step 1c**: wrong_primitive curriculum in `rl/dataset.py` (Option C, side line, can be parallel)
-- [ ] Run H100 training with 1a+1b, eval at 360/720/1080 steps vs baseline
-- [ ] Ablate: CD-only vs IoU-only to measure CD's contribution
-- [ ] Step 0.6 (optional, 2h): pred code subtractive analysis — can run in parallel with training
-- [ ] H100 runs: continue lr1e-5 runs to convergence (~3600 steps), eval at 720/1080/1440 step milestones
-
----
-
-## Archive — Original RL Reproduction Plan
-
-*(Kept for reference; reproduction is done, focus is now NeurIPS research)*
-
-- Mining results: DeepCAD 4,173 hard / Fusion360 2,688 hard at R_th=0.75
-- GC bug root cause confirmed and fixed in cppo.py:232-300
-- H100 entropy explosion on restart was due to `gradient_checkpointing_disable()` missing in `generate_rollouts()`
-
+- `CLAUDE.md` — env rules (uv, wandb, no PyPI open3d, train_modality=img non-negotiable)
+- `notes/sft_setup_2026-04-24.md` — previous session memo with container context
+- `docs/repo_simplification.md` — parallel reorg effort, doesn't block this plan
+- `install_open3d_apt.sh` — apt-install script for the Open3D headless build deps (already run)
