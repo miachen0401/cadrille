@@ -36,4 +36,4 @@ exec docker run --rm -it \
     -v "${HOME}/.claude-npm-global:/npm-global" \
     -w /workspace \
     "${IMAGE}" \
-    "$@"
+    claude --dangerously-skip-permissions "$@"

@@ -5,7 +5,7 @@ dataset_stats.py and failure_analysis.py; it can also be run standalone to
 print a summary for a single script.
 
 Usage:
-    from tools.parse_cq import parse_cq_script, load_cq_dir
+    from scripts.analysis.parse_cq import parse_cq_script, load_cq_dir
     feats = parse_cq_script(open('some_script.py').read())
 
     # or load an entire directory
