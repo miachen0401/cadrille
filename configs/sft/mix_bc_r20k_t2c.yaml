@@ -17,18 +17,25 @@ mode: img                     # only matters for sources with visual input;
                               # text2cad passes through as pure text in collate()
 use_text: true                # wires Text2CADDataset
 
-# Training — cadrille/configs/sft/a100.yaml values
+# Training — reduced from cadrille a100.yaml bs=15 because text2cad descriptions
+# are long (hundreds of tokens) and mixed batches OOM'd at bs=15 on 80 GB.
+# bs=6 acc=5 eff=30 keeps the paper's effective batch; GC halves activation mem.
 max_steps: 10000
-batch_size: 15
-accumulation_steps: 2         # effective batch = 30
+batch_size: 6
+accumulation_steps: 5         # effective batch = 30
 learning_rate: 2.0e-4
 warmup_steps: 1000
 lr_scheduler_type: cosine
 weight_decay: 0.01
 
 bf16: true
-gradient_checkpointing: false
+gradient_checkpointing: true
 dataloader_workers: 4
+
+# Group by estimated length (code + description chars) so mixed-corpus batches
+# (benchcad ~50-char metadata vs text2cad ~500-char descriptions) don't waste
+# padding. Custom LengthGroupedWeightedSampler wraps our WeightedRandomSampler.
+group_by_length: true
 
 # Logging + checkpoints
 log_steps: 50

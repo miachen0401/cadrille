@@ -93,6 +93,23 @@ def _filter_by_code_len(root_dir, split, annotations, max_code_len, py_path_fn):
     return [annotations[i] for i in keep_idx]
 
 
+def _compute_lengths(annotations, root_dir, py_path_fn, desc_getter=lambda a: ''):
+    """Cheap length estimate per sample: code file size + description char count.
+
+    Used for length-grouped batching (group_by_length=True). os.path.getsize is
+    O(1) per file on a warm fs cache.
+    """
+    lengths = []
+    for item in annotations:
+        try:
+            py = py_path_fn(item)
+            code_len = os.path.getsize(py)
+        except Exception:
+            code_len = 500
+        lengths.append(code_len + len(desc_getter(item) or ''))
+    return lengths
+
+
 class CadRecodeDataset(Dataset):
     def __init__(self, root_dir, split, n_points, normalize_std_pc, noise_scale_pc, img_size,
                 normalize_std_img, noise_scale_img, num_imgs, mode, n_samples=None, ext='stl',
@@ -118,6 +135,9 @@ class CadRecodeDataset(Dataset):
                     root_dir, split, self.annotations, max_code_len,
                     lambda item: os.path.join(root_dir, item['py_path']),
                 )
+            self.lengths = _compute_lengths(
+                self.annotations, root_dir,
+                lambda item: os.path.join(root_dir, item['py_path']))
         else:
             paths = os.listdir(os.path.join(self.root_dir, self.split))
             self.annotations = [
@@ -233,6 +253,10 @@ class Text2CADDataset(Dataset):
                 root_dir, f'text2cad_{split}', self.annotations, max_code_len,
                 lambda item: os.path.join(root_dir, code_dir, f'{item["uid"]}.py'),
             )
+        self.lengths = _compute_lengths(
+            self.annotations, root_dir,
+            lambda item: os.path.join(root_dir, code_dir, f'{item["uid"]}.py'),
+            desc_getter=lambda a: a.get('description', ''))
 
     def __len__(self):
         return self.n_samples if self.n_samples is not None else len(self.annotations)
@@ -292,6 +316,10 @@ class BenchCadDataset(Dataset):
                 root_dir, f'benchcad_{split}', self.annotations, max_code_len,
                 lambda item: os.path.join(root_dir, item['py_path']),
             )
+        self.lengths = _compute_lengths(
+            self.annotations, root_dir,
+            lambda item: os.path.join(root_dir, item['py_path']),
+            desc_getter=lambda a: a.get('description', ''))
 
     def __len__(self):
         return self.n_samples if self.n_samples is not None else len(self.annotations)
@@ -374,6 +402,9 @@ class CadRecode20kDataset(Dataset):
                 root_dir, f'recode20k_{split}', self.annotations, max_code_len,
                 lambda item: os.path.join(root_dir, item['py_path']),
             )
+        self.lengths = _compute_lengths(
+            self.annotations, root_dir,
+            lambda item: os.path.join(root_dir, item['py_path']))
 
     def __len__(self):
         return self.n_samples if self.n_samples is not None else len(self.annotations)
