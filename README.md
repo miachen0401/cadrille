@@ -29,21 +29,21 @@ git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 # 2. Credentials
 cp .env.example .env && $EDITOR .env
 
-# 3. Install everything (apt deps, uv venv, torch+cu124, pytorch3d, cadquery,
-#    flash-attn, Open3D source build with headless rendering, all training
-#    + eval data). ~30-50 min wall-clock; idempotent on re-run.
-bash scripts/setup.sh --data
+# 3. Install (apt deps + uv venv + torch+cu124 + pytorch3d + cadquery
+#    + flash-attn + Open3D source build with headless rendering).
+#    See scripts/check_env/ for post-install smoke tests.
+uv sync
+uv run python data_prep/fetch_benchcad.py
+uv run python data_prep/fetch_cad_sft.py
+uv run python data_prep/prerender_dataset.py
 
-# 4. Reload PATH so 'uv' resolves
-source ~/.local/bin/env 2>/dev/null || source ~/.bashrc
-
-# 5. Train
+# 4. Train
 set -a; source .env; set +a
-uv run python -m train.sft --config configs/sft/mix_bc_r20k_t2c.yaml
+uv run python -m train.sft --config configs/sft/mix_bc4_r20k_t2c.yaml
 ```
 
-For RL training, swap step 3 for `bash scripts/setup.sh --full` (extra
-~4 GB of mined data + reference SFT ckpt) and step 5 for
+For RL training, also fetch DeepCAD/Fusion360 test meshes (see
+`data_prep/`) plus a reference SFT checkpoint, then run
 `uv run python -m train.rl.train --config configs/rl/a100.yaml`.
 
 **Resume / restart**: training configs default to
@@ -87,9 +87,6 @@ data_prep/           # one-time data materializers
   …
 
 scripts/
-  setup.sh                     install everything (--data / --full)
-  run_{sft,rl,eval,passk}.sh   wrappers around python -m …
-  mine_and_train.sh pack_datasets.sh
   check_env/                   post-install env smoke (torch, open3d, cadquery, …)
   analysis/                    one-off diagnostics
     diversity_analysis.py        op-distribution GT vs pred

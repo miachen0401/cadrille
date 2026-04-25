@@ -11,7 +11,7 @@
 # Fresh lr cycle (no resume_from_checkpoint) so cosine peaks at step 1000
 # instead of starting on the decay tail.
 
-checkpoints_dir: ./checkpoints
+checkpoints_dir: /ephemeral/checkpoints   # /dev/vdb (738 GB), keep root-disk free
 
 data_path: ./data
 mode: img
@@ -38,8 +38,13 @@ group_by_length: true         # ~20% throughput win on the mixed-length corpus
 
 # Logging + checkpoints - sparser saves to stay under disk
 log_steps: 50
-save_steps: 4000              # 5 saves across 20k steps; save_only_model peak ~8GB
+save_steps: 1000              # save every 1k steps (synced with eval cadence)
 eval_steps: 1000              # online IoU + eval_loss every 1k
+# Keep optimizer + scheduler + RNG state for exact resume. Each ckpt ~13 GB
+# (vs ~4 GB weights-only). save_total_limit=2 fits the disk after dropping
+# the warm-start base_model dir post-boot. HF upload preserves history.
+save_only_model: false
+save_total_limit: 4              # /ephemeral has 700+ GB free — keep more
 online_eval_n_per: 20         # items per dataset (BenchCAD/DeepCAD/Fusion360) for online IoU
 
 eval_on_start: true
