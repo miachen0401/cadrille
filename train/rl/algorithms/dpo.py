@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from train.rl.eval import run_validation, log_eval
 
 try:

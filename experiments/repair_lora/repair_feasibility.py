@@ -40,7 +40,7 @@ from transformers import AutoProcessor
 
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 
 
 # ---------------------------------------------------------------------------

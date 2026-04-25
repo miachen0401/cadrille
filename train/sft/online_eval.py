@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from transformers import TrainerCallback
 
-from cadrille import collate
+from common.model import collate
 from common.metrics import compute_metrics
 
 

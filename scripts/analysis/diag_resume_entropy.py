@@ -36,7 +36,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoProcessor
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from train.rl.config import load_yaml, resolve_args
 from common.meshio import MeshDataset
 from train.rl.dataset import RLDataset

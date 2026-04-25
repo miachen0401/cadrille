@@ -57,7 +57,7 @@ def _load_examples(pkl_path: str, n: int, modality: str, seed: int = 42):
             item = render_img(mesh_path)
         else:
             import trimesh
-            from dataset import mesh_to_point_cloud
+            from common.datasets import mesh_to_point_cloud
             mesh = trimesh.load(mesh_path)
             mesh.apply_translation(-mesh.bounds[0])
             mesh.apply_scale(1.0 / mesh.extents.max())

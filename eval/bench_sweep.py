@@ -35,10 +35,10 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-from cadrille import Cadrille, collate  # noqa: E402
+from common.model import Cadrille, collate  # noqa: E402
 from common.meshio import render_img  # noqa: E402
 from common.metrics import compute_metrics  # noqa: E402
-from dataset import mesh_to_point_cloud  # noqa: E402
+from common.datasets import mesh_to_point_cloud  # noqa: E402
 from eval.features import feature_recall, aggregate_feature_recall  # noqa: E402
 
 

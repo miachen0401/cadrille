@@ -9,8 +9,8 @@ import torch
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
-from cadrille import Cadrille, collate
-from dataset import Text2CADDataset, CadRecodeDataset, BenchCadDataset, CadRecode20kDataset
+from common.model import Cadrille, collate
+from common.datasets import Text2CADDataset, CadRecodeDataset, BenchCadDataset, CadRecode20kDataset
 
 
 # ---------------------------------------------------------------------------
@@ -76,14 +76,14 @@ class PrintToFileCallback(TrainerCallback):
 
 
 def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private):
-    from train.sft_online_eval import OnlineIoUEvalCallback
+    from train.sft.online_eval import OnlineIoUEvalCallback
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
         OnlineIoUEvalCallback(processor, n_per_dataset=30, seed=seed),
     ]
     if hf_upload_repo:
-        from train.hf_ckpt_uploader import HFCheckpointUploadCallback
+        from train.sft.hf_uploader import HFCheckpointUploadCallback
         cbs.append(HFCheckpointUploadCallback(
             repo_id=hf_upload_repo, private=hf_upload_private))
         print(f'[callbacks] HF ckpt upload to {hf_upload_repo} '
@@ -475,7 +475,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
 # CLI
 # ---------------------------------------------------------------------------
 
-if __name__ == '__main__':
+def main():
     parser = ArgumentParser(
         description='SFT training for Cadrille. '
                     'All settings can be defined in a YAML config file; '
@@ -633,3 +633,7 @@ if __name__ == '__main__':
         group_by_length=group_by_length,
         save_only_model=save_only_model,
         save_total_limit=save_total_limit)
+
+
+if __name__ == '__main__':
+    main()

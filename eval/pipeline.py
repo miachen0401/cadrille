@@ -38,7 +38,7 @@ import trimesh
 from tqdm import tqdm
 from transformers import AutoProcessor
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from common.meshio import render_img
 
 _N_POINTS = 256
@@ -200,7 +200,7 @@ def _prep_img(gt_mesh_path: str) -> Optional[dict]:
 
 
 def _prep_pc(gt_mesh_path: str) -> Optional[dict]:
-    from dataset import mesh_to_point_cloud
+    from common.datasets import mesh_to_point_cloud
 
     try:
         stem = Path(gt_mesh_path).stem

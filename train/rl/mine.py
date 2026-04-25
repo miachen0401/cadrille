@@ -50,7 +50,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoProcessor
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from common.meshio import MeshDataset
 from common.metrics import compute_rewards_parallel
 

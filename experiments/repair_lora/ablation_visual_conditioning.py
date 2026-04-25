@@ -30,7 +30,7 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from experiments.repair_lora.repair_feasibility import is_wrong_primitive, score_code, _hstack
 
 REPAIR_PROMPT = (
