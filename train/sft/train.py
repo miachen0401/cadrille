@@ -614,6 +614,12 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         model=model,
         args=TrainingArguments(
             output_dir=output_dir,
+            # `run_name` ends up as the wandb run name (HF integration
+            # forwards it to wandb.init). Without this, wandb falls back to
+            # its own random adjective-noun ("ethereal-galaxy-46"), which is
+            # useless for distinguishing runs. Use the descriptive output-dir
+            # basename so wandb panel shows e.g. "sft-s20k-lr2e-4-…0425-1929".
+            run_name=os.path.basename(output_dir),
             per_device_train_batch_size=batch_size,
             dataloader_num_workers=dataloader_workers,
             max_steps=max_steps,
