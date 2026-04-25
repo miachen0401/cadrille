@@ -457,17 +457,29 @@ def main():
         except Exception as e:
             print(f'Warning: W&B init failed ({e})')
 
-    _local_ckpt = args.checkpoint or args.checkpoint_sweep
-    _proc_src = (args.base_model
-                 if (args.base_model and os.path.isdir(args.base_model))
-                 else _local_ckpt)
-    if _proc_src != args.base_model:
-        print(f'Processor: {args.base_model!r} not local -> loading from checkpoint')
-    processor = AutoProcessor.from_pretrained(
-        _proc_src,
-        min_pixels=256 * 28 * 28,
-        max_pixels=1280 * 28 * 28,
-        padding_side='left')
+    # Processor source: prefer --base-model (HF id or local dir both fine for
+    # AutoProcessor.from_pretrained). On rate-limited / offline environments
+    # pass --base-model <local-dir> to avoid HF hub fetch.
+    # If --base-model resolution fails, fall back to a single checkpoint dir
+    # (sweep mode points to a parent dir which is NOT a valid pretrained
+    # source — skip it for fallback).
+    try:
+        processor = AutoProcessor.from_pretrained(
+            args.base_model,
+            min_pixels=256 * 28 * 28,
+            max_pixels=1280 * 28 * 28,
+            padding_side='left')
+    except Exception as e:
+        if args.checkpoint:
+            print(f'Processor: --base-model {args.base_model!r} failed ({e}); '
+                  f'falling back to {args.checkpoint}')
+            processor = AutoProcessor.from_pretrained(
+                args.checkpoint,
+                min_pixels=256 * 28 * 28,
+                max_pixels=1280 * 28 * 28,
+                padding_side='left')
+        else:
+            raise
 
     examples = load_val_examples(args.val_dir, args.n_examples)
     if not examples:
