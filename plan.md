@@ -78,9 +78,70 @@ fewer samples or temps).
 - Fix any remaining gaps (apt deps prompt, Open3D source build auto-run).
 
 ### T6 — RL training (deferred until SFT stable)
-- `bash scripts/setup.sh --full` to pull hard-mined RL data + reference ckpt
 - `python -m train.rl.train --config configs/rl/a100.yaml`
 - (Not started; awaiting SFT converged weights.)
+
+### T7 — Alternative dense VL backbones (Qwen2.5-VL, Qwen3-VL, …)
+**Goal:** make Cadrille's backbone swappable so we can A/B Qwen2-VL-2B (current)
+against newer / larger dense VLMs without forking the training pipeline.
+
+**Current hardcoding** (audit before refactor):
+- `common/model.py:5` — `from transformers import Qwen2VLForConditionalGeneration`
+- `common/model.py:6` — `Qwen2VLCausalLMOutputWithPast` import
+- `common/model.py:187` — `class Cadrille(Qwen2VLForConditionalGeneration)`
+- `common/model.py:334` — `return Qwen2VLCausalLMOutputWithPast(…)` in forward
+- Configs: `base_model: Qwen/Qwen2-VL-2B-Instruct` (and warm-start ckpt paths)
+- `bad_words_ids=[[model.config.video_token_id]]` in eval/generation paths
+- collate.py: `process_vision_info` from `qwen_vl_utils` — Qwen2/2.5 share, Qwen3 may differ
+
+**Subtasks (do ONE backbone end-to-end before starting the next):**
+
+T7.1 — **Refactor Cadrille to a backbone-agnostic mixin**
+  - New `common/model.py::make_cadrille_class(BackboneCls, OutputCls) -> Cadrille`
+  - Move FourierPointEncoder injection + custom forward into a mixin that
+    `__init__`'s onto any `*VLForConditionalGeneration` parent.
+  - Keep current `Cadrille` (= Qwen2-VL backed) as the default for back-compat.
+  - Add `cfg['backbone']: qwen2_vl | qwen2_5_vl | qwen3_vl` switch in train/sft/train.py.
+  - Smoke: `python -m train.sft --config configs/sft/smoke.yaml backbone=qwen2_vl`
+    matches current behavior bit-for-bit.
+
+T7.2 — **Qwen2.5-VL** (transformers 4.50.3 already supports it; same vision
+  token layout as 2-VL, drop-in via the mixin)
+  - Add `configs/sft/mix_bc4_r20k_t2c_qwen25vl3b.yaml`
+    `base_model: Qwen/Qwen2.5-VL-3B-Instruct` (3 B is the closest size to current 2 B)
+  - One-batch forward smoke (`python -c …` or a `tests/test_backbone_swap.py`)
+  - 500-step toy SFT run, confirm IoU + ops eval emit cleanly, no shape mismatches
+  - Full 20 k SFT run with same data mix → compare to Qwen2-VL-2B run on
+    `op_loss_cos_weighted`, `rare_op_macro_recall`, IoU at matched steps
+
+T7.3 — **Qwen3-VL** (blocked on transformers release containing
+  `Qwen3VLForConditionalGeneration` — not in 4.50.3)
+  - Pin transformers to the first version that ships Qwen3-VL
+  - Re-run T7.1 smoke to ensure mixin still composes
+  - Add `configs/sft/...qwen3vl.yaml`
+  - 500-step toy → 20 k full
+
+T7.4 — **A/B comparison report** (after ≥ 2 backbones have a full SFT run)
+  - `docs/backbone_ab_2026-…md`: side-by-side wandb metrics (IoU,
+    op_loss_cos_weighted, rare_op_macro_recall, exec_rate, distinct_codes_frac)
+    at matched training step + matched compute, plus example generations.
+  - Decision criteria: ≥ +0.05 IoU on BenchCAD val OR ≥ +0.10 rare_op_macro_recall
+    to justify swapping the default backbone.
+
+**Other dense VLM candidates** (not on the immediate critical path; consider
+for T7.5+ once Qwen2.5/Qwen3 paths are proven):
+  - InternVL2.5 / InternVL3 (different processor + vision tokenizer)
+  - LLaVA-OneVision (transformers-native)
+  - PaliGemma2 (Gemma2 LM, much smaller VL token budget)
+  - MiniCPM-V 2.6 (good 8 B parameter-efficient option)
+  - Llama-3.2-Vision (11 B / 90 B)
+  - Each needs its own `process_vision_info` adapter; the mixin should be
+    extended to take a `vision_info_fn` callable.
+
+**Constraint:** all of T7 happens IN PARALLEL with the current SFT run on
+master config (`mix_bc4_r20k_t2c.yaml` on Qwen2-VL-2B). Do not stop training.
+Use the / branch for refactor + smoke; full backbone-comparison runs can wait
+until current 20 k run finishes (~16 h ETA from 2026-04-25 06:00).
 
 ## Recent history (quick recall)
 
