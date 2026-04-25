@@ -169,9 +169,13 @@ class WeightedSamplerTrainer(Trainer):
     mixed-length corpora.
     """
 
-    def __init__(self, *args, sample_weights=None, **kwargs):
+    def __init__(self, *args, sample_weights=None, group_by_length=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.sample_weights = sample_weights
+        # `group_by_length` was a TrainingArguments kwarg in transformers <5.0
+        # but was removed in 5.x. We carry our own copy to drive
+        # LengthGroupedWeightedSampler regardless of transformers version.
+        self._group_by_length = group_by_length
 
     def _get_eval_sampler(self, eval_dataset):
         # HF Trainer tries to infer lengths from 'input_ids' when
@@ -191,7 +195,7 @@ class WeightedSamplerTrainer(Trainer):
                 'expectation but rank shards are not disjoint.'
             )
         n = len(self.train_dataset)
-        if self.args.group_by_length:
+        if self._group_by_length:
             lengths = _collect_lengths(self.train_dataset)
             if len(lengths) == n and len(set(lengths)) > 1:
                 print(f'[sampler] LengthGroupedWeightedSampler: '
@@ -438,7 +442,6 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             warmup_steps=warmup_steps,
             weight_decay=0.01,
             gradient_accumulation_steps=accumulation_steps,
-            group_by_length=group_by_length,
             bf16=bf16,
             tf32=tf32 if tf32 else None,
             gradient_checkpointing=gradient_checkpointing,
@@ -463,6 +466,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         data_collator=partial(collate, processor=processor, n_points=256),
         tokenizer=processor,
         sample_weights=sample_weights,
+        group_by_length=group_by_length,
         callbacks=_build_callbacks(
             processor=processor, seed=seed,
             hf_upload_repo=hf_upload_repo,
