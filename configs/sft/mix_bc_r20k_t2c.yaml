@@ -41,6 +41,7 @@ group_by_length: true
 log_steps: 50
 save_steps: 2000              # 5 saves across the run
 eval_steps: 1000              # online eval every 1k steps (incl. IoU + failures)
+online_eval_n_per: 20         # items per dataset (BenchCAD/DeepCAD/Fusion360) for online IoU
 eval_on_start: true
 
 # Auto-resume — train.sft picks newest checkpoint-<N>/ in output_dir

@@ -40,6 +40,7 @@ group_by_length: true         # ~20% throughput win on the mixed-length corpus
 log_steps: 50
 save_steps: 4000              # 5 saves across 20k steps; save_only_model peak ~8GB
 eval_steps: 1000              # online IoU + eval_loss every 1k
+online_eval_n_per: 20         # items per dataset (BenchCAD/DeepCAD/Fusion360) for online IoU
 
 eval_on_start: true
 resume_from_checkpoint: null  # NOT a resume - base_model warm start instead
