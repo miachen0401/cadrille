@@ -184,6 +184,7 @@ def run_online_eval(model, processor, examples: list[dict],
         for (mod, label), b in buckets.items():
             ious, cds = b['ious'], b['cds']
             fail_frac  = b['failures'] / b['total'] if b['total'] else 0.0
+            exec_rate  = 1.0 - fail_frac
             mean_iou   = float(np.mean(ious))   if ious else 0.0
             median_iou = float(np.median(ious)) if ious else 0.0
             mean_cd    = float(np.mean(cds))    if cds  else float('nan')
@@ -194,8 +195,9 @@ def run_online_eval(model, processor, examples: list[dict],
             out[f'{prefix}/CD mean']           = mean_cd
             out[f'{prefix}/CD median']         = median_cd
             out[f'{prefix}/Failures fraction'] = fail_frac
+            out[f'{prefix}/exec_rate']         = exec_rate
             print(f'  [{mod}/{label}] IoU={mean_iou:.3f}  '
-                  f'Fail={fail_frac*100:.1f}%  (n={b["total"]})', flush=True)
+                  f'exec={exec_rate*100:.1f}%  (n={b["total"]})', flush=True)
         return out
 
     finally:
@@ -212,7 +214,7 @@ class OnlineIoUEvalCallback(TrainerCallback):
     eval_loss goes into — wandb picks them up without an extra call.
     """
 
-    def __init__(self, processor, n_per_dataset: int = 30, seed: int = 42,
+    def __init__(self, processor, n_per_dataset: int = 20, seed: int = 42,
                  subsets: dict | None = None, eval_batch_size: int = 8,
                  reward_workers: int = 8, max_new_tokens: int = 768,
                  eval_timeout: float = 30.0):
