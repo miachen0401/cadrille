@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from common.meshio import render_img
 from common.metrics import compute_metrics
 
@@ -52,7 +52,7 @@ def load_val_examples(split_dir: str, n_samples: int, n_points: int = 256,
     plus gt_mesh_path, file_name, _dataset_label, _modality.
     """
     import trimesh
-    from dataset import mesh_to_point_cloud
+    from common.datasets import mesh_to_point_cloud
 
     stl_files = sorted(f for f in os.listdir(split_dir) if f.endswith('.stl'))
     rng = random.Random(42)

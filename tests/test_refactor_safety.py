@@ -45,7 +45,8 @@ def _discover_modules() -> list[str]:
             if m.name in _EXCLUDE:
                 continue
             mods.append(m.name)
-    mods.extend(["dataset", "cadrille"])  # top-level modules
+    # cadrille.py + dataset.py moved to common/{model,datasets}.py — they're
+    # already covered by the "common" walk above.
     return mods
 
 

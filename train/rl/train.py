@@ -46,7 +46,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoProcessor
 
-from cadrille import Cadrille
+from common.model import Cadrille
 from train.rl.config import load_yaml, resolve_args
 from common.meshio import MeshDataset
 from train.rl.dataset import RLDataset, DPODataset

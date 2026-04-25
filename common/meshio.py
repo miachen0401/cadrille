@@ -32,7 +32,7 @@ def render_img(gt_mesh_path: str) -> dict:
     import trimesh
     import open3d
     from PIL import Image, ImageOps
-    from dataset import mesh_to_image
+    from common.datasets import mesh_to_image
 
     mesh = trimesh.load(gt_mesh_path)
     # Normalize to [0,1]^3 — matches reference code (transform_real_mesh + scale/translate)
@@ -96,7 +96,7 @@ class MeshDataset:
         else:
             # Point-cloud mode — load and process all meshes at init.
             import trimesh
-            from dataset import mesh_to_point_cloud
+            from common.datasets import mesh_to_point_cloud
 
             self.examples = []
             print(f'Loading {len(stl_files)} meshes from {data_dir} ...')

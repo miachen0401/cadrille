@@ -63,4 +63,4 @@ pack_and_upload \
     "Hula0401/fusion360_test_mesh"
 
 echo ""
-echo "Both zips uploaded. Update setup.sh / colab.ipynb to use hf_hub_download."
+echo "Both zips uploaded. setup.sh --data already pulls them via hf_hub_download."

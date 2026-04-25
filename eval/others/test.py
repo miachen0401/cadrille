@@ -7,8 +7,8 @@ import torch
 from transformers import AutoProcessor
 from torch.utils.data import DataLoader, ConcatDataset
 
-from cadrille import Cadrille, collate
-from dataset import Text2CADDataset, CadRecodeDataset
+from common.model import Cadrille, collate
+from common.datasets import Text2CADDataset, CadRecodeDataset
 
 
 def run(data_path, split, mode, checkpoint_path, py_path):

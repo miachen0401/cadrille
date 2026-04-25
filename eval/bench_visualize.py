@@ -106,7 +106,7 @@ def _render_stl(stl_path: str) -> Image.Image | None:
         import trimesh
         import open3d
         from PIL import ImageOps
-        from dataset import mesh_to_image  # cadrille/dataset.py
+        from common.datasets import mesh_to_image  # cadrille/dataset.py
 
         mesh = trimesh.load(stl_path, force="mesh")
         mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)

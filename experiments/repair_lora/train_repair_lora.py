@@ -45,7 +45,7 @@ if _env_path.exists():
                 _k, _v = _line.split('=', 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 
 
 # ---------------------------------------------------------------------------

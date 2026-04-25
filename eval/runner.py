@@ -42,7 +42,7 @@ sys.path.insert(0, str(_REPO))
 import torch
 from transformers import AutoProcessor
 
-from cadrille import Cadrille
+from common.model import Cadrille
 from eval.config import EvalConfig
 from eval.pipeline import run_combo, _load_all_stls
 from eval.render import select_cases, copy_gt_renders, render_pred_stls

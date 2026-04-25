@@ -64,7 +64,7 @@ import numpy as np
 import torch
 from transformers import AutoProcessor
 
-from cadrille import Cadrille, collate
+from common.model import Cadrille, collate
 from common.metrics import compute_metrics
 
 
@@ -93,7 +93,7 @@ def pass_at_k_mean(n_list: List[int], c_list: List[int], k: int) -> float:
 
 def load_val_examples(val_dir: str, n_examples: int, n_points: int = 256) -> list:
     import trimesh
-    from dataset import mesh_to_point_cloud
+    from common.datasets import mesh_to_point_cloud
 
     stl_files = sorted(f for f in os.listdir(val_dir) if f.endswith('.stl'))
     rng = random.Random(42)
@@ -349,7 +349,7 @@ def run_passk(
 def _build_examples(stl_paths: List[str], modality: str) -> list:
     """Build example dicts for eval_passk (pc or img mode)."""
     import trimesh
-    from dataset import mesh_to_point_cloud
+    from common.datasets import mesh_to_point_cloud
     from common.meshio import render_img
 
     examples = []

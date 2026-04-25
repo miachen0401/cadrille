@@ -41,7 +41,7 @@ class RLDataset:
         }
         if self.modality == 'pc':
             import trimesh
-            from dataset import mesh_to_point_cloud
+            from common.datasets import mesh_to_point_cloud
             mesh = trimesh.load(ex['gt_mesh_path'])
             pc = mesh_to_point_cloud(mesh, self.n_points)
             pc = (pc - 0.5) * 2

@@ -37,7 +37,7 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO))
 
-from cadrille import Cadrille, collate  # noqa: E402
+from common.model import Cadrille, collate  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

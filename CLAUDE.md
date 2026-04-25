@@ -49,17 +49,19 @@ Keep the repo clean and structured — think of it as a Meta Research codebase.
 
 **Canonical layout:**
 ```
-cadrille.py          # model definition (single file)
-dataset.py           # shared SFT dataset classes (CadRecode, Text2CAD, BenchCad)
-
-common/              # shared across train, eval, tools
+common/              # shared across train, eval, scripts
+  model.py           # Cadrille (Qwen2-VL-2B + FourierPointEncoder) + collate
+  datasets.py        # CadRecode / Text2CAD / BenchCad / CadRecode20k loaders
   meshio.py          # render_img, MeshDataset
   metrics.py         # compute_metrics, compute_reward, worker pools
 
 train/
-  sft.py             # SFT entry point (python -m train.sft)
+  sft/
+    train.py         # SFT entry  (python -m train.sft)
+    online_eval.py   # IoU + Failures TrainerCallback
+    hf_uploader.py   # background ckpt push to HF model repo
   rl/
-    train.py         # RL entry point (python -m train.rl.train)
+    train.py         # RL entry  (python -m train.rl.train)
     algorithms/      # CPPO, DPO
     dataset.py       # RLDataset, CurriculumRLDataset, DPODataset
     eval.py eval_passk.py  (eval_passk re-exported via eval/passk.py)
@@ -94,6 +96,6 @@ checkpoints/         # model checkpoints (gitignored)
 - **Always add new dataset paths to `.gitignore` before downloading data.** Datasets are never committed.
 - No debug scripts in the repo root or `train/rl/`. One-off scripts → delete after use.
 - Putting a new script somewhere? `data_prep/` if it prepares data once, `bench/` if it times training, `experiments/` if it is an off-main-path investigation, `tools/` if it analyzes trained models. Full argparse docstring required; add to `tools/README.md` if going there.
-- No scratch notebooks committed (use `colab.ipynb` only for the public demo).
+- No scratch notebooks committed.
 - `plan.md` tracks current work.
 - Prefer flat module structure: add to an existing file before creating a new one.
