@@ -66,7 +66,9 @@ def _auto_run_name(prefix, max_steps, learning_rate, batch_size, accum_steps, mo
 
 class PrintToFileCallback(TrainerCallback):
     def on_init_end(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
+        # transformers 5.x lets `logging_dir` default to None when not passed.
+        # Don't crash — only mkdir when an explicit path was set.
+        if state.is_world_process_zero and args.logging_dir:
             os.makedirs(args.logging_dir, exist_ok=True)
 
     def on_log(self, args, state, control, logs, **kwargs):
@@ -628,7 +630,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=partial(collate, processor=processor, n_points=256),
-        tokenizer=processor,
+        # transformers 4.46+ deprecated `tokenizer=`, removed in 5.x.
+        # Use `processing_class=` (multimodal models pass an AutoProcessor here).
+        processing_class=processor,
         sample_weights=sample_weights,
         group_by_length=group_by_length,
         curriculum_phases=expanded_phases,
