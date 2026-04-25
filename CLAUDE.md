@@ -81,7 +81,11 @@ experiments/
   data_prep_cadlib/  # DeepCAD/Fusion360 mesh gen (needs cadlib, not in pyproject)
 
 configs/             # YAML configs (one per GPU tier: a100, h100, 4080, smoke)
-scripts/             # python utilities (no shell wrappers — invoke `python -m …` directly)
+scripts/
+  setup.sh           # one-click installer (apt + uv + Open3D source build + data fetch)
+  mine_and_train.sh  # RL data prep + train pipeline orchestration
+  pack_datasets.sh   # zip + HF-upload mesh datasets
+  run_passk.sh       # pass@k eval wrapper
   check_env/         # post-install env verification (torch, open3d, model, …)
   analysis/          # one-off research analyses (plot_kl_quadrants, analyze_*,
                      #   mining_analysis, render_*_grid, failure_analysis, …)
