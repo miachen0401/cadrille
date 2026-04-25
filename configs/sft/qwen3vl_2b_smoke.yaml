@@ -52,6 +52,6 @@ save_only_model: true
 save_total_limit: 1
 
 hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-smoke
-hf_upload_private: true
+hf_upload_private: false
 
 wandb_project: cadrille-sft
