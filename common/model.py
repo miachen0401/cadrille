@@ -311,6 +311,33 @@ def _make_cadrille_class(backbone_cls, output_cls):
             # all-False), just hand the standard inputs to super().forward().
             no_pc = (is_pc is None) or (not bool(is_pc.any()))
             if no_pc:
+                # Undo collate's batch-dim padding on pixel_values_videos.
+                # Our `collate()` pads pixel_values_videos to shape (B, P, H)
+                # with zeros in the text-only rows so the legacy custom
+                # forward (PC path) could index `[is_img]`. Modern parent
+                # forwards (transformers ≥ 5, esp. Qwen3-VL's deepstack
+                # vision encoder) take the processor's natural flat shape
+                # (total_video_patches, H) and explode on zero entries —
+                # the symptom is a `reshape … 0 elements into [0, 0, 2, …]`
+                # error inside `fast_pos_embed_interpolate`. Strip back to
+                # the natural format before delegating.
+                if (pixel_values_videos is not None
+                        and pixel_values_videos.dim() == 3
+                        and is_img is not None
+                        and pixel_values_videos.shape[0] == is_img.shape[0]):
+                    n_img = int(is_img.sum())
+                    if n_img == 0:
+                        # All-text batch — drop vision kwargs entirely.
+                        pixel_values_videos = None
+                        video_grid_thw = None
+                    else:
+                        pixel_values_videos = (
+                            pixel_values_videos[is_img]
+                            .reshape(-1, pixel_values_videos.shape[-1]))
+                        if (video_grid_thw is not None
+                                and video_grid_thw.shape[0] == is_img.shape[0]):
+                            video_grid_thw = video_grid_thw[is_img]
+
                 # Parent forward signatures vary slightly across versions;
                 # filter to only kwargs the parent actually accepts.
                 import inspect
