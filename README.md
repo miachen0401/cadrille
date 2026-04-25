@@ -37,34 +37,42 @@ The SFT backbone and model architecture are unchanged from cadrille (Qwen2-VL-2B
 
 ---
 
-### Quick Start — RL Training on a New VM
+### Quick Start — From-Zero on a Fresh A100/H100 VM
+
+Five steps to a running SFT job. Tokens you need (`.env.example` documents
+each): `HF_TOKEN` (HuggingFace, "read" scope), `WANDB_API_KEY` (wandb).
 
 ```bash
+# 1. Clone
 git clone https://github.com/miachen0401/cadrille.git && cd cadrille
 
-# 1. Install deps (uv, torch, huggingface_hub, wandb, pytorch3d, cadquery, flash-attn)
-bash scripts/setup.sh
-source ~/.local/bin/env 2>/dev/null || source ~/.bashrc  # reload PATH so 'uv' is found
+# 2. Credentials — fill HF_TOKEN + WANDB_API_KEY (the only required keys)
+cp .env.example .env && $EDITOR .env
 
-# 2. Set credentials — copy the example and fill in your tokens
-cp .env.example .env   # then edit .env with your HF_TOKEN and WANDB_API_KEY
-source .env            # loads HF_TOKEN and WANDB_API_KEY into the shell
-# Alternative: interactive login (uv run huggingface-cli login && uv run wandb login)
-
-# 3. Download SFT checkpoint + test meshes + hard examples (~2 GB, ~5 min)
+# 3. One-shot install (apt deps, uv, torch+cu124, pytorch3d, cadquery,
+#    flash-attn, Open3D source build with headless rendering, all training
+#    + eval data: BenchCAD ~10 GB, cad-recode-20k ~500 MB, DeepCAD/Fusion360
+#    test meshes ~600 MB).  ~30-50 min total wall-clock.
 bash scripts/setup.sh --data
-# Optional: also download full training meshes for mining new hard examples (~4 GB extra)
-# bash scripts/setup.sh --full
 
-# 4. Train — use screen/tmux so training survives SSH disconnects
-screen -S rl    # or: tmux new -s rl
-PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100.yaml
-# Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r rl
+# 4. Reload PATH so 'uv' resolves
+source ~/.local/bin/env 2>/dev/null || source ~/.bashrc
 
-# Resume after crash / session timeout
-PYTHONUNBUFFERED=1 uv run python3 -u rl/train.py --config configs/rl/h100_bs128.yaml \
-    --checkpoint-path ./checkpoints/<run-name>/checkpoint-<N>
+# 5. Train — use screen/tmux so it survives SSH disconnects
+set -a; source .env; set +a   # export HF_TOKEN + WANDB_API_KEY into the shell
+screen -S sft
+uv run python -m train.sft --config configs/sft/mix_bc_r20k_t2c.yaml
+# Ctrl-A D to detach (screen) / Ctrl-B D (tmux); reattach with: screen -r sft
 ```
+
+For RL training, swap step 3 for `bash scripts/setup.sh --full` (extra
+~4 GB hard-mined data + reference SFT checkpoint), then step 5 becomes
+`uv run python -m train.rl.train --config configs/rl/a100.yaml`.
+
+**Resume / restart**: training configs already set
+`resume_from_checkpoint: latest`, so re-running step 5 picks up the newest
+`checkpoint-<N>/` in the run output dir. To resume a different run, point
+`--resume-from-checkpoint <path>`.
 
 **GPU configs:**
 
