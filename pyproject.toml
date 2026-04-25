@@ -24,6 +24,7 @@ dependencies = [
     "scikit-image",
     # Utilities
     "wandb",
+    "wandb-workspaces>=0.3.0",
     "tqdm",
     "pyyaml",
     "numpy>=2.0",
