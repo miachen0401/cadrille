@@ -13,6 +13,42 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLCausalLMOutput
 # so we don't pay startup cost for backbones we don't use, and so older
 # transformers versions still work for the Qwen2-VL default.
 # ---------------------------------------------------------------------------
+def _cfg_attr(config, name: str):
+    """Resolve `name` from a Qwen-VL config across transformers versions.
+
+    transformers ≥ 5.0 nests model dimensions under `config.text_config`
+    (`text_config.hidden_size`, `text_config.vocab_size`, …) while leaving
+    multimodal token IDs at top-level (`image_token_id`, `video_token_id`).
+    transformers < 5 used to expose dimensions at the top. This helper
+    checks top first, then falls back to `text_config`, so Cadrille works
+    on both wire formats without two code paths.
+    """
+    val = getattr(config, name, None)
+    if val is not None:
+        return val
+    text_cfg = getattr(config, 'text_config', None)
+    if text_cfg is not None:
+        val = getattr(text_cfg, name, None)
+        if val is not None:
+            return val
+    raise AttributeError(
+        f'config of type {type(config).__name__} has no attribute {name!r} '
+        f'(checked top-level and `text_config`).'
+    )
+
+
+def _visual_dtype(visual):
+    """Resolve the vision encoder's dtype across transformers versions.
+
+    Qwen2-VL had `visual.get_dtype()`. Qwen3-VL's `Qwen3VLVisionModel`
+    dropped it; use the first parameter's dtype as a robust fallback.
+    """
+    fn = getattr(visual, 'get_dtype', None)
+    if callable(fn):
+        return fn()
+    return next(visual.parameters()).dtype
+
+
 def _resolve_backbone(name: str):
     n = name.lower().replace('-', '_').replace('.', '_')
     if n in ('qwen2_vl', 'qwen2vl'):
@@ -239,7 +275,7 @@ def _make_cadrille_class(backbone_cls, output_cls):
             super().__init__(config)
 
             torch.set_default_dtype(torch.float32)
-            self.point_encoder = FourierPointEncoder(config.hidden_size)
+            self.point_encoder = FourierPointEncoder(_cfg_attr(config, 'hidden_size'))
             torch.set_default_dtype(torch.bfloat16)
 
         def forward(
@@ -262,7 +298,50 @@ def _make_cadrille_class(backbone_cls, output_cls):
             cache_position=None,
             point_clouds=None,
             is_pc=None,
-            is_img=None):
+            is_img=None,
+            **kwargs):
+
+            # IMG-ONLY FAST PATH — defer to the parent's native forward.
+            # The point-cloud branch below reimplements the embedding splice
+            # which only matched Qwen2-VL's pre-transformers-5.0 forward shape.
+            # Newer Qwen-VL parents (Qwen2.5-VL, Qwen3-VL with deepstack
+            # vision injection) handle vision internally; replicating their
+            # forward in our subclass would re-walk a moving target. Since
+            # all current SFT runs are img-only (point_clouds=None or is_pc
+            # all-False), just hand the standard inputs to super().forward().
+            no_pc = (is_pc is None) or (not bool(is_pc.any()))
+            if no_pc:
+                # Parent forward signatures vary slightly across versions;
+                # filter to only kwargs the parent actually accepts.
+                import inspect
+                parent_sig = inspect.signature(backbone_cls.forward).parameters
+                parent_kwargs = dict(
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    position_ids=position_ids, past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds, labels=labels,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    cache_position=cache_position,
+                )
+                # Only include kwargs the parent supports
+                parent_kwargs = {k: v for k, v in parent_kwargs.items()
+                                 if k in parent_sig and v is not None}
+                # Pass through any extra kwargs (e.g. mm_token_type_ids)
+                for k, v in kwargs.items():
+                    if k in parent_sig:
+                        parent_kwargs[k] = v
+                return backbone_cls.forward(self, **parent_kwargs)
+
+            # PC PATH — embed tokens manually, splice in image/video/PC
+            # embeddings, then call into the LM submodule. Tested against
+            # transformers 4.50 + Qwen2-VL; needs an audit before trusting
+            # on transformers 5.x or non-Qwen2 parents.
 
             output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
             output_hidden_states = (
@@ -270,11 +349,22 @@ def _make_cadrille_class(backbone_cls, output_cls):
             )
             return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+            # Resolve LM + vision submodules. transformers ≥ 5.0 nests both
+            # under `self.model.{language_model, visual}` (the VL model is the
+            # outer container). transformers < 5 had `self.model` = LM and
+            # `self.visual` = vision encoder side-by-side. Use HF's standard
+            # `get_input_embeddings()` for the embed table and side-resolve
+            # vision/LM modules.
+            lm = (self.model.language_model
+                  if hasattr(self.model, 'language_model') else self.model)
+            visual = (self.model.visual if hasattr(self.model, 'visual')
+                      else getattr(self, 'visual', None))
+
             if inputs_embeds is None:
-                inputs_embeds = self.model.embed_tokens(input_ids)
+                inputs_embeds = self.get_input_embeddings()(input_ids)
                 if pixel_values is not None:
-                    pixel_values = pixel_values.type(self.visual.get_dtype())
-                    image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                    pixel_values = pixel_values.type(_visual_dtype(visual))
+                    image_embeds = visual(pixel_values, grid_thw=image_grid_thw)
                     n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                     n_image_features = image_embeds.shape[0]
                     if n_image_tokens != n_image_features:
@@ -293,9 +383,9 @@ def _make_cadrille_class(backbone_cls, output_cls):
                 if is_img.sum() > 0 and pixel_values_videos is not None:
                     pixel_values_videos = pixel_values_videos[is_img]
                     pixel_values_videos = pixel_values_videos.view(-1, pixel_values_videos.shape[-1])
-                    pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
+                    pixel_values_videos = pixel_values_videos.type(_visual_dtype(visual))
                     video_grid_thw = video_grid_thw[is_img]
-                    video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+                    video_embeds = visual(pixel_values_videos, grid_thw=video_grid_thw)
                     n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
                     n_video_features = video_embeds.shape[0]
                     if n_video_tokens != n_video_features:
@@ -346,7 +436,11 @@ def _make_cadrille_class(backbone_cls, output_cls):
                     position_ids = position_ids.add(delta)
                     position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-            outputs = self.model(
+            # Forward through the LM only — vision is already mixed into
+            # `inputs_embeds`. transformers ≥ 5.0 nests the LM under
+            # `self.model.language_model`; older versions had it at
+            # `self.model`. Resolved via `lm` above.
+            outputs = lm(
                 input_ids=None,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
@@ -371,7 +465,7 @@ def _make_cadrille_class(backbone_cls, output_cls):
                 shift_labels = labels[..., 1:].contiguous()
                 # Flatten the tokens
                 loss_fct = CrossEntropyLoss()
-                shift_logits = shift_logits.view(-1, self.config.vocab_size)
+                shift_logits = shift_logits.view(-1, _cfg_attr(self.config, 'vocab_size'))
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
