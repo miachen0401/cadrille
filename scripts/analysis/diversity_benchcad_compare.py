@@ -25,13 +25,20 @@ from scripts.analysis.diversity_analysis import _OPS, detect_ops
 
 
 def gt_corpus_freq() -> tuple[Counter, int]:
-    """Return (op → items containing op, total items) over benchcad train+val."""
+    """Return (op → items containing op, total items) over benchcad train+val.
+
+    Skips files that fail to read (encoding / permission issues) so a single
+    corrupt entry does not abort the whole 20k scan.
+    """
     counts: Counter = Counter()
     total = 0
     for split in ('train', 'val'):
         split_dir = Path('data/benchcad') / split
         for py in sorted(split_dir.glob('*.py')):
-            code = py.read_text()
+            try:
+                code = py.read_text()
+            except Exception:
+                continue
             for op in detect_ops(code):
                 counts[op] += 1
             total += 1
@@ -44,7 +51,14 @@ def pred_corpus_freq(raw_jsonl: Path) -> dict[str, tuple[Counter, int]]:
     rows = [json.loads(l) for l in raw_jsonl.read_text().splitlines() if l.strip()]
     if not rows:
         return out
-    temps = list(rows[0]['by_temp'].keys())
+    # Defensive: union temps across all rows in case a row is missing a temp.
+    temps_all: set[str] = set()
+    for r in rows:
+        if isinstance(r.get('by_temp'), dict):
+            temps_all.update(r['by_temp'].keys())
+    temps = sorted(temps_all)
+    if not temps:
+        return out
     for t in temps:
         counts: Counter = Counter()
         for r in rows:
