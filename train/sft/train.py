@@ -568,10 +568,24 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         padding_side='left')
     cadrille_cls = get_cadrille_class(backbone)
     print(f'[model] backbone={backbone!r} → {cadrille_cls.__name__}', flush=True)
-    model = cadrille_cls.from_pretrained(
-        base_model,
-        torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2')
+    # Try flash_attention_2 first (3-5× speedup), fall back to sdpa if flash-attn
+    # isn't installed (it lives outside pyproject because it needs --no-build-
+    # isolation; setup.sh installs it). sdpa is stock PyTorch, always available.
+    try:
+        model = cadrille_cls.from_pretrained(
+            base_model,
+            torch_dtype=torch.bfloat16,
+            attn_implementation='flash_attention_2')
+    except (ImportError, ValueError, RuntimeError) as e:
+        if 'flash' in str(e).lower():
+            print(f'[model] flash_attention_2 unavailable ({type(e).__name__}: '
+                  f'{str(e)[:80]}…); falling back to sdpa.', flush=True)
+            model = cadrille_cls.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                attn_implementation='sdpa')
+        else:
+            raise
 
     report_to = 'wandb' if wandb_project else 'none'
     if wandb_project:
