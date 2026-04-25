@@ -70,8 +70,10 @@ sft_mix_weights:
 save_only_model: false
 save_total_limit: 4
 
-# HF private storage is currently full → disable upload. Local ckpts on
-# /ephemeral are durable; flip to a public repo or upgrade quota later.
-hf_upload_repo: null
+# Public upload — free HF accounts have unlimited public storage
+# (private is capped at 5 GB on the free tier; we leaked over that with
+# the prompt-leak-poisoned bc4 history that's now been flipped to public).
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-curriculum-bc1to8
+hf_upload_private: false
 
 wandb_project: cadrille-sft

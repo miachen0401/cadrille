@@ -81,6 +81,6 @@ save_only_model: false
 save_total_limit: 4
 
 hf_upload_repo: Hula0401/cadrille-sft-curriculum-bc1to8-r20k1-t2c1-v2
-hf_upload_private: true
+hf_upload_private: false
 
 wandb_project: cadrille-sft
