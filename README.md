@@ -39,11 +39,11 @@ source ~/.local/bin/env 2>/dev/null || source ~/.bashrc
 
 # 5. Train
 set -a; source .env; set +a
-uv run python -m train.sft --config configs/sft/mix_bc_r20k_t2c.yaml
+uv run python -m train.sft --config configs/sft/mix_bc4_r20k_t2c.yaml
 ```
 
 For RL training, swap step 3 for `bash scripts/setup.sh --full` (extra
-~4 GB of mined data + reference SFT ckpt) and step 5 for
+~4 GB of mined data + reference SFT ckpt), then run
 `uv run python -m train.rl.train --config configs/rl/a100.yaml`.
 
 **Resume / restart**: training configs default to
@@ -87,9 +87,10 @@ data_prep/           # one-time data materializers
   …
 
 scripts/
-  setup.sh                     install everything (--data / --full)
-  run_{sft,rl,eval,passk}.sh   wrappers around python -m …
-  mine_and_train.sh pack_datasets.sh
+  setup.sh                     one-click installer (--data / --full)
+  mine_and_train.sh            RL data prep + train pipeline
+  pack_datasets.sh             zip + HF-upload mesh datasets
+  run_passk.sh                 pass@k eval with batched ckpt iteration
   check_env/                   post-install env smoke (torch, open3d, cadquery, …)
   analysis/                    one-off diagnostics
     diversity_analysis.py        op-distribution GT vs pred

@@ -11,16 +11,19 @@
 # Fresh lr cycle (no resume_from_checkpoint) so cosine peaks at step 1000
 # instead of starting on the decay tail.
 
-checkpoints_dir: ./checkpoints
-
+checkpoints_dir: /ephemeral/checkpoints   # /dev/vdb (738 GB), keep root-disk free
 data_path: ./data
 mode: img
 use_text: true                # text2cad still pulled, just lower weight
 
-# Warm start: load weights from prior best ckpt as the base model.
-# from_pretrained(base_model) treats this as the initial weights, so step
-# count + optimizer + lr schedule all start fresh.
-base_model: ./checkpoints/sft-s10k-lr2e-4-b6a5-img-0424-2001/checkpoint-4000
+# Cold-start from upstream Qwen2-VL-2B. Earlier versions of this config
+# warm-started from `./checkpoints/sft-s10k-.../checkpoint-4000`, but that
+# checkpoint was trained against a leaky BenchCAD prompt (description
+# included `ops=[...]`) — see `common/datasets.py` BenchCadDataset fix.
+# Reusing it would re-import the trivial-mapping behaviour we're trying
+# to remove, so we restart from upstream weights.
+backbone: qwen2_vl
+base_model: Qwen/Qwen2-VL-2B-Instruct
 
 # Training - bs=8 (user request), acc=4 -> eff batch = 32, near paper 30
 max_steps: 20000              # ~5x previous; let benchcad-heavy mix work
@@ -38,8 +41,13 @@ group_by_length: true         # ~20% throughput win on the mixed-length corpus
 
 # Logging + checkpoints - sparser saves to stay under disk
 log_steps: 50
-save_steps: 4000              # 5 saves across 20k steps; save_only_model peak ~8GB
+save_steps: 1000              # save every 1k steps (synced with eval cadence)
 eval_steps: 1000              # online IoU + eval_loss every 1k
+# Keep optimizer + scheduler + RNG state for exact resume. Each ckpt ~13 GB
+# (vs ~4 GB weights-only). save_total_limit=2 fits the disk after dropping
+# the warm-start base_model dir post-boot. HF upload preserves history.
+save_only_model: false
+save_total_limit: 4              # /ephemeral has 700+ GB free — keep more
 online_eval_n_per: 20         # items per dataset (BenchCAD/DeepCAD/Fusion360) for online IoU
 
 eval_on_start: true
@@ -58,7 +66,7 @@ sft_mix_weights:
   recode20k: 1
 
 # HF upload - non-blocking thread, training never pauses
-hf_upload_repo: Hula0401/cadrille-sft-bc4-r20k1-t2c1
+hf_upload_repo: Hula0401/cadrille-sft-bc4-r20k1-t2c1-v2
 hf_upload_private: true
 
 wandb_project: cadrille-sft

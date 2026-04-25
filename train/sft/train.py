@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
-from common.model import Cadrille, collate
+from common.model import Cadrille, collate, get_cadrille_class
 from common.datasets import Text2CADDataset, CadRecodeDataset, BenchCadDataset, CadRecode20kDataset
 
 
@@ -66,7 +66,9 @@ def _auto_run_name(prefix, max_steps, learning_rate, batch_size, accum_steps, mo
 
 class PrintToFileCallback(TrainerCallback):
     def on_init_end(self, args, state, control, **kwargs):
-        if state.is_world_process_zero:
+        # transformers 5.x lets `logging_dir` default to None when not passed.
+        # Don't crash — only mkdir when an explicit path was set.
+        if state.is_world_process_zero and args.logging_dir:
             os.makedirs(args.logging_dir, exist_ok=True)
 
     def on_log(self, args, state, control, logs, **kwargs):
@@ -76,13 +78,20 @@ class PrintToFileCallback(TrainerCallback):
 
 
 def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
-                     online_eval_n_per=20, mix_weights=None):
+                     online_eval_n_per=20, mix_weights=None,
+                     max_iou_k=8, max_iou_temperature=1.0,
+                     max_iou_every_n_evals=1):
     from train.sft.online_eval import OnlineIoUEvalCallback
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
-        OnlineIoUEvalCallback(processor, n_per_dataset=online_eval_n_per,
-                              seed=seed, mix_weights=mix_weights),
+        OnlineIoUEvalCallback(
+            processor, n_per_dataset=online_eval_n_per, seed=seed,
+            mix_weights=mix_weights,
+            max_iou_k=max_iou_k,
+            max_iou_temperature=max_iou_temperature,
+            max_iou_every_n_evals=max_iou_every_n_evals,
+        ),
     ]
     if hf_upload_repo:
         from train.sft.hf_uploader import HFCheckpointUploadCallback
@@ -149,6 +158,108 @@ class LengthGroupedWeightedSampler(torch.utils.data.Sampler):
         return iter(out)
 
 
+class _StepTracker:
+    """Mutable shared step counter so callback + sampler agree on global_step."""
+    def __init__(self, step: int = 0):
+        self.step = step
+
+
+class CurriculumWeightedSampler(torch.utils.data.Sampler):
+    """Curriculum-weighted sampler — switch sampling weights at phase boundaries.
+
+    `phases` is a list of `(start_step, weights_tensor)` tuples sorted by
+    start_step (must include start_step=0). The active weight set at any
+    given step S is the phase whose start_step is the largest value <= S.
+
+    Weights are re-evaluated on every `__iter__` call (i.e. every dataloader
+    epoch); HF Trainer creates the dataloader once but re-iterates it per
+    epoch, so phase boundaries take effect at the next epoch boundary
+    after the threshold step. With our typical 113 k-item ConcatDataset
+    and effective batch 32 (~3.5 k steps/epoch on a 20 k run), expect a
+    ~1 k-step lag between phase trigger and observed weight switch.
+
+    Same length-grouping behaviour as LengthGroupedWeightedSampler.
+    """
+
+    def __init__(self, phases, num_samples: int, lengths: list,
+                 batch_size: int, mega_batch_mult: int = 100,
+                 step_tracker: _StepTracker | None = None):
+        if not phases:
+            raise ValueError('curriculum requires at least one phase')
+        sorted_phases = sorted(phases, key=lambda p: p[0])
+        if sorted_phases[0][0] != 0:
+            raise ValueError(
+                f'first phase must start at step 0 (got {sorted_phases[0][0]})'
+            )
+        self.phases = sorted_phases
+        self.num_samples = num_samples
+        self.lengths = lengths
+        self.batch_size = max(1, batch_size)
+        self.mega_batch_size = self.batch_size * mega_batch_mult
+        self.step_tracker = step_tracker or _StepTracker()
+        self._last_active_start = -1   # debounce phase-change print
+
+    def _active_weights(self):
+        active = self.phases[0][1]
+        active_start = 0
+        for start, w in self.phases:
+            if self.step_tracker.step >= start:
+                active = w
+                active_start = start
+        return active, active_start
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self):
+        weights, active_start = self._active_weights()
+        weights_t = torch.as_tensor(weights, dtype=torch.float)
+        if active_start != self._last_active_start:
+            print(f'[curriculum] step={self.step_tracker.step} → '
+                  f'switched to phase that started at step {active_start} '
+                  f'({len(self.phases)} phases total)', flush=True)
+            self._last_active_start = active_start
+        indices = torch.multinomial(weights_t, self.num_samples,
+                                    replacement=True).tolist()
+        out = []
+        for i in range(0, len(indices), self.mega_batch_size):
+            chunk = indices[i:i + self.mega_batch_size]
+            chunk.sort(key=lambda idx: self.lengths[idx], reverse=True)
+            out.extend(chunk)
+        return iter(out)
+
+
+class CurriculumStepCallback(TrainerCallback):
+    """Push state.global_step into the sampler's StepTracker on every step.
+
+    The sampler reads this on each new __iter__ (epoch boundary) to decide
+    which phase's weights to use. Lightweight — no I/O, just an int copy.
+    """
+    def __init__(self, step_tracker: _StepTracker):
+        self.step_tracker = step_tracker
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self.step_tracker.step = int(state.global_step)
+
+
+def _expand_mix_to_sample_weights(mix: dict, sources: dict) -> list[float]:
+    """Convert a {source: weight} mix dict into a flat per-sample weight list,
+    aligned with the order of `sources` (a dict preserving insertion order).
+
+    Each source contributes `[mix[src] / len(ds)] * len(ds)` so the total
+    sampling mass per source equals its configured mix weight.
+    """
+    out = []
+    for src, ds in sources.items():
+        n = len(ds)
+        w = float(mix.get(src, 0.0))
+        if n > 0 and w > 0:
+            out.extend([w / n] * n)
+        else:
+            out.extend([0.0] * n)
+    return out
+
+
 def _collect_lengths(dataset) -> list:
     """Concat per-dataset .lengths lists; fall back to uniform if a source has none."""
     if isinstance(dataset, ConcatDataset):
@@ -169,9 +280,24 @@ class WeightedSamplerTrainer(Trainer):
     mixed-length corpora.
     """
 
-    def __init__(self, *args, sample_weights=None, **kwargs):
+    def __init__(self, *args, sample_weights=None, group_by_length=False,
+                 curriculum_phases=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.sample_weights = sample_weights
+        # `group_by_length` was a TrainingArguments kwarg in transformers <5.0
+        # but was removed in 5.x. We carry our own copy to drive
+        # LengthGroupedWeightedSampler regardless of transformers version.
+        self._group_by_length = group_by_length
+        # curriculum_phases is a list of (start_step, sample_weights_list).
+        # When set, takes priority over sample_weights — the sampler picks
+        # active weights from the current step.
+        self.curriculum_phases = curriculum_phases
+        if curriculum_phases:
+            self._curriculum_step_tracker = _StepTracker(0)
+            self.add_callback(CurriculumStepCallback(self._curriculum_step_tracker))
+            print(f'[curriculum] {len(curriculum_phases)} phases registered: '
+                  + ', '.join(f'step={s}' for s, _ in curriculum_phases),
+                  flush=True)
 
     def _get_eval_sampler(self, eval_dataset):
         # HF Trainer tries to infer lengths from 'input_ids' when
@@ -181,6 +307,24 @@ class WeightedSamplerTrainer(Trainer):
         return torch.utils.data.SequentialSampler(eval_dataset)
 
     def _get_train_sampler(self, *args, **kwargs):
+        # Curriculum path takes priority. Phase weights already expanded to
+        # per-sample form by run().
+        if self.curriculum_phases:
+            n = len(self.train_dataset)
+            lengths = _collect_lengths(self.train_dataset)
+            if len(lengths) != n:
+                lengths = [1] * n
+            print(f'[sampler] CurriculumWeightedSampler: n={n}, '
+                  f'batch={self.args.train_batch_size}, '
+                  f'phases={[s for s, _ in self.curriculum_phases]}',
+                  flush=True)
+            return CurriculumWeightedSampler(
+                phases=self.curriculum_phases,
+                num_samples=n,
+                lengths=lengths,
+                batch_size=self.args.train_batch_size,
+                step_tracker=self._curriculum_step_tracker,
+            )
         if self.sample_weights is None:
             return super()._get_train_sampler(*args, **kwargs)
         if self.args.world_size > 1:
@@ -191,7 +335,7 @@ class WeightedSamplerTrainer(Trainer):
                 'expectation but rank shards are not disjoint.'
             )
         n = len(self.train_dataset)
-        if self.args.group_by_length:
+        if self._group_by_length:
             lengths = _collect_lengths(self.train_dataset)
             if len(lengths) == n and len(set(lengths)) > 1:
                 print(f'[sampler] LengthGroupedWeightedSampler: '
@@ -225,7 +369,10 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         hf_upload_repo=None, hf_upload_private=True,
         group_by_length=False,
         save_only_model=True, save_total_limit=1,
-        online_eval_n_per=20):
+        online_eval_n_per=20,
+        backbone='qwen2_vl',
+        max_iou_k=8, max_iou_temperature=1.0, max_iou_every_n_evals=1,
+        curriculum_phases=None):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -315,11 +462,35 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
 
+    # Curriculum: expand each phase's `sft_mix_weights` to per-sample weights.
+    # Schema: list of {at_step: int, sft_mix_weights: {source: weight}}.
+    # If set, takes priority over the static sft_mix_weights below — the
+    # sampler picks active weights from the current global_step at each
+    # epoch boundary.
+    expanded_phases = None
+    if curriculum_phases:
+        expanded_phases = []
+        for phase in curriculum_phases:
+            mix = phase.get('sft_mix_weights', {})
+            w = _expand_mix_to_sample_weights(mix, sources)
+            if sum(w) <= 0:
+                raise ValueError(
+                    f'curriculum phase at step {phase.get("at_step")} has '
+                    f'no positive weights — would freeze sampling.'
+                )
+            expanded_phases.append((int(phase['at_step']), w))
+        print(f'[curriculum_phases] expanded {len(expanded_phases)} phases'
+              + ' '.join(f'\n  step={s}: {phase["sft_mix_weights"]}'
+                         for s, phase in zip(
+                             [p[0] for p in expanded_phases],
+                             curriculum_phases)),
+              flush=True)
+
     # Convert sft_mix_weights (source-level ratios) → per-sample weights.
     # weight_per_sample = mix[source] / len(source_dataset), so the total
     # probability mass of each source equals its configured mix weight.
     sample_weights = None
-    if sft_mix_weights:
+    if sft_mix_weights and not curriculum_phases:
         missing = [s for s in sft_mix_weights if s not in sources]
         if missing:
             print(f'[sft_mix_weights] WARNING: {missing} not loaded; '
@@ -395,10 +566,26 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')
-    model = Cadrille.from_pretrained(
-        base_model,
-        torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2')
+    cadrille_cls = get_cadrille_class(backbone)
+    print(f'[model] backbone={backbone!r} → {cadrille_cls.__name__}', flush=True)
+    # Try flash_attention_2 first (3-5× speedup), fall back to sdpa if flash-attn
+    # isn't installed (it lives outside pyproject because it needs --no-build-
+    # isolation; setup.sh installs it). sdpa is stock PyTorch, always available.
+    try:
+        model = cadrille_cls.from_pretrained(
+            base_model,
+            torch_dtype=torch.bfloat16,
+            attn_implementation='flash_attention_2')
+    except (ImportError, ValueError, RuntimeError) as e:
+        if 'flash' in str(e).lower():
+            print(f'[model] flash_attention_2 unavailable ({type(e).__name__}: '
+                  f'{str(e)[:80]}…); falling back to sdpa.', flush=True)
+            model = cadrille_cls.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                attn_implementation='sdpa')
+        else:
+            raise
 
     report_to = 'wandb' if wandb_project else 'none'
     if wandb_project:
@@ -435,7 +622,6 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             warmup_steps=warmup_steps,
             weight_decay=0.01,
             gradient_accumulation_steps=accumulation_steps,
-            group_by_length=group_by_length,
             bf16=bf16,
             tf32=tf32 if tf32 else None,
             gradient_checkpointing=gradient_checkpointing,
@@ -458,14 +644,21 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=partial(collate, processor=processor, n_points=256),
-        tokenizer=processor,
+        # transformers 4.46+ deprecated `tokenizer=`, removed in 5.x.
+        # Use `processing_class=` (multimodal models pass an AutoProcessor here).
+        processing_class=processor,
         sample_weights=sample_weights,
+        group_by_length=group_by_length,
+        curriculum_phases=expanded_phases,
         callbacks=_build_callbacks(
             processor=processor, seed=seed,
             hf_upload_repo=hf_upload_repo,
             hf_upload_private=hf_upload_private,
             online_eval_n_per=online_eval_n_per,
             mix_weights=sft_mix_weights,
+            max_iou_k=max_iou_k,
+            max_iou_temperature=max_iou_temperature,
+            max_iou_every_n_evals=max_iou_every_n_evals,
         ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
@@ -570,6 +763,20 @@ def main():
     save_only_model       = bool(cfg.get('save_only_model', True))
     save_total_limit      = int(cfg.get('save_total_limit', 1))
     online_eval_n_per     = int(cfg.get('online_eval_n_per', 20))
+    # Backbone selection — string passed to common.model.get_cadrille_class.
+    # Recognised: qwen2_vl (default), qwen2_5_vl, qwen3_vl. The selected
+    # parent must match the `base_model:` checkpoint architecture.
+    backbone              = str(cfg.get('backbone', 'qwen2_vl'))
+    # Online max_iou@K (sampling at temperature) on IoU buckets. K=0 → off.
+    # Default: K=8 t=1.0 every eval. Bump every_n_evals for cheaper runs.
+    max_iou_k             = int(cfg.get('max_iou_k', 8))
+    max_iou_temperature   = float(cfg.get('max_iou_temperature', 1.0))
+    max_iou_every_n_evals = int(cfg.get('max_iou_every_n_evals', 1))
+    # Curriculum learning: list of {at_step: int, sft_mix_weights: {...}}.
+    # When set, the static `sft_mix_weights` above is overridden — the
+    # sampler picks active weights from the running global_step at each
+    # epoch boundary. First phase MUST start at step 0.
+    curriculum_phases     = cfg.get('curriculum_phases', None)
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -621,6 +828,10 @@ def main():
         'save_only_model':        save_only_model,
         'save_total_limit':       save_total_limit,
         'online_eval_n_per':      online_eval_n_per,
+        'max_iou_k':              max_iou_k,
+        'max_iou_temperature':    max_iou_temperature,
+        'max_iou_every_n_evals':  max_iou_every_n_evals,
+        'curriculum_phases':      curriculum_phases,
     }
 
     print(f'Run name : {run_name}')
@@ -640,7 +851,12 @@ def main():
         group_by_length=group_by_length,
         save_only_model=save_only_model,
         save_total_limit=save_total_limit,
-        online_eval_n_per=online_eval_n_per)
+        online_eval_n_per=online_eval_n_per,
+        backbone=backbone,
+        max_iou_k=max_iou_k,
+        max_iou_temperature=max_iou_temperature,
+        max_iou_every_n_evals=max_iou_every_n_evals,
+        curriculum_phases=curriculum_phases)
 
 
 if __name__ == '__main__':

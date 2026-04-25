@@ -60,7 +60,7 @@ sft_mix_weights:
   recode20k: 1
 
 # HF ckpt upload during training (non-blocking; drains at train end)
-hf_upload_repo: Hula0401/cadrille-sft-bc2-r20k1-t2c1
+hf_upload_repo: Hula0401/cadrille-sft-bc2-r20k1-t2c1-v2
 hf_upload_private: true
 
 wandb_project: cadrille-sft

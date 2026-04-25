@@ -497,13 +497,142 @@ def load_online_eval_subsets(n_per: int = 20, seed: int = 42,
 
 
 @torch.no_grad()
+def _run_max_iou_at_temp(model, processor, examples: list[dict],
+                         k: int, temperature: float,
+                         eval_batch_size: int, reward_workers: int,
+                         max_new_tokens: int, eval_timeout: float,
+                         seed: int = 42) -> dict:
+    """Sample K codes per item at `temperature`, return per-bucket max-IoU metrics.
+
+    Only runs on examples with `gt_mesh_path` (BenchCAD val + DeepCAD test +
+    Fusion360 test). For each item: generate K samples, score IoU on each,
+    take max. Bucket-aggregate to:
+      - max_iou@{K} (t={T})        — mean of per-item max IoU
+      - pass_iou_0.5@{K} (t={T})   — fraction of items with max IoU > 0.5
+      - pass_iou_0.7@{K} (t={T})   — fraction of items with max IoU > 0.7
+      - max_iou_failures@{K} (t={T}) — fraction of items where ALL K samples failed
+
+    Seed is fixed across evals so the K stochastic paths are comparable
+    over training steps (not the same path — sampling diverges by step
+    1 — but the seed reduces variance from the eval RNG itself).
+    """
+    iou_items = [(i, ex) for i, ex in enumerate(examples) if 'gt_mesh_path' in ex]
+    if not iou_items or k <= 0:
+        return {}
+
+    device = next(model.parameters()).device
+    # Seed sampling RNG, but isolate from the global generator so eval doesn't
+    # rewrite training's CPU/CUDA RNG state (would cause dropout patterns to
+    # repeat after every eval tick). `fork_rng` snapshots-and-restores; we
+    # only need CPU + the active CUDA device.
+    cuda_devices = [device] if device.type == 'cuda' else []
+    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+        torch.manual_seed(seed)
+        return _run_max_iou_at_temp_inner(
+            model, processor, examples, k, temperature,
+            eval_batch_size, reward_workers, max_new_tokens, eval_timeout,
+            iou_items, device,
+        )
+
+
+def _run_max_iou_at_temp_inner(model, processor, examples, k, temperature,
+                               eval_batch_size, reward_workers, max_new_tokens,
+                               eval_timeout, iou_items, device):
+    """Sampling+scoring body — split out so the outer can wrap fork_rng."""
+    # Build a flat list of (orig_idx, sample_idx, ex) for batched generation.
+    work = [(orig, s, ex) for orig, ex in iou_items for s in range(k)]
+    codes_by_pair: dict[tuple[int, int], str] = {}
+
+    for batch_start in range(0, len(work), eval_batch_size):
+        chunk = work[batch_start:batch_start + eval_batch_size]
+        ex_chunk = [x[2] for x in chunk]
+        collate_items = [{kk: vv for kk, vv in ex.items()
+                          if not kk.startswith('_') and kk != 'gt_mesh_path'}
+                         for ex in ex_chunk]
+        batch = collate(collate_items, processor=processor, n_points=256, eval=True)
+        if hasattr(model, 'rope_deltas'):
+            model.rope_deltas = None
+
+        gen_kw = dict(
+            input_ids=batch['input_ids'].to(device),
+            attention_mask=batch['attention_mask'].to(device),
+            point_clouds=batch['point_clouds'].to(device),
+            is_pc=batch['is_pc'].to(device),
+            is_img=batch['is_img'].to(device),
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=float(temperature),
+            top_p=None,
+            top_k=None,
+            bad_words_ids=[[model.config.video_token_id]],
+        )
+        if batch.get('pixel_values_videos') is not None:
+            gen_kw['pixel_values_videos'] = batch['pixel_values_videos'].to(device)
+            gen_kw['video_grid_thw']       = batch['video_grid_thw'].to(device)
+
+        generated_ids = model.generate(**gen_kw)
+        prompt_len = batch['input_ids'].shape[1]
+        for j, (orig_idx, sample_idx, _ex) in enumerate(chunk):
+            code = processor.decode(
+                generated_ids[j, prompt_len:], skip_special_tokens=True)
+            codes_by_pair[(orig_idx, sample_idx)] = code
+
+    # Score IoU on each (orig, sample) pair
+    def _score(orig_idx, sample_idx):
+        ex = examples[orig_idx]
+        code = codes_by_pair[(orig_idx, sample_idx)]
+        iou_reward, _cd = compute_metrics(
+            code, ex['gt_mesh_path'],
+            timeout=eval_timeout, use_pool=True)
+        return orig_idx, sample_idx, iou_reward
+
+    pair_iou: dict[tuple[int, int], float] = {}
+    with ThreadPoolExecutor(max_workers=reward_workers) as pool:
+        futures = [pool.submit(_score, o, s) for (o, s) in codes_by_pair]
+        for fut in as_completed(futures):
+            o, s, iou = fut.result()
+            pair_iou[(o, s)] = iou
+
+    # Aggregate per bucket
+    buckets = defaultdict(lambda: {'max_ious': [], 'pass_05': 0,
+                                   'pass_07': 0, 'all_fail': 0, 'total': 0})
+    for orig_idx, ex in iou_items:
+        ious = [pair_iou.get((orig_idx, s), -2.0) for s in range(k)]
+        valid = [iou for iou in ious if iou > -1.0]
+        if valid:
+            max_iou = max(valid)
+        else:
+            max_iou = 0.0  # every sample failed exec
+        key = (ex.get('_modality', 'img'), ex.get('_dataset_label', '?'))
+        b = buckets[key]
+        b['max_ious'].append(max_iou)
+        b['total'] += 1
+        if max_iou > 0.5: b['pass_05'] += 1
+        if max_iou > 0.7: b['pass_07'] += 1
+        if not valid:    b['all_fail'] += 1
+
+    tag = f'@{k} (t={temperature})'
+    out = {}
+    for (mod, label), b in buckets.items():
+        prefix = f'eval/{mod}/{label}'
+        out[f'{prefix}/max_iou{tag}']        = float(np.mean(b['max_ious']))
+        out[f'{prefix}/pass_iou_0.5{tag}']   = b['pass_05'] / max(b['total'], 1)
+        out[f'{prefix}/pass_iou_0.7{tag}']   = b['pass_07'] / max(b['total'], 1)
+        out[f'{prefix}/max_iou_failures{tag}'] = b['all_fail'] / max(b['total'], 1)
+    return out
+
+
+@torch.no_grad()
 def run_online_eval(model, processor, examples: list[dict],
                     eval_batch_size: int = 8,
                     reward_workers: int = 8,
                     max_new_tokens: int = 768,
                     eval_timeout: float = 30.0,
                     global_freqs: np.ndarray | None = None,
-                    rare_op_idx: np.ndarray | None = None) -> dict:
+                    rare_op_idx: np.ndarray | None = None,
+                    max_iou_k: int = 0,
+                    max_iou_temperature: float = 1.0,
+                    max_iou_seed: int = 42) -> dict:
     """Greedy eval → per-(modality, dataset) IoU / CD / Failures. wandb-ready dict."""
     if not examples:
         return {}
@@ -641,6 +770,32 @@ def run_online_eval(model, processor, examples: list[dict],
                   f'distinct_ops={div.get("distinct_ops", 0)}  '
                   f'distinct_codes={div.get("distinct_codes_frac", 0):.2f}  '
                   f'(n={b["total"]})', flush=True)
+
+        # Optional: max IoU @ K samples at temperature T on IoU-bucketed items.
+        # Cost is K× the greedy IoU pass time; defaults to 0 (off).
+        if max_iou_k > 0:
+            print(f'[online-eval] running max_iou@{max_iou_k} (t={max_iou_temperature}) '
+                  f'on IoU buckets ...', flush=True)
+            mi = _run_max_iou_at_temp(
+                model, processor, examples,
+                k=max_iou_k, temperature=max_iou_temperature,
+                eval_batch_size=eval_batch_size,
+                reward_workers=reward_workers,
+                max_new_tokens=max_new_tokens,
+                eval_timeout=eval_timeout,
+                seed=max_iou_seed,
+            )
+            out.update(mi)
+            tag = f'@{max_iou_k} (t={max_iou_temperature})'
+            for k_, v in sorted(mi.items()):
+                if k_.endswith(f'/max_iou{tag}'):
+                    label = k_.split('/')[-2]
+                    pass_5 = mi.get(k_.replace(f'/max_iou{tag}',
+                                               f'/pass_iou_0.5{tag}'))
+                    print(f'  [{label}] max_iou{tag}={v:.3f}'
+                          + (f'  pass>0.5={pass_5*100:.1f}%' if pass_5 is not None
+                             else ''),
+                          flush=True)
         return out
 
     finally:
@@ -662,7 +817,11 @@ class OnlineIoUEvalCallback(TrainerCallback):
                  reward_workers: int = 8, max_new_tokens: int = 768,
                  eval_timeout: float = 30.0,
                  mix_weights: dict | None = None,
-                 freq_sample_n: int = 200):
+                 freq_sample_n: int = 200,
+                 max_iou_k: int = 8,
+                 max_iou_temperature: float = 1.0,
+                 max_iou_seed: int = 42,
+                 max_iou_every_n_evals: int = 1):
         self.processor = processor
         self.n_per_dataset = n_per_dataset
         self.seed = seed
@@ -674,6 +833,13 @@ class OnlineIoUEvalCallback(TrainerCallback):
         self.mix_weights = mix_weights or {}
         self.freq_sample_n = freq_sample_n
         self.rare_op_threshold = 0.20    # 0 < P_k ≤ 0.20 → "rare"
+        self.max_iou_k = max_iou_k
+        self.max_iou_temperature = max_iou_temperature
+        self.max_iou_seed = max_iou_seed
+        # Throttle: only run max_iou pass every Nth eval (cost is K× greedy
+        # generation; on a 5-min eval, K=8 adds ~5 min). 1 = every eval.
+        self.max_iou_every_n_evals = max(1, int(max_iou_every_n_evals))
+        self._eval_count = 0
         self._examples = None
         self._global_freqs = None
         self._rare_op_idx = None
@@ -713,6 +879,15 @@ class OnlineIoUEvalCallback(TrainerCallback):
             return
         self._ensure_examples()
         print(f'[online-eval] step={state.global_step} running IoU eval ...', flush=True)
+
+        # Decide whether to run max_iou@K this tick (every Nth eval).
+        self._eval_count += 1
+        run_max_iou = (
+            self.max_iou_k > 0
+            and (self._eval_count % self.max_iou_every_n_evals == 0)
+        )
+        max_iou_k_now = self.max_iou_k if run_max_iou else 0
+
         iou_metrics = run_online_eval(
             model, self.processor, self._examples,
             eval_batch_size=self.eval_batch_size,
@@ -721,6 +896,9 @@ class OnlineIoUEvalCallback(TrainerCallback):
             eval_timeout=self.eval_timeout,
             global_freqs=self._global_freqs,
             rare_op_idx=self._rare_op_idx,
+            max_iou_k=max_iou_k_now,
+            max_iou_temperature=self.max_iou_temperature,
+            max_iou_seed=self.max_iou_seed,
         )
         # HF Trainer.evaluate() calls self.log(metrics) BEFORE on_evaluate, so a
         # late metrics.update() never reaches wandb. Push directly to wandb instead.

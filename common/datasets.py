@@ -352,9 +352,14 @@ class BenchCadDataset(Dataset):
             img = img.resize((self.img_size, self.img_size), Image.BICUBIC)
         # num_imgs is a no-op here because composite_png already bakes 4 views
         # into a single image; mirror CadRecodeDataset's return shape.
+        # NOTE: BenchCAD `item['description']` is `'ball knob [hard] ops=[...]'`,
+        # which leaks the GT op list into the user prompt — train/eval prompt
+        # mismatch (eval uses generic "Generate cadquery code"). Use the
+        # generic prompt here too so the model has to infer ops from the
+        # image, not read them from the prompt.
         return {
             'video': [img],
-            'description': item.get('description', 'Generate cadquery code'),
+            'description': 'Generate cadquery code',
         }
 
     def _get_point_cloud(self, item):
@@ -364,9 +369,10 @@ class BenchCadDataset(Dataset):
                 loc=0, scale=self.noise_scale_pc, size=mesh.vertices.shape)
         pc = mesh_to_point_cloud(mesh, self.n_points)
         pc = pc / self.normalize_std_pc
+        # Same prompt-leak fix as _get_img above — keep generic.
         return {
             'point_cloud': pc,
-            'description': item.get('description', 'Generate cadquery code'),
+            'description': 'Generate cadquery code',
         }
 
 
