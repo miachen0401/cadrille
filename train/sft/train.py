@@ -76,13 +76,20 @@ class PrintToFileCallback(TrainerCallback):
 
 
 def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
-                     online_eval_n_per=20, mix_weights=None):
+                     online_eval_n_per=20, mix_weights=None,
+                     max_iou_k=8, max_iou_temperature=1.0,
+                     max_iou_every_n_evals=1):
     from train.sft.online_eval import OnlineIoUEvalCallback
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
-        OnlineIoUEvalCallback(processor, n_per_dataset=online_eval_n_per,
-                              seed=seed, mix_weights=mix_weights),
+        OnlineIoUEvalCallback(
+            processor, n_per_dataset=online_eval_n_per, seed=seed,
+            mix_weights=mix_weights,
+            max_iou_k=max_iou_k,
+            max_iou_temperature=max_iou_temperature,
+            max_iou_every_n_evals=max_iou_every_n_evals,
+        ),
     ]
     if hf_upload_repo:
         from train.sft.hf_uploader import HFCheckpointUploadCallback
@@ -225,7 +232,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         hf_upload_repo=None, hf_upload_private=True,
         group_by_length=False,
         save_only_model=True, save_total_limit=1,
-        online_eval_n_per=20):
+        online_eval_n_per=20,
+        max_iou_k=8, max_iou_temperature=1.0, max_iou_every_n_evals=1):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -466,6 +474,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             hf_upload_private=hf_upload_private,
             online_eval_n_per=online_eval_n_per,
             mix_weights=sft_mix_weights,
+            max_iou_k=max_iou_k,
+            max_iou_temperature=max_iou_temperature,
+            max_iou_every_n_evals=max_iou_every_n_evals,
         ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
@@ -570,6 +581,11 @@ def main():
     save_only_model       = bool(cfg.get('save_only_model', True))
     save_total_limit      = int(cfg.get('save_total_limit', 1))
     online_eval_n_per     = int(cfg.get('online_eval_n_per', 20))
+    # Online max_iou@K (sampling at temperature) on IoU buckets. K=0 → off.
+    # Default: K=8 t=1.0 every eval. Bump every_n_evals for cheaper runs.
+    max_iou_k             = int(cfg.get('max_iou_k', 8))
+    max_iou_temperature   = float(cfg.get('max_iou_temperature', 1.0))
+    max_iou_every_n_evals = int(cfg.get('max_iou_every_n_evals', 1))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -621,6 +637,9 @@ def main():
         'save_only_model':        save_only_model,
         'save_total_limit':       save_total_limit,
         'online_eval_n_per':      online_eval_n_per,
+        'max_iou_k':              max_iou_k,
+        'max_iou_temperature':    max_iou_temperature,
+        'max_iou_every_n_evals':  max_iou_every_n_evals,
     }
 
     print(f'Run name : {run_name}')
@@ -640,7 +659,10 @@ def main():
         group_by_length=group_by_length,
         save_only_model=save_only_model,
         save_total_limit=save_total_limit,
-        online_eval_n_per=online_eval_n_per)
+        online_eval_n_per=online_eval_n_per,
+        max_iou_k=max_iou_k,
+        max_iou_temperature=max_iou_temperature,
+        max_iou_every_n_evals=max_iou_every_n_evals)
 
 
 if __name__ == '__main__':
