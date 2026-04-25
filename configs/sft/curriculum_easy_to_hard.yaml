@@ -20,7 +20,11 @@ data_path: ./data
 mode: img
 use_text: true
 
-base_model: ./checkpoints/sft-s10k-lr2e-4-b6a5-img-0424-2001/checkpoint-4000
+# Cold-start from upstream Qwen2-VL-2B. The earlier warm-start path
+# (sft-s10k-.../checkpoint-4000) is poisoned by the BenchCAD prompt-leak
+# bug — see common/datasets.py BenchCadDataset fix.
+backbone: qwen2_vl
+base_model: Qwen/Qwen2-VL-2B-Instruct
 
 max_steps: 20000
 batch_size: 8
@@ -76,7 +80,7 @@ sft_mix_weights:
 save_only_model: false
 save_total_limit: 4
 
-hf_upload_repo: Hula0401/cadrille-sft-curriculum-bc1to8-r20k1-t2c1
+hf_upload_repo: Hula0401/cadrille-sft-curriculum-bc1to8-r20k1-t2c1-v2
 hf_upload_private: true
 
 wandb_project: cadrille-sft
