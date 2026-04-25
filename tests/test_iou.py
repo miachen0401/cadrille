@@ -21,7 +21,7 @@ import trimesh
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rl.reward import compute_reward, compute_metrics, compute_iou
+from common.metrics import compute_reward, compute_metrics, compute_iou
 
 # ---------------------------------------------------------------------------
 # Fixtures

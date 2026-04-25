@@ -47,8 +47,8 @@ if [[ "$N_GPUS" -gt 1 ]]; then
     torchrun \
         --nproc_per_node="$N_GPUS" \
         --master_port="${MASTER_PORT:-29500}" \
-        train.py --config "$CONFIG" $RESUME_FLAG "${EXTRA_ARGS[@]}"
+        -m train.sft --config "$CONFIG" $RESUME_FLAG "${EXTRA_ARGS[@]}"
 else
     echo "Launching single-GPU..."
-    python train.py --config "$CONFIG" $RESUME_FLAG "${EXTRA_ARGS[@]}"
+    python -m train.sft --config "$CONFIG" $RESUME_FLAG "${EXTRA_ARGS[@]}"
 fi

@@ -21,5 +21,9 @@ save_steps: 600
 eval_steps: 300
 eval_on_start: true
 
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
 wandb_project: cadrille-sft
 # run_name is auto-generated from hyperparameters when not set

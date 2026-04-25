@@ -1,0 +1,64 @@
+# Cadrille SFT — Hypothesis 1: benchcad-heavy mix from ckpt-4000 warm start.
+#
+# docs/sft_diagnostics_2026-04-25.md found that the prior 2:1:1 ckpt-4000
+# collapsed to the sketch+extrude dialect (from recode20k/text2cad) and
+# completely failed to learn op-level operations from benchcad
+# (hole/cut/chamfer/revolve/transformed all 0% in pred despite 8-44% GT
+# rates).
+#
+# This run pushes benchcad to 67% of the sampler mass and starts from the
+# prior weights so we don't relitigate the dialect collapse from scratch.
+# Fresh lr cycle (no resume_from_checkpoint) so cosine peaks at step 1000
+# instead of starting on the decay tail.
+
+checkpoints_dir: ./checkpoints
+
+data_path: ./data
+mode: img
+use_text: true                # text2cad still pulled, just lower weight
+
+# Warm start: load weights from prior best ckpt as the base model.
+# from_pretrained(base_model) treats this as the initial weights, so step
+# count + optimizer + lr schedule all start fresh.
+base_model: ./checkpoints/sft-s10k-lr2e-4-b6a5-img-0424-2001/checkpoint-4000
+
+# Training - bs=8 (user request), acc=4 -> eff batch = 32, near paper 30
+max_steps: 20000              # ~5x previous; let benchcad-heavy mix work
+batch_size: 8
+accumulation_steps: 4
+learning_rate: 2.0e-4
+warmup_steps: 1000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: true
+gradient_checkpointing: true  # bs=8 + img tokens still tight on 80 GB
+dataloader_workers: 4
+group_by_length: true         # ~20% throughput win on the mixed-length corpus
+
+# Logging + checkpoints - sparser saves to stay under disk
+log_steps: 50
+save_steps: 4000              # 5 saves across 20k steps; save_only_model peak ~8GB
+eval_steps: 1000              # online IoU + eval_loss every 1k
+online_eval_n_per: 20         # items per dataset (BenchCAD/DeepCAD/Fusion360) for online IoU
+
+eval_on_start: true
+resume_from_checkpoint: null  # NOT a resume - base_model warm start instead
+
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
+# Mix - benchcad-heavy. recode20k+text2cad stay in to keep the model from
+# forgetting the sketch dialect entirely (we still want it for short prims).
+sft_mix_weights:
+  recode:    0
+  text2cad:  1
+  benchcad:  4
+  recode20k: 1
+
+# HF upload - non-blocking thread, training never pauses
+hf_upload_repo: Hula0401/cadrille-sft-bc4-r20k1-t2c1
+hf_upload_private: true
+
+wandb_project: cadrille-sft

@@ -1,0 +1,48 @@
+# Cadrille SFT smoke — A100 80GB, BenchCAD-only.
+#
+# Goal: verify SFT pipeline works end-to-end on the new BenchCadDataset loader,
+# using pre-rendered composite PNGs (img mode) + mesh-sampled point clouds (pc mode).
+# recode + text2cad sources are explicitly zero-weighted — see sft_mix_weights.
+# Bumps to a 3-source mix once recode/text2cad data prep is done.
+
+checkpoints_dir: ./checkpoints
+
+data_path: ./data
+mode: pc_img
+use_text: false                    # Text2CADDataset requires data/text2cad/ — skip
+
+# Training (A100 can push larger batch; keep conservative for smoke)
+max_steps: 100
+batch_size: 4
+accumulation_steps: 2               # effective batch = 8
+learning_rate: 2.0e-4
+warmup_steps: 10                    # smoke — fast warmup
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+# A100 native bf16 — no AMP fp32 copies on this hardware
+bf16: true
+gradient_checkpointing: false
+
+dataloader_workers: 4
+
+# Logging — small for smoke
+log_steps: 5
+save_steps: 100
+eval_steps: 50
+eval_on_start: true
+
+# Reproducibility
+seed: 42
+max_code_len: 1000
+
+# Smoke: benchcad only. recode/text2cad weight 0 so their samples never fire.
+# recode loader still instantiates (train.py always builds it); the 0 weight just
+# makes WeightedRandomSampler skip it. Use this as the smoke baseline; graduate
+# to configs/sft/mix_1_2_2.yaml once the other two corpora are materialised.
+sft_mix_weights:
+  recode:   0
+  text2cad: 0
+  benchcad: 1
+
+wandb_project: cadrille-sft

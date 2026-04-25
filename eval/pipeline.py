@@ -38,8 +38,8 @@ import trimesh
 from tqdm import tqdm
 from transformers import AutoProcessor
 
-from cadrille import Cadrille, collate
-from rl.dataset import render_img
+from common.model import Cadrille, collate
+from common.meshio import render_img
 
 _N_POINTS = 256
 
@@ -109,7 +109,7 @@ def _score_case(code: str, gt_mesh_path: str, timeout: float = 32.0) -> dict:
                 (
                     f"\nimport sys, json\n"
                     f"sys.path.insert(0, '{Path(__file__).parent.parent}')\n"
-                    f"from rl.reward import compute_metrics\n"
+                    f"from common.metrics import compute_metrics\n"
                     f"code = {repr(code)}\n"
                     f"iou_reward, cd = compute_metrics(code, {repr(gt_mesh_path)}, timeout={timeout})\n"
                     f"if iou_reward <= -2.0:\n"
@@ -200,7 +200,7 @@ def _prep_img(gt_mesh_path: str) -> Optional[dict]:
 
 
 def _prep_pc(gt_mesh_path: str) -> Optional[dict]:
-    from dataset import mesh_to_point_cloud
+    from common.datasets import mesh_to_point_cloud
 
     try:
         stem = Path(gt_mesh_path).stem

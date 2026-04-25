@@ -81,7 +81,7 @@ if [[ -z "$CHECKPOINT" && -z "$CHECKPOINT_SWEEP" ]]; then
 fi
 
 # ── Build python command ─────────────────────────────────────────────────────
-CMD=(python rl/eval_passk.py
+CMD=(python -m eval.passk
     --val-dir        "$VAL_DIR"
     --n-examples     "$N_EXAMPLES"
     --n-samples      "$N_SAMPLES"

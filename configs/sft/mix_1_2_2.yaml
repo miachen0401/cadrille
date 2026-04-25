@@ -1,0 +1,54 @@
+# Cadrille SFT — 3-source mix (recode + text2cad + benchcad)
+# Mixing ratio enforced at sample time: text2cad : recode : benchcad = 1 : 2 : 2.
+# train.py builds a ConcatDataset and wires WeightedRandomSampler so each
+# source's probability mass matches its sft_mix_weights entry. Sources listed
+# in sft_mix_weights but not loaded by train.py are dropped with a warning —
+# this repo currently loads recode + text2cad only; benchcad loader + corpus
+# path are still pending.
+#
+# Usage: uv run python train.py --config configs/sft/mix_1_2_2.yaml
+
+checkpoints_dir: ./checkpoints
+
+# Data — all local; HF archive at BenchCAD/cad_sft_training mirrors recode+text2cad code
+data_path: ./data
+mode: pc_img
+use_text: true                    # enables Text2CADDataset
+
+# Training (matches default.yaml, 4080 16 GB)
+max_steps: 12000
+batch_size: 2
+accumulation_steps: 15
+learning_rate: 2.0e-4
+warmup_steps: 1000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: false
+gradient_checkpointing: false
+dataloader_workers: 4
+
+# Reproducibility — fixed seed for dataloader + Trainer RNG
+seed: 42
+
+# Filter — drop long code (>1000 chars) before training, enforces ≤512-token targets
+max_code_len: 1000
+
+# Mixing ratios (text2cad : recode : benchcad = 1 : 2 : 2).
+# Enforced by WeightedSamplerTrainer in train.py — each source's per-sample
+# weight is mix[source] / len(source_dataset), so the total probability mass
+# of a source equals its ratio here. Unloaded sources (e.g. benchcad while
+# no loader wired) are dropped with a warning.
+sft_mix_weights:
+  recode:   2
+  text2cad: 1
+  benchcad: 2
+
+# Logging & checkpoints
+log_steps: 30
+save_steps: 200
+eval_steps: 200
+eval_on_start: true
+
+# W&B
+wandb_project: cadrille-sft
