@@ -76,12 +76,13 @@ class PrintToFileCallback(TrainerCallback):
 
 
 def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
-                     online_eval_n_per=20):
+                     online_eval_n_per=20, mix_weights=None):
     from train.sft.online_eval import OnlineIoUEvalCallback
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
-        OnlineIoUEvalCallback(processor, n_per_dataset=online_eval_n_per, seed=seed),
+        OnlineIoUEvalCallback(processor, n_per_dataset=online_eval_n_per,
+                              seed=seed, mix_weights=mix_weights),
     ]
     if hf_upload_repo:
         from train.sft.hf_uploader import HFCheckpointUploadCallback
@@ -464,6 +465,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             hf_upload_repo=hf_upload_repo,
             hf_upload_private=hf_upload_private,
             online_eval_n_per=online_eval_n_per,
+            mix_weights=sft_mix_weights,
         ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
