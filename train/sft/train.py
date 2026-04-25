@@ -75,12 +75,13 @@ class PrintToFileCallback(TrainerCallback):
                 f.write(str(logs) + '\n')
 
 
-def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private):
+def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
+                     online_eval_n_per=20):
     from train.sft.online_eval import OnlineIoUEvalCallback
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
-        OnlineIoUEvalCallback(processor, n_per_dataset=30, seed=seed),
+        OnlineIoUEvalCallback(processor, n_per_dataset=online_eval_n_per, seed=seed),
     ]
     if hf_upload_repo:
         from train.sft.hf_uploader import HFCheckpointUploadCallback
@@ -222,7 +223,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         resume_from_checkpoint=None, cfg_to_save=None,
         hf_upload_repo=None, hf_upload_private=True,
         group_by_length=False,
-        save_only_model=True, save_total_limit=1):
+        save_only_model=True, save_total_limit=1,
+        online_eval_n_per=20):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -461,6 +463,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             processor=processor, seed=seed,
             hf_upload_repo=hf_upload_repo,
             hf_upload_private=hf_upload_private,
+            online_eval_n_per=online_eval_n_per,
         ))
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
@@ -564,6 +567,7 @@ def main():
     # so the resume restores LR schedule + AdamW moments. We warn on mismatch below.
     save_only_model       = bool(cfg.get('save_only_model', True))
     save_total_limit      = int(cfg.get('save_total_limit', 1))
+    online_eval_n_per     = int(cfg.get('online_eval_n_per', 20))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -614,6 +618,7 @@ def main():
         'group_by_length':        group_by_length,
         'save_only_model':        save_only_model,
         'save_total_limit':       save_total_limit,
+        'online_eval_n_per':      online_eval_n_per,
     }
 
     print(f'Run name : {run_name}')
@@ -632,7 +637,8 @@ def main():
         hf_upload_private=hf_upload_private,
         group_by_length=group_by_length,
         save_only_model=save_only_model,
-        save_total_limit=save_total_limit)
+        save_total_limit=save_total_limit,
+        online_eval_n_per=online_eval_n_per)
 
 
 if __name__ == '__main__':
