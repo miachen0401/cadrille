@@ -221,11 +221,20 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         base_model='Qwen/Qwen2-VL-2B-Instruct',
         resume_from_checkpoint=None, cfg_to_save=None,
         hf_upload_repo=None, hf_upload_private=True,
-        group_by_length=False):
+        group_by_length=False,
+        save_only_model=True, save_total_limit=1):
 
     os.makedirs(output_dir, exist_ok=True)
 
     # Resolve "latest" checkpoint shortcut
+    # Resume + save_only_model are incompatible — warn on mismatch.
+    if resume_from_checkpoint and save_only_model:
+        print('[WARN] resume_from_checkpoint is set but save_only_model=True. '
+              'Optimizer/LR state will not be restored — the resume will load '
+              'model weights only. Set save_only_model=false in your config '
+              'if you want exact-state resume (costs ~13 GB / checkpoint).',
+              flush=True)
+
     if resume_from_checkpoint == 'latest':
         ckpt_dirs = sorted(
             [d for d in os.listdir(output_dir)
@@ -315,12 +324,20 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         sample_weights = []
         active = {}
         for src, ds in sources.items():
+            n = len(ds)
             w = float(sft_mix_weights.get(src, 0.0))
+            if n == 0:
+                if w > 0:
+                    print(f'[sft_mix_weights] WARNING: source {src!r} is '
+                          f'empty (after filter / no train split); dropping '
+                          f'from mix even though weight={w}')
+                active[src] = 0.0
+                continue
             active[src] = w
             if w > 0:
-                sample_weights.extend([w / len(ds)] * len(ds))
+                sample_weights.extend([w / n] * n)
             else:
-                sample_weights.extend([0.0] * len(ds))
+                sample_weights.extend([0.0] * n)
         if sum(sample_weights) <= 0:
             print('[sft_mix_weights] WARNING: all active weights are 0; '
                   'falling back to uniform sampler')
@@ -424,8 +441,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             remove_unused_columns=False,
             logging_first_step=True,
             logging_steps=log_steps,
-            save_total_limit=1,
-            save_only_model=True,          # skip optimizer state → ~4 GB/ckpt vs ~13 GB
+            save_total_limit=save_total_limit,
+            save_only_model=save_only_model,
             save_strategy='steps',
             save_steps=save_steps,
             eval_strategy='steps' if has_val else 'no',
@@ -540,6 +557,13 @@ if __name__ == '__main__':
     hf_upload_repo        = cfg.get('hf_upload_repo', None)   # e.g. 'Hula0401/cadrille-<tag>'; null = disabled
     hf_upload_private     = bool(cfg.get('hf_upload_private', True))
     group_by_length       = bool(cfg.get('group_by_length', False))
+    # Checkpoint storage tradeoffs:
+    #   save_only_model=True  → drop optimizer/scheduler/RNG state, ~4GB/ckpt
+    #   save_only_model=False → full trainer state, ~13GB/ckpt, exact resume
+    # If you set resume_from_checkpoint, you almost certainly want save_only_model=False
+    # so the resume restores LR schedule + AdamW moments. We warn on mismatch below.
+    save_only_model       = bool(cfg.get('save_only_model', True))
+    save_total_limit      = int(cfg.get('save_total_limit', 1))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -588,6 +612,8 @@ if __name__ == '__main__':
         'hf_upload_repo':         hf_upload_repo,
         'hf_upload_private':      hf_upload_private,
         'group_by_length':        group_by_length,
+        'save_only_model':        save_only_model,
+        'save_total_limit':       save_total_limit,
     }
 
     print(f'Run name : {run_name}')
@@ -604,4 +630,6 @@ if __name__ == '__main__':
         cfg_to_save=resolved_cfg,
         hf_upload_repo=hf_upload_repo,
         hf_upload_private=hf_upload_private,
-        group_by_length=group_by_length)
+        group_by_length=group_by_length,
+        save_only_model=save_only_model,
+        save_total_limit=save_total_limit)
