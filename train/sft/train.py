@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
 from transformers import AutoProcessor, Trainer, TrainingArguments, TrainerCallback
 
-from common.model import Cadrille, collate
+from common.model import Cadrille, collate, get_cadrille_class
 from common.datasets import Text2CADDataset, CadRecodeDataset, BenchCadDataset, CadRecode20kDataset
 
 
@@ -225,7 +225,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         hf_upload_repo=None, hf_upload_private=True,
         group_by_length=False,
         save_only_model=True, save_total_limit=1,
-        online_eval_n_per=20):
+        online_eval_n_per=20,
+        backbone='qwen2_vl'):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -395,7 +396,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         min_pixels=256 * 28 * 28,
         max_pixels=1280 * 28 * 28,
         padding_side='left')
-    model = Cadrille.from_pretrained(
+    cadrille_cls = get_cadrille_class(backbone)
+    print(f'[model] backbone={backbone!r} → {cadrille_cls.__name__}', flush=True)
+    model = cadrille_cls.from_pretrained(
         base_model,
         torch_dtype=torch.bfloat16,
         attn_implementation='flash_attention_2')
@@ -570,6 +573,10 @@ def main():
     save_only_model       = bool(cfg.get('save_only_model', True))
     save_total_limit      = int(cfg.get('save_total_limit', 1))
     online_eval_n_per     = int(cfg.get('online_eval_n_per', 20))
+    # Backbone selection — string passed to common.model.get_cadrille_class.
+    # Recognised: qwen2_vl (default), qwen2_5_vl, qwen3_vl. The selected
+    # parent must match the `base_model:` checkpoint architecture.
+    backbone              = str(cfg.get('backbone', 'qwen2_vl'))
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -640,7 +647,8 @@ def main():
         group_by_length=group_by_length,
         save_only_model=save_only_model,
         save_total_limit=save_total_limit,
-        online_eval_n_per=online_eval_n_per)
+        online_eval_n_per=online_eval_n_per,
+        backbone=backbone)
 
 
 if __name__ == '__main__':
