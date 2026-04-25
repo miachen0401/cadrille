@@ -214,10 +214,14 @@ def main():
             else:
                 tag = 'DIVERGE'
                 fails.append((name, result))
+        # Format spec '.2e' crashes on the 'N/A' string fallback when stage
+        # failed (vol_rel/cd_rel/iou missing). Branch on result['ok'].
+        def _fmt(v):
+            return f'{v:.2e}' if isinstance(v, (int, float)) else 'N/A'
         print(f'[{i+1}/{len(pairs)}] {name}: {tag} '
-              f'vol_rel={result.get("vol_rel", "N/A"):.2e} '
-              f'cd_rel={result.get("cd_rel", "N/A"):.2e} '
-              f'iou={result.get("iou", "N/A")}')
+              f'vol_rel={_fmt(result.get("vol_rel"))} '
+              f'cd_rel={_fmt(result.get("cd_rel"))} '
+              f'iou={_fmt(result.get("iou"))}')
 
     if args.jobs > 1:
         with mp.Pool(args.jobs) as pool:

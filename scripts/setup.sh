@@ -96,7 +96,9 @@ else
         (cd "$BUILD_DIR" && git checkout 8e434558a9b1ecacba7854da7601a07e8bdceb26)
     fi
     mkdir -p "$BUILD_DIR/build"
-    if [ ! -f "$BUILD_DIR/build/lib/python_package/pip_package/"open3d_cpu*.whl ]; then
+    # `[ -f glob ]` does not expand — use compgen for a glob-aware existence test.
+    WHL_DIR="$BUILD_DIR/build/lib/python_package/pip_package"
+    if ! compgen -G "$WHL_DIR/open3d_cpu*.whl" > /dev/null; then
         echo "    cmake + make -j4 (~20 min) ..."
         (cd "$BUILD_DIR/build" && \
             "$CMAKE_BIN" -DENABLE_HEADLESS_RENDERING=ON -DBUILD_GUI=OFF \
@@ -106,7 +108,7 @@ else
                          -DBUILD_EXAMPLES=OFF .. && \
             make -j4)
     fi
-    WHL=$(ls "$BUILD_DIR/build/lib/python_package/pip_package/"open3d_cpu*.whl | head -1)
+    WHL=$(compgen -G "$WHL_DIR/open3d_cpu*.whl" | head -1)
     if [ -n "$WHL" ]; then
         uv pip install "$WHL"
         echo "    installed $(basename "$WHL") ✓"
@@ -131,6 +133,18 @@ EOF
 
 # ── 5. Data (optional) ────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--data" || "${1:-}" == "--full" ]]; then
+    # Resource check before pulling tens of GB. Per CLAUDE.md: always check
+    # disk + RAM before any large job. --data needs ~30 GB free; --full ~100.
+    NEED_GB=30
+    [[ "${1:-}" == "--full" ]] && NEED_GB=100
+    FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+    echo "[5/pre] Disk:    $(df -h / | awk 'NR==2 {print $4 " free of " $2}')  (need ${NEED_GB} GB)"
+    echo "[5/pre] RAM:     $(free -h | awk 'NR==2 {print $7 " avail"}')"
+    command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=name,memory.free --format=csv,noheader,nounits | head -1
+    if [[ "${FREE_GB:-0}" -lt "${NEED_GB}" ]]; then
+        echo "[5/pre] ERROR: only ${FREE_GB} GB free, need ${NEED_GB} GB. Free disk first or pass --data instead of --full."
+        exit 1
+    fi
     echo "[5] Downloading data from HuggingFace ..."
     [[ "${1:-}" == "--full" ]] && export DOWNLOAD_TRAIN_MESHES=1
 

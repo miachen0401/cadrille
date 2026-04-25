@@ -131,11 +131,16 @@ def fetch_text2cad(out_root: Path) -> None:
                             repo_type='dataset', token=token,
                             local_dir=str(out_root.parent / '_cache_cad_sft'))
     cq_dir = out_root / 'cadquery'
-    if not cq_dir.exists():
-        cq_dir.mkdir(parents=True)
+    # Guard on "contains .py files" (not just dir-exists) so a partial /
+    # interrupted extraction is retried cleanly on the next run.
+    n_existing = sum(1 for _ in cq_dir.glob('*.py')) if cq_dir.exists() else 0
+    if n_existing == 0:
+        cq_dir.mkdir(parents=True, exist_ok=True)
         print('  extracting ...', flush=True)
         with tarfile.open(tar_p) as tf:
-            tf.extractall(out_root)
+            # filter='data' (Python 3.12+) blocks path-traversal entries
+            # (CVE-2007-4559). Required for safe untar of foreign archives.
+            tf.extractall(out_root, filter='data')
     n_py = sum(1 for _ in cq_dir.glob('*.py'))
     print(f'  cadquery/: {n_py} .py files\n', flush=True)
 

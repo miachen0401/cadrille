@@ -148,7 +148,8 @@ def load_all(datasets: list[str], limit: int, seed: int) -> dict[str, list[dict]
 # Per-item modality inputs — always pc for sweep (cheaper, one modality fixed)
 # ---------------------------------------------------------------------------
 
-def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dict:
+def build_modality_inputs(item: dict, modality: str, n_points: int = 256,
+                          img_size: int = 268) -> dict:
     """Build a single-modality example dict for the collate function."""
     if modality == 'pc':
         import trimesh
@@ -185,7 +186,14 @@ def build_modality_inputs(item: dict, modality: str, n_points: int = 256) -> dic
                     f'img modality requires pre-rendered PNG but {png_path} is missing. '
                     f'Download *_test_renders.zip from HF or drop the item.')
             img = Image.open(png_path)
-        img = img.convert('RGB').resize((128, 128))
+        # Match SFT training-time img_size (268 by default; train/sft.py
+        # passes img_size=268 to BenchCadDataset/CadRecodeDataset). The
+        # Qwen2-VL processor will resample to its min_pixels target either
+        # way, but starting from the same source resolution as training
+        # avoids a quality mismatch.
+        img = img.convert('RGB')
+        if img.size != (img_size, img_size):
+            img = img.resize((img_size, img_size))
         return {
             'video': [img],
             'description': 'Generate cadquery code',
@@ -244,9 +252,10 @@ def sweep_one_temp(
     max_new_tokens: int,
     modality: str,
     score_workers: int,
+    img_size: int = 268,
 ) -> dict:
     # Build inputs once per item (same across all samples at this temp).
-    example_inputs = [build_modality_inputs(it, modality) for it in items]
+    example_inputs = [build_modality_inputs(it, modality, img_size=img_size) for it in items]
 
     # n_samples=1 when temp=0 (deterministic greedy); loop n_samples otherwise.
     n = 1 if temp == 0 else n_samples
@@ -338,6 +347,9 @@ def main() -> None:
                     help='Samples per item at non-zero temperature')
     ap.add_argument('--limit', type=int, default=20,
                     help='Items per dataset split (BenchCAD has 3 splits, so total=3*limit for benchcad)')
+    ap.add_argument('--img-size', type=int, default=268,
+                    help='Source image size before processor resampling. '
+                         'Match training-time img_size (default 268).')
     ap.add_argument('--modality', default='img', choices=['pc', 'img'],
                     help='Img matches the strongest eval path (training composite_png for BenchCAD).')
     ap.add_argument('--batch-size', type=int, default=4)
@@ -392,6 +404,7 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
                 modality=args.modality,
                 score_workers=args.score_workers,
+                img_size=args.img_size,
             )
             summary['split_key'] = split_key
             all_results.append(summary)
