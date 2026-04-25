@@ -42,8 +42,11 @@ def test_get_cadrille_qwen25vl():
     assert issubclass(Cad25, Qwen2_5_VLForConditionalGeneration)
     assert hasattr(Cad25, 'forward')
     assert hasattr(Cad25, 'compute_sequence_logprob')
-    # Aliases work
-    assert get_cadrille_class('qwen2.5-vl').__name__ == Cad25.__name__
+    # Aliases AND repeated calls return the same cached class object —
+    # `isinstance(model, get_cadrille_class('qwen2_5_vl'))` works after
+    # the model has already been built.
+    assert get_cadrille_class('qwen2.5-vl') is Cad25
+    assert get_cadrille_class('qwen2_5_vl') is Cad25
 
 
 def test_get_cadrille_unknown_raises():
@@ -52,16 +55,11 @@ def test_get_cadrille_unknown_raises():
         get_cadrille_class('llava')
 
 
-def test_get_cadrille_qwen3vl_forward_compat():
-    """Should ImportError on transformers without Qwen3-VL, succeed once shipped."""
+def test_get_cadrille_qwen3vl_builds_and_caches():
+    """transformers≥5.6 ships Qwen3-VL (pyproject pins this floor); verify
+    the class builds and is memoised on repeat calls."""
     from common.model import get_cadrille_class
-    try:
-        from transformers import Qwen3VLForConditionalGeneration  # noqa: F401
-    except ImportError:
-        # Current transformers (4.50.3) — verify graceful error.
-        with pytest.raises(ImportError, match='Qwen3-VL'):
-            get_cadrille_class('qwen3_vl')
-    else:
-        # Future transformers — verify it builds.
-        cls = get_cadrille_class('qwen3_vl')
-        assert issubclass(cls, Qwen3VLForConditionalGeneration)
+    from transformers import Qwen3VLForConditionalGeneration
+    cls = get_cadrille_class('qwen3_vl')
+    assert issubclass(cls, Qwen3VLForConditionalGeneration)
+    assert get_cadrille_class('qwen3-vl') is cls    # memoised

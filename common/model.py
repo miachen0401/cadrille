@@ -574,14 +574,25 @@ Cadrille = _make_cadrille_class(
 )
 
 
+# Cache of (backbone_cls → Cadrille subclass). Without this, every call to
+# `get_cadrille_class('qwen3_vl')` builds a new class object, breaking
+# `isinstance(model, get_cadrille_class('qwen3_vl'))` after the model is
+# constructed (the model's class identity differs from the freshly-built one).
+_CADRILLE_CLS_CACHE = {Qwen2VLForConditionalGeneration: Cadrille}
+
+
 def get_cadrille_class(backbone: str = 'qwen2_vl'):
     """Return a Cadrille class subclassing the requested VL backbone.
 
     Recognized names: 'qwen2_vl', 'qwen2_5_vl', 'qwen3_vl' (case + dash/dot
-    insensitive). 'qwen2_vl' returns the cached default class so existing
-    checkpoints loaded via `from_pretrained(...)` get an isinstance match.
+    insensitive). Class objects are memoised on the backbone parent class,
+    so repeated calls return the *same* Cadrille subclass — `isinstance`
+    checks against the returned class work after the model is built.
     """
     backbone_cls, output_cls = _resolve_backbone(backbone)
-    if backbone_cls is Qwen2VLForConditionalGeneration:
-        return Cadrille
-    return _make_cadrille_class(backbone_cls, output_cls)
+    cached = _CADRILLE_CLS_CACHE.get(backbone_cls)
+    if cached is not None:
+        return cached
+    cls = _make_cadrille_class(backbone_cls, output_cls)
+    _CADRILLE_CLS_CACHE[backbone_cls] = cls
+    return cls

@@ -521,8 +521,24 @@ def _run_max_iou_at_temp(model, processor, examples: list[dict],
         return {}
 
     device = next(model.parameters()).device
-    torch.manual_seed(seed)
+    # Seed sampling RNG, but isolate from the global generator so eval doesn't
+    # rewrite training's CPU/CUDA RNG state (would cause dropout patterns to
+    # repeat after every eval tick). `fork_rng` snapshots-and-restores; we
+    # only need CPU + the active CUDA device.
+    cuda_devices = [device] if device.type == 'cuda' else []
+    with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+        torch.manual_seed(seed)
+        return _run_max_iou_at_temp_inner(
+            model, processor, examples, k, temperature,
+            eval_batch_size, reward_workers, max_new_tokens, eval_timeout,
+            iou_items, device,
+        )
 
+
+def _run_max_iou_at_temp_inner(model, processor, examples, k, temperature,
+                               eval_batch_size, reward_workers, max_new_tokens,
+                               eval_timeout, iou_items, device):
+    """Sampling+scoring body — split out so the outer can wrap fork_rng."""
     # Build a flat list of (orig_idx, sample_idx, ex) for batched generation.
     work = [(orig, s, ex) for orig, ex in iou_items for s in range(k)]
     codes_by_pair: dict[tuple[int, int], str] = {}
