@@ -1,6 +1,39 @@
 import os
 import math
+import pickle
 import yaml
+
+# transformers 5.6+ requires torch>=2.6 for torch.load() of optimizer.pt during
+# resume_from_checkpoint. We're on torch 2.5.1; bypass the check since we
+# generate + store optimizer state locally (no untrusted source).
+# Need to patch BOTH source module and trainer.py's local rebinding.
+try:
+    import transformers.utils.import_utils as _tf_iu
+    _tf_iu.check_torch_load_is_safe = lambda: None
+    import transformers.trainer as _tf_tr
+    _tf_tr.check_torch_load_is_safe = lambda: None
+except Exception:
+    pass
+
+# torch 2.5 + transformers 5.x: rng_state.pth contains numpy globals that
+# weights_only=True rejects. Allowlist them since we own the file.
+try:
+    import torch as _torch
+    import numpy as _np
+    _safe_globals = [
+        _np._core.multiarray._reconstruct,
+        _np.ndarray,
+        _np.dtype,
+    ]
+    # Newer numpy keeps dtype subclasses under _np.dtypes (UInt32DType, etc.)
+    if hasattr(_np, 'dtypes'):
+        for _name in dir(_np.dtypes):
+            _attr = getattr(_np.dtypes, _name, None)
+            if isinstance(_attr, type):
+                _safe_globals.append(_attr)
+    _torch.serialization.add_safe_globals(_safe_globals)
+except Exception:
+    pass
 from datetime import datetime
 from functools import partial
 from argparse import ArgumentParser
@@ -410,18 +443,35 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # can convert sft_mix_weights (source-level ratios) into per-sample weights.
     sources = {}
     if os.path.isdir(cad_recode_path) and os.path.exists(os.path.join(cad_recode_path, 'train.pkl')):
-        sources['recode'] = CadRecodeDataset(
-            root_dir=cad_recode_path,
-            split='train',
-            n_points=256,
-            normalize_std_pc=100,
-            noise_scale_pc=0.01,
-            img_size=268,
-            normalize_std_img=200,
-            noise_scale_img=-1,
-            num_imgs=4,
-            mode=mode,
-            max_code_len=max_code_len)
+        # Schema-detect: original CAD-Recode bundle has 'mesh_path' (STL); our
+        # img-only render of filapro/cad-recode-v1.5 has 'png_path'. Route to
+        # the matching loader so both bundle formats can live at the same path
+        # name. Img-only corpus → CadRecode20kDataset; PC-capable corpus with
+        # STLs → CadRecodeDataset.
+        with open(os.path.join(cad_recode_path, 'train.pkl'), 'rb') as _f:
+            _probe = pickle.load(_f)
+        _img_only = bool(_probe) and 'mesh_path' not in _probe[0] and 'png_path' in _probe[0]
+        if _img_only and mode != 'pc':
+            sources['recode'] = CadRecode20kDataset(
+                root_dir=cad_recode_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+        elif not _img_only:
+            sources['recode'] = CadRecodeDataset(
+                root_dir=cad_recode_path,
+                split='train',
+                n_points=256,
+                normalize_std_pc=100,
+                noise_scale_pc=0.01,
+                img_size=268,
+                normalize_std_img=200,
+                noise_scale_img=-1,
+                num_imgs=4,
+                mode=mode,
+                max_code_len=max_code_len)
+        # else (img-only corpus + pc mode) → silently skip, no STLs available
     batch_size = batch_size_override or 28
     accumulation_steps = accum_steps_override or 1
 

@@ -1,0 +1,85 @@
+# Cadrille SFT — Qwen3-VL-2B,**resume from curriculum step 10000**,
+# 替换 phase 3(8:1:1)成 clean recipe(1:9 + no curriculum + no text2cad)
+#
+# 设计意图:
+#   step 0-10000 完全等于 curriculum run(P1 + P2,从 0 训到 step 10k)
+#   step 10000-20000 由本 config 接管:
+#     - 删 text2cad
+#     - benchcad:cad-recode-v1.5 = 1:9(paper-style cad-recode 主导)
+#     - 用 100k 渲好的 cad-recode-v1.5(替代旧 18k 子集)
+#     - 无 curriculum,static mix
+#
+# 这给了一个干净的 A/B 对照:
+#   curriculum:  P1 → P2 → **P3 8:1:1**(我们已有结果)
+#   resume      :  P1 → P2 → **clean 1:9**(本 run 产生)
+# 同 backbone、同 optimizer 历史、同 step budget(20000)、同 cosine LR schedule —
+# 唯一变量就是 step 10000-20000 的数据 mix。
+#
+# 时间预算(A100):
+#   10000 步 × 1.59 s ≈ 4.4h training
+#   10 evals × 5 min   ≈ 50 min
+#   总计                ≈ 5.3h
+#
+# 预期(估):
+#   curriculum step 20000:  BenchCAD 0.620 / DeepCAD 0.581 / Fusion 0.463
+#   resume     step 20000:  BenchCAD ≈ 0.60(不再 boost benchcad)
+#                           DeepCAD  ≈ 0.62-0.65(+0.04-0.07,1:9 重 cad-recode)
+#                           Fusion    ≈ 0.50-0.55(+0.04-0.09)
+#   forget rate 应该显著降低(无 step-jump transition)
+
+checkpoints_dir: /ephemeral/checkpoints
+data_path: ./data
+mode: img
+use_text: false                    # ← 删 text2cad
+
+backbone: qwen3_vl
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+# Resume — 加载 weights + optimizer + scheduler + RNG state from step 10000.
+# Optimizer momentum、LR cosine 进度、global_step counter 全部连续。
+resume_from_checkpoint: /ephemeral/checkpoints/curriculum_best_from_hf/checkpoint-10000
+
+# Schedule —  匹配原 curriculum 的 max_steps 让 cosine 衔接正确。
+# 原 curriculum:max_steps=20000 + warmup 1000 + cosine。step 10000 时 LR ≈ 1.41e-4。
+# 本 run 接续 cosine → step 20000 时 LR=0。
+max_steps: 20000
+batch_size: 8
+accumulation_steps: 4              # eff batch = 32(同原 curriculum)
+learning_rate: 2.0e-4              # ← 同原 LR;实际生效 LR 由 scheduler state 决定
+warmup_steps: 1000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: true
+gradient_checkpointing: true
+dataloader_workers: 4
+group_by_length: true
+
+log_steps: 50
+save_steps: 1000                   # 同原 curriculum,这样 ckpt-11000/12000/... 跟原 run 编号对齐
+save_total_limit: 4
+save_only_model: false
+eval_steps: 1000
+online_eval_n_per: 20
+max_iou_k: 8
+max_iou_temperature: 1.0
+max_iou_every_n_evals: 2
+
+eval_on_start: true                # 第一步 eval 应该 = curriculum step 10000 的结果(sanity check)
+
+seed: 42
+max_code_len: 1000
+
+# Mix:换掉 P3 的 8:1:1,改成 paper-style 1:9(cad-recode 主导)
+# `recode` = filapro/cad-recode-v1.5 100k 子集(本 session 渲)
+# `recode20k` 跟 `text2cad` 在 sources 里仍存在(目录还在),但 mix weight = 0 → 不抽样
+sft_mix_weights:
+  benchcad: 1                      # 10% 抽样概率
+  recode: 9                        # 90% 抽样概率(100k items 全新数据)
+
+curriculum_phases: null
+
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-resume10k-clean
+hf_upload_private: false
+
+wandb_project: cadrille-sft

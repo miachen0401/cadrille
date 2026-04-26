@@ -35,7 +35,7 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-from common.model import Cadrille, collate  # noqa: E402
+from common.model import Cadrille, collate, get_cadrille_class  # noqa: E402
 from common.meshio import render_img  # noqa: E402
 from common.metrics import compute_metrics  # noqa: E402
 from common.datasets import mesh_to_point_cloud  # noqa: E402
@@ -341,6 +341,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', required=True)
     ap.add_argument('--base-model', default='Qwen/Qwen2-VL-2B-Instruct')
+    ap.add_argument('--backbone', default='qwen2_vl',
+                    choices=['qwen2_vl', 'qwen2_5_vl', 'qwen3_vl'],
+                    help='VL backbone family of the ckpt; must match training.')
     ap.add_argument('--datasets', default='benchcad,deepcad,fusion360')
     ap.add_argument('--temps', default='0,0.4,0.5,0.75,1.0,1.25')
     ap.add_argument('--n-samples', type=int, default=16,
@@ -383,10 +386,17 @@ def main() -> None:
     print(f'Loading processor ...', flush=True)
     processor = AutoProcessor.from_pretrained(
         args.base_model, min_pixels=256*28*28, max_pixels=1280*28*28, padding_side='left')
-    print(f'Loading model from {args.ckpt} ...', flush=True)
-    model = Cadrille.from_pretrained(
-        args.ckpt, torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2', device_map='auto')
+    print(f'Loading model from {args.ckpt} (backbone={args.backbone}) ...', flush=True)
+    CadrilleCls = get_cadrille_class(args.backbone)
+    try:
+        model = CadrilleCls.from_pretrained(
+            args.ckpt, torch_dtype=torch.bfloat16,
+            attn_implementation='flash_attention_2', device_map='auto')
+    except (ImportError, ValueError):
+        # flash-attn unavailable for some backbones — fall back to sdpa.
+        model = CadrilleCls.from_pretrained(
+            args.ckpt, torch_dtype=torch.bfloat16,
+            attn_implementation='sdpa', device_map='auto')
     model.eval()
     device = next(model.parameters()).device
 
