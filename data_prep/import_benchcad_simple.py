@@ -32,11 +32,11 @@ from __future__ import annotations
 
 import argparse
 import io
+import multiprocessing as mp
 import os
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -182,6 +182,13 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--src-repo', default='BenchCAD/cad_simple_ops_100k')
     ap.add_argument('--src-prefix', default='data')
+    ap.add_argument('--src-shard-prefix', default='train',
+                    help='Per-shard filename prefix; e.g. cad_simple_ops_100k '
+                         "uses 'train-XXXXX-of-NNNNN.parquet', cad_iso_106 "
+                         "uses 'data-XXXXX-of-NNNNN.parquet'.")
+    ap.add_argument('--rows-per-src-shard', type=int, default=8240,
+                    help='Used only for shard-count estimation; default '
+                         'matches cad_simple_ops_100k (~8240 rows/shard).')
     ap.add_argument('--total-src-shards', type=int, default=12)
     ap.add_argument('--repo-id', default='Hula0401/cad-sft')
     ap.add_argument('--dst-prefix', default='benchcad-simple-100k')
@@ -209,7 +216,7 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Estimate total output shards
-    rows_per_src_shard = 8240  # observed
+    rows_per_src_shard = args.rows_per_src_shard
     total_src_rows = rows_per_src_shard * args.total_src_shards
     if args.n is not None:
         total_src_rows = min(total_src_rows, args.n)
@@ -235,16 +242,18 @@ def main():
     t_start = time.time()
     last_log = t_start
 
-    with ProcessPoolExecutor(max_workers=args.workers,
-                              max_tasks_per_child=args.max_tasks_per_child) as pool:
-        in_flight = []
+    # Use multiprocessing.Pool — has `maxtasksperchild` on Python 3.10
+    # (concurrent.futures.ProcessPoolExecutor's `max_tasks_per_child` is 3.11+).
+    pool = mp.Pool(processes=args.workers, maxtasksperchild=args.max_tasks_per_child)
+    try:
+        in_flight = []  # list of AsyncResult
         max_in_flight = 4 * args.workers
 
         # Iterate over upstream parquet shards lazily
         for src_shard_i in range(args.total_src_shards):
             if args.n is not None and n_dispatched >= args.n:
                 break
-            src_fname = f'{args.src_prefix}/train-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
+            src_fname = f'{args.src_prefix}/{args.src_shard_prefix}-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
             print(f'[src shard {src_shard_i + 1}/{args.total_src_shards}] downloading {src_fname} ...', flush=True)
             t0 = time.time()
             p = hf_hub_download(args.src_repo, src_fname, repo_type='dataset',
@@ -261,20 +270,20 @@ def main():
                 while len(in_flight) < max_in_flight and row_idx < len(rows):
                     if args.n is not None and n_dispatched >= args.n:
                         break
-                    in_flight.append(pool.submit(_process_row, rows[row_idx]))
+                    in_flight.append(pool.apply_async(_process_row, (rows[row_idx],)))
                     row_idx += 1
                     n_dispatched += 1
                 if not in_flight:
                     break
 
-                done = [f for f in in_flight if f.done()]
+                done = [r for r in in_flight if r.ready()]
                 if not done:
                     time.sleep(0.1)
                     continue
-                for fut in done:
-                    in_flight.remove(fut)
+                for r in done:
+                    in_flight.remove(r)
                     try:
-                        result = fut.result(timeout=1.0)
+                        result = r.get(timeout=1.0)
                     except Exception as e:
                         n_error += 1
                         error_kinds['fut_err'] = error_kinds.get('fut_err', 0) + 1
@@ -300,7 +309,6 @@ def main():
                         free = _free_ram_mb()
                         if free is not None and free < args.ram_floor_mb:
                             print(f'  !! RAM floor {free} MB < {args.ram_floor_mb} MB — aborting', flush=True)
-                            for f in in_flight: f.cancel()
                             return
 
                     now = time.time()
@@ -316,6 +324,9 @@ def main():
             # Cleanup downloaded source shard
             try: Path(p).unlink()
             except Exception: pass
+    finally:
+        pool.close()
+        pool.join()
 
     # Flush remaining buffer
     if successes_buf:
