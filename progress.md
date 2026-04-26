@@ -71,6 +71,34 @@
 - [ ] Smoke test `train.sft.train --config mix_bc_rb_t2cb.yaml --max-steps 5`
    (deferred until Phase B done so recode-bench has data)
 
+## Phase F — Import BenchCAD/cad_simple_ops_100k as image-conditioned bench data  🟡 RUNNING
+
+User asked for more bench-style data. Found `BenchCAD/cad_simple_ops_100k`:
+99k samples already in BenchCAD shell style (no rewrite needed!) with `step_bytes`
+embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
+
+- [x] Inspect `BenchCAD/cad_simple_ops_100k`: 12 parquet shards, ~98880 rows,
+   schema (stem, code, step_bytes, family, difficulty, n_ops, ops_json,
+   base_plane). Code includes a 526-char OCP HashCode shim header which we
+   strip before training.
+- [x] Verify: STEP→mesh works (0.03s), exec FAILS without show_object stub
+   (we use STEP path).
+- [x] Write `data_prep/import_benchcad_simple.py`: 1) strip shim, 2) STEP→mesh
+   via OCP STEPControl_Reader, 3) render via common.meshio.render_img,
+   4) pack stem/code/render_img/family/difficulty/n_ops/ops_json/base_plane.
+- [x] Smoke n=20 jobs=2: 10.7s, rate 1.88/s (startup-dominated)
+- [x] Scale n=200 jobs=4: 24s, rate 8.32/s, 0 errors, RAM stable
+- [x] Wire fetcher (`fetch_cad_sft.py --what benchcad-simple` or `bench-all`)
+- [x] Wire `benchcad_simple` source in train.sft.train (uses CadRecode20kDataset
+   pointed at `data/benchcad-simple/` since on-disk layout is identical)
+- [x] New config `configs/sft/mix_all_bench.yaml` —
+   benchcad:2 + benchcad_simple:2 + recode_bench:2 + text2cad_bench:1
+- [🟡] Full ~99k run launched (PID 33980, jobs=4, max_tasks_per_child=100,
+   shard-size=2000, est. 50 output shards)
+   - Live: logs/phase_f.log
+   - ETA: 99k / 8.7 = ~3.2h
+   - Output: Hula0401/cad-sft/benchcad-simple-100k/train-XXXXX-of-00050.parquet
+
 ## Wrap-up  ✅ DONE (08:35)
 
 - [x] Single commit with all changes

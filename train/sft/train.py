@@ -472,6 +472,20 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 max_code_len=max_code_len,
                 mode='img')
 
+    # Phase F (T8 follow-up): BenchCAD/cad_simple_ops_100k imported via
+    # data_prep/import_benchcad_simple.py. Native BenchCAD shell style (no
+    # rewrite needed); image+code, no description. Same on-disk layout as
+    # recode_bench so we reuse CadRecode20kDataset.
+    benchcad_simple_path = os.path.join(data_path, 'benchcad-simple')
+    if os.path.isdir(benchcad_simple_path) and os.path.exists(os.path.join(benchcad_simple_path, 'train.pkl')):
+        if mode != 'pc':
+            sources['benchcad_simple'] = CadRecode20kDataset(
+                root_dir=benchcad_simple_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+
     if use_text:
         text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
         if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
