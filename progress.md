@@ -93,11 +93,19 @@ embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
    pointed at `data/benchcad-simple/` since on-disk layout is identical)
 - [x] New config `configs/sft/mix_all_bench.yaml` —
    benchcad:2 + benchcad_simple:2 + recode_bench:2 + text2cad_bench:1
-- [🟡] Full ~99k run launched (PID 33980, jobs=4, max_tasks_per_child=100,
-   shard-size=2000, est. 50 output shards)
-   - Live: logs/phase_f.log
-   - ETA: 99k / 8.7 = ~3.2h
-   - Output: Hula0401/cad-sft/benchcad-simple-100k/train-XXXXX-of-00050.parquet
+- [✅ PARTIAL] Full ~99k run completed at 78k (39/50 shards) at 19:53,
+   stopped early due to throughput collapse on the late upstream shards.
+   - Started 16:21, killed 19:53 (~3.5h wall time)
+   - Final: 78,000 rows / 39 shards / 0 errors
+   - Output: Hula0401/cad-sft/benchcad-simple-100k/train-{00000..00038}-of-00050.parquet
+   - Throughput timeline:
+     * shards 1..9 of upstream: rate 7-8/s sustained, RAM 9-12 GB free oscillating
+     * shards 10..12 of upstream: rate dropped to 0.6-1/s (complex shapes —
+       larger meshes → render takes 5+ sec/sample even with 4 workers at 110% CPU)
+   - Decision: stopped at shard 39/50 instead of pushing through 8+ more hours.
+     Marginal value of the last 21k complex samples not worth the time cost.
+     fetcher uses `list_repo_files` so the nominal "of-00050" suffix on
+     existing shards is harmless — they all load.
 
 ## Wrap-up  ✅ DONE (08:35)
 
@@ -133,3 +141,10 @@ embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
 | 05:48 | B | abort 11996/80k | 654M | — | 583G | RAM floor breach (worker leak) |
 | 05:50 | B | resume (PID 24442) | 11G | — | 583G | --start-shard 6 --max-tasks-per-child 100 |
 | 06:32 | B | 20772/80k (26%) | 11G | — | 583G | RAM oscillates 11.2-11.5G (recycle works) |
+| 08:34 | B | DONE 80k/80k | 14G | 0 | 583G | Phase B complete, 0 errors |
+| 16:21 | F | start (PID 33980) | 10G | — | 582G | benchcad-simple-100k import |
+| 17:25 | F | 26k/99k (26%) | 10G | — | 582G | rate 6.9/s |
+| 18:26 | F | 53k/99k (54%) | 9G | — | 582G | rate 7.1/s |
+| 19:08 | F | 72k/99k (73%) | 9G | — | 582G | rate 7.3/s |
+| 19:27 | F | 77k/99k (78%) | 4G | — | 582G | upstream shard 10 starts, complex shapes slow |
+| 19:53 | F | STOP 78k/99k | 8G | — | 580G | killed at shard 39, rate had dropped to 0.7/s |
