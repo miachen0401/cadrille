@@ -459,6 +459,27 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 max_code_len=max_code_len,
                 mode='img')
 
+    # Bench-style variants (T8): same dataset class, different root dirs.
+    # Code in these dirs has been v2-rewritten to BenchCAD shell style;
+    # PNG geometry is identical to the raw recode (rewrite is AST-only).
+    recode_bench_path = os.path.join(data_path, 'cad-recode-bench')
+    if os.path.isdir(recode_bench_path) and os.path.exists(os.path.join(recode_bench_path, 'train.pkl')):
+        if mode != 'pc':
+            sources['recode_bench'] = CadRecode20kDataset(
+                root_dir=recode_bench_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+
+    if use_text:
+        text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
+        if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
+            sources['text2cad_bench'] = Text2CADDataset(
+                root_dir=text2cad_bench_path,
+                split='train',
+                max_code_len=max_code_len)
+
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
 

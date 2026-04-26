@@ -37,6 +37,40 @@ File: `scripts/analysis/diversity_analysis.py`
 - Benefits: (a) durable backup given our tiny 18 GB disk, (b) new collaborators
   can pull the latest ckpt from HF instead of re-running SFT.
 
+### T8 — BenchCAD-style rewrite of recode/text2cad + 100k SFT data scale-up  ✅ DONE 2026-04-26
+
+**Goal:** rewrite recode + text2cad code to BenchCAD shell style (v2: sketch
+→ direct Workplane / `.workplane(offset)` → `.transformed` / `mode='s'` →
+`.cut()`), then scale recode SFT data from 20k to 100k (reuse old 20k PNGs,
+add 80k via `prepare_hf_cadrecode.py --offset 20000 --n 80000`).
+
+**Result:** Hula0401/cad-sft on HF now has cad-recode-bench/ (49 parquet
+shards, ~100k rows) and text2cad-bench/ (6 files, ~90k rows). All bench
+style. See progress.md for full timeline. Next: smoke train.sft on
+configs/sft/mix_bc_rb_t2cb.yaml.
+
+**Status (2026-04-26):**
+- ✅ Path X selected (Level-1 rewrite: format + 6 ops, no semantic guesswork)
+- ✅ Pattern survey done — Rule A coverage: ~85% recode + ~77% text2cad
+- ✅ IoU 6/6 = 1.0000 on hand-crafted rewrite patterns (T1-T6)
+
+**Steps:**
+1. Write `data_prep/rewrite_recode_to_benchcad_v2.py` (rules A+B+D, fallback
+   to v1 AST pass on unsupported patterns)
+2. 200-sample IoU validation (recode + text2cad, target ≥95% @ IoU≥0.99)
+3. Re-run op-distribution table — confirm sketch/finalize/assemble drops
+   from ~92% to ~0% on rewritable subset
+4. **Phase A:** re-pack old 20k by downloading existing HF parquets, swap
+   `code` field with v1.5-benchcad version (PNG bytes reused, no re-render),
+   upload to `Hula0401/cad-sft/cad-recode-bench/`
+5. **Phase B:** restore `prepare_hf_cadrecode.py` from commit 2f6396c, run
+   `--seed 42 --offset 20000 --n 80000` (zero overlap with original 20k via
+   1.3× over-sample slice [26000:130000]), incremental push every ~20k
+6. **Phase C:** rewrite all text2cad cadquery/*.py via v2, IoU-sample 1k,
+   pack + upload to `text2cad-bench/`
+7. **Phase D:** wire fetcher (`--variant bench`) + new `CadRecodeBenchDataset`
+   / `Text2CADBenchDataset` + flip configs/sft to bench
+
 ### T3 — Next SFT run: text2cad mix at 2:1:1
 Config: `configs/sft/mix_bc_r20k_t2c.yaml` (to write)
 
