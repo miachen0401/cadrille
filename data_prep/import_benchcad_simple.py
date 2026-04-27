@@ -257,6 +257,11 @@ def main():
                          'never even tessellate, never dispatch. Useful for '
                          'BenchCAD families known to produce extreme triangle counts: '
                          'helix, spline, twist.')
+    ap.add_argument('--only-family-substr', nargs='+', default=[],
+                    help='Inverse of --skip-family-substr: KEEP only rows whose '
+                         'family contains any of these substrings. Useful for '
+                         'targeting specific subsets (e.g. picking up the helix/'
+                         'spline/twist samples that an earlier run skipped).')
     args = ap.parse_args()
 
     if not args.no_upload and not os.environ.get('HF_TOKEN'):
@@ -342,6 +347,14 @@ def main():
                 if before != len(rows):
                     print(f'  family-skip: dropped {before - len(rows)}/{before} rows '
                           f'matching {args.skip_family_substr}', flush=True)
+            # Family whitelist (inverse) — keep only matching rows
+            if args.only_family_substr:
+                before = len(rows)
+                rows = [r for r in rows
+                        if any(s in (r.get('family') or '')
+                               for s in args.only_family_substr)]
+                print(f'  family-only: kept {len(rows)}/{before} rows '
+                      f'matching {args.only_family_substr}', flush=True)
             print(f'  loaded {len(rows)} rows in {time.time()-t0:.1f}s', flush=True)
 
             # Dispatch + drain loop

@@ -113,6 +113,36 @@ embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
      (extreme tessellation cost vs marginal training value). To include them
      later: drop --skip-family-substr and budget 8+ hours.
 
+- [✅ PARTIAL] v4 attempt 21:49–23:44 (1h55m): user wanted to also include
+   the 10.7k helix/spline/twist samples skipped by v3. Added two flags:
+   - `--only-family-substr` (inverse of skip): keep ONLY rows matching
+   - tightened `--max-tasks-per-child=50` (vs v3's 100) to bound RAM more
+   Run produced 2,000 more rows (1 shard) + 1,653 in-buffer when RAM hit
+   the safety zone:
+   - SIGALRM 30s timeout doesn't preempt OCP C-extension code → some
+     tessellate calls ran 11+ minutes blocking workers
+   - Worker RSS climbed to 4.5 GB on heavy meshes; total system RAM hit
+     2.7 GB available with 1 GB headroom above the 1.5 GB floor
+   - Throughput dropped from 0.7/s → 0.05/s as workers got stuck
+   - Killed manually before auto-abort would have triggered
+   - **Net v4 gain: +2,000 rows uploaded (1 shard, idx 45-of-50)**
+   - Lesson: the SIGALRM timeout works for Python-level stalls but not for
+     OCP/OpenCASCADE tessellate, which spends seconds-to-minutes in C++
+     without checking Python signals. To process these complex families
+     would need an OS-level watchdog process kill — out of scope for now.
+
+## Phase F final HF state
+
+```
+benchcad-simple-100k/  46 parquet shards = 90,175 rows
+  ├─ v1 (first attempt):  shards 0..38 of-00050  →  78,000 rows
+  ├─ v3 (family blacklist): shards 39..44 of-00050 → 10,175 rows
+  └─ v4 (only-family):     shard 45 of-00050     →  2,000 rows
+                                                  ───────────
+                                                  ~90k bench-style image+code samples
+```
+~9k helix/spline/twist samples remain unprocessed (would need OS-level watchdog).
+
 ## Wrap-up  ✅ DONE (08:35)
 
 - [x] Single commit with all changes
