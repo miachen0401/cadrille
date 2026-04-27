@@ -496,6 +496,63 @@ def load_online_eval_subsets(n_per: int = 20, seed: int = 42,
     return out
 
 
+def _write_predictions_probe(examples, all_codes, per_item_iou,
+                             predictions_dir: str, global_step: int) -> None:
+    """Emit one prediction row per eval item to JSONL + wandb Table.
+
+    JSONL goes to `{predictions_dir}/step-{N:06d}.jsonl` for grep / local
+    inspection. Same data also pushed to wandb as a Table keyed
+    `eval/predictions/step_{N}` so the wandb panel shows browsable rows
+    with full pred + GT code text alongside IoU.
+    """
+    import json
+    from pathlib import Path
+
+    Path(predictions_dir).mkdir(parents=True, exist_ok=True)
+    out_path = Path(predictions_dir) / f'step-{global_step:06d}.jsonl'
+
+    rows = []
+    for idx, ex in enumerate(examples):
+        gt_code = ex.get('_gt_code')
+        iou = per_item_iou[idx]
+        rows.append({
+            'step': global_step,
+            'modality': ex.get('_modality', 'img'),
+            'bucket': ex.get('_dataset_label', '?'),
+            'uid': ex.get('file_name', f'idx_{idx}'),
+            'description': ex.get('description', ''),
+            'pred_code': all_codes[idx],
+            'gt_code': gt_code,
+            'iou': iou,
+            'has_iou': 'gt_mesh_path' in ex,
+            'has_gt_code': gt_code is not None,
+        })
+
+    with out_path.open('w') as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + '\n')
+    print(f'[online-eval] wrote {len(rows)} predictions to {out_path}', flush=True)
+
+    # wandb Table — one new table per step, browsable in the UI.
+    try:
+        import wandb
+        if wandb.run is not None:
+            cols = ['bucket', 'uid', 'iou', 'pred_code', 'gt_code', 'description']
+            tbl = wandb.Table(columns=cols)
+            for r in rows:
+                tbl.add_data(
+                    r['bucket'], r['uid'],
+                    r['iou'] if r['iou'] is not None else float('nan'),
+                    r['pred_code'][:4000] if r['pred_code'] else '',  # cap cell size
+                    (r['gt_code'] or '')[:4000],
+                    r['description'][:500],
+                )
+            wandb.log({f'eval/predictions/step_{global_step}': tbl,
+                       'eval/global_step': global_step})
+    except Exception as e:
+        print(f'[online-eval] wandb predictions table failed: {e}', flush=True)
+
+
 @torch.no_grad()
 def _run_max_iou_at_temp(model, processor, examples: list[dict],
                          k: int, temperature: float,
@@ -632,7 +689,9 @@ def run_online_eval(model, processor, examples: list[dict],
                     rare_op_idx: np.ndarray | None = None,
                     max_iou_k: int = 0,
                     max_iou_temperature: float = 1.0,
-                    max_iou_seed: int = 42) -> dict:
+                    max_iou_seed: int = 42,
+                    predictions_dir: str | None = None,
+                    global_step: int = 0) -> dict:
     """Greedy eval → per-(modality, dataset) IoU / CD / Failures. wandb-ready dict."""
     if not examples:
         return {}
@@ -701,7 +760,9 @@ def run_online_eval(model, processor, examples: list[dict],
             return idx, iou_reward, cd
 
         # Bucket non-IoU items first (text2cad/recode20k) — no need to schedule
-        # them on the cadquery worker pool.
+        # them on the cadquery worker pool. Also track file_name + per-item
+        # IoU so the prediction probe can write a structured table.
+        per_item_iou = [None] * n   # parallel to examples; None = not scored
         for idx in range(n):
             ex = examples[idx]
             key = (ex.get('_modality', 'img'), ex.get('_dataset_label', '?'))
@@ -717,6 +778,7 @@ def run_online_eval(model, processor, examples: list[dict],
                 ex = examples[idx]
                 key = (ex.get('_modality', 'img'), ex.get('_dataset_label', '?'))
                 buckets[key]['has_iou'] = True
+                per_item_iou[idx] = iou_reward
                 if iou_reward <= -1.0:
                     buckets[key]['failures'] += 1
                 else:
@@ -771,6 +833,17 @@ def run_online_eval(model, processor, examples: list[dict],
                   f'distinct_codes={div.get("distinct_codes_frac", 0):.2f}  '
                   f'(n={b["total"]})', flush=True)
 
+        # Predictions probe — emit one row per item to JSONL + wandb Table so
+        # the user can inspect what the model actually generated each eval.
+        if predictions_dir:
+            _write_predictions_probe(
+                examples=examples,
+                all_codes=all_codes,
+                per_item_iou=per_item_iou,
+                predictions_dir=predictions_dir,
+                global_step=global_step,
+            )
+
         # Optional: max IoU @ K samples at temperature T on IoU-bucketed items.
         # Cost is K× the greedy IoU pass time; defaults to 0 (off).
         if max_iou_k > 0:
@@ -821,7 +894,9 @@ class OnlineIoUEvalCallback(TrainerCallback):
                  max_iou_k: int = 8,
                  max_iou_temperature: float = 1.0,
                  max_iou_seed: int = 42,
-                 max_iou_every_n_evals: int = 1):
+                 max_iou_every_n_evals: int = 1,
+                 save_predictions: bool = True,
+                 predictions_dir: str | None = None):
         self.processor = processor
         self.n_per_dataset = n_per_dataset
         self.seed = seed
@@ -839,6 +914,11 @@ class OnlineIoUEvalCallback(TrainerCallback):
         # Throttle: only run max_iou pass every Nth eval (cost is K× greedy
         # generation; on a 5-min eval, K=8 adds ~5 min). 1 = every eval.
         self.max_iou_every_n_evals = max(1, int(max_iou_every_n_evals))
+        # Predictions probe: when True, write JSONL + wandb Table per eval.
+        # `predictions_dir` defaults to `<run output_dir>/predictions/` and is
+        # set lazily on first on_evaluate call (we don't have args here).
+        self.save_predictions = save_predictions
+        self.predictions_dir = predictions_dir
         self._eval_count = 0
         self._examples = None
         self._global_freqs = None
@@ -888,6 +968,10 @@ class OnlineIoUEvalCallback(TrainerCallback):
         )
         max_iou_k_now = self.max_iou_k if run_max_iou else 0
 
+        # Lazy-resolve predictions_dir from Trainer's output_dir if not set.
+        if self.save_predictions and self.predictions_dir is None:
+            self.predictions_dir = os.path.join(args.output_dir, 'predictions')
+
         iou_metrics = run_online_eval(
             model, self.processor, self._examples,
             eval_batch_size=self.eval_batch_size,
@@ -899,6 +983,8 @@ class OnlineIoUEvalCallback(TrainerCallback):
             max_iou_k=max_iou_k_now,
             max_iou_temperature=self.max_iou_temperature,
             max_iou_seed=self.max_iou_seed,
+            predictions_dir=self.predictions_dir if self.save_predictions else None,
+            global_step=int(state.global_step),
         )
         # HF Trainer.evaluate() calls self.log(metrics) BEFORE on_evaluate, so a
         # late metrics.update() never reaches wandb. Push directly to wandb instead.
