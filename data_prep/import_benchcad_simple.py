@@ -197,7 +197,12 @@ def main():
     ap.add_argument('--out-dir', default='data/_phase_f_out')
     ap.add_argument('--cache-dir', default='data/_cache_phase_f')
     ap.add_argument('--start-shard', type=int, default=0,
-                    help='Skip first N output shards (resume after crash)')
+                    help='Skip first N output shards (resume after crash). '
+                         'For multi-VM split, set this to where THIS VM starts.')
+    ap.add_argument('--end-shard', type=int, default=None,
+                    help='Stop after writing this many output shards (exclusive). '
+                         'Default = all shards. For multi-VM split, this VM writes '
+                         '[start-shard, end-shard) range only.')
     ap.add_argument('--n', type=int, default=None,
                     help='Process at most N rows total (for smoke test)')
     ap.add_argument('--no-upload', action='store_true')
@@ -223,9 +228,19 @@ def main():
     total_shards_out = (total_src_rows + args.shard_size - 1) // args.shard_size
     n_skip_for_resume = args.start_shard * args.shard_size
 
+    # Multi-VM split: this VM writes shards [start-shard, end-shard).
+    # Stop dispatching when n_dispatched >= end_shard * shard_size.
+    end_shard = args.end_shard if args.end_shard is not None else total_shards_out
+    end_shard = min(end_shard, total_shards_out)
+    n_stop_at = end_shard * args.shard_size
+    n_to_save_this_vm = n_stop_at - n_skip_for_resume
+
     print(f'workers={args.workers}  shard_size={args.shard_size}  '
-          f'estimated_output_shards={total_shards_out}', flush=True)
-    print(f'(resume: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
+          f'total_output_shards={total_shards_out}', flush=True)
+    print(f'(this VM: shards [{args.start_shard}, {end_shard}) = '
+          f'{n_to_save_this_vm} items to save, '
+          f'skip-by-shard for first {n_skip_for_resume} already-uploaded items)',
+          flush=True)
 
     # Stream rows from upstream parquet shards, dispatch to workers, batch into output shards.
     from huggingface_hub import hf_hub_download
@@ -249,10 +264,37 @@ def main():
         in_flight = []  # list of AsyncResult
         max_in_flight = 4 * args.workers
 
-        # Iterate over upstream parquet shards lazily
+        # Iterate over upstream parquet shards lazily.
+        # Resume optimisation: instead of render-and-discard for the first
+        # N items in skip range, skip whole src shards that fall entirely
+        # below the skip threshold (don't even download), and partial-skip
+        # the boundary src shard that straddles the threshold.
         for src_shard_i in range(args.total_src_shards):
             if args.n is not None and n_dispatched >= args.n:
                 break
+            # Multi-VM split: this VM's range ends at n_stop_at
+            if n_dispatched >= n_stop_at:
+                print(f'[stop] reached end-shard={end_shard} '
+                      f'(n_dispatched={n_dispatched} >= n_stop_at={n_stop_at})', flush=True)
+                break
+
+            rows_processed_before = src_shard_i * args.rows_per_src_shard
+
+            # Whole src shard already past this VM's range → skip download
+            if rows_processed_before >= n_stop_at:
+                break
+
+            # Whole src shard already covered by previous run → skip download
+            if rows_processed_before + args.rows_per_src_shard <= n_skip_for_resume:
+                advance = args.rows_per_src_shard
+                n_success += advance
+                n_dispatched += advance
+                skip_remaining = max(0, skip_remaining - advance)
+                print(f'[src shard {src_shard_i + 1}/{args.total_src_shards}] '
+                      f'SKIP-WHOLE (rows {rows_processed_before}-{rows_processed_before + advance - 1} '
+                      f'already on HF)', flush=True)
+                continue
+
             src_fname = f'{args.src_prefix}/{args.src_shard_prefix}-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
             print(f'[src shard {src_shard_i + 1}/{args.total_src_shards}] downloading {src_fname} ...', flush=True)
             t0 = time.time()
@@ -262,6 +304,23 @@ def main():
             t = pq.read_table(p)
             rows = t.to_pylist()
             print(f'  loaded {len(rows)} rows in {time.time()-t0:.1f}s', flush=True)
+
+            # Partial skip: this src shard straddles the skip threshold
+            if rows_processed_before < n_skip_for_resume:
+                partial = n_skip_for_resume - rows_processed_before
+                print(f'  partial-skip first {partial} rows '
+                      f'({rows_processed_before}-{rows_processed_before + partial - 1} already on HF)',
+                      flush=True)
+                n_success += partial
+                n_dispatched += partial
+                skip_remaining = max(0, skip_remaining - partial)
+                rows = rows[partial:]
+
+            # End-shard truncation: this src shard partly past this VM's range
+            rows_remaining_in_vm = n_stop_at - n_dispatched
+            if rows_remaining_in_vm < len(rows):
+                rows = rows[:rows_remaining_in_vm]
+                print(f'  truncate to {len(rows)} rows (end of this VM range)', flush=True)
 
             # Dispatch + drain loop
             row_idx = 0
@@ -296,30 +355,34 @@ def main():
                     if skip_remaining > 0:
                         skip_remaining -= 1
                         n_success += 1
-                        continue
-                    successes_buf.append(result)
-                    n_success += 1
+                    else:
+                        successes_buf.append(result)
+                        n_success += 1
 
-                    if len(successes_buf) >= args.shard_size:
-                        _push_shard(successes_buf, shard_idx, total_shards_out,
-                                    args.repo_id, args.dst_prefix, out_dir,
-                                    dry_run=args.no_upload)
-                        successes_buf = []
-                        shard_idx += 1
-                        free = _free_ram_mb()
-                        if free is not None and free < args.ram_floor_mb:
-                            print(f'  !! RAM floor {free} MB < {args.ram_floor_mb} MB — aborting', flush=True)
-                            return
+                        if len(successes_buf) >= args.shard_size:
+                            _push_shard(successes_buf, shard_idx, total_shards_out,
+                                        args.repo_id, args.dst_prefix, out_dir,
+                                        dry_run=args.no_upload)
+                            successes_buf = []
+                            shard_idx += 1
+                            free = _free_ram_mb()
+                            if free is not None and free < args.ram_floor_mb:
+                                print(f'  !! RAM floor {free} MB < {args.ram_floor_mb} MB — aborting', flush=True)
+                                return
 
-                    now = time.time()
-                    if now - last_log > 30:
-                        elapsed = now - t_start
-                        rate = n_success / max(elapsed, 1)
-                        free = _free_ram_mb()
-                        print(f'  progress: success={n_success}  errors={n_error}  '
-                              f'rate={rate:.1f}/s  free_ram={free}MB  in_flight={len(in_flight)}',
-                              flush=True)
-                        last_log = now
+                # Progress log fires every 30s regardless of skip/success/error
+                # so we can see throughput during skip-phase (resume warmup).
+                now = time.time()
+                if now - last_log > 30:
+                    elapsed = now - t_start
+                    rate = n_success / max(elapsed, 1)
+                    free = _free_ram_mb()
+                    phase = 'SKIP' if skip_remaining > 0 else 'SAVE'
+                    print(f'  progress: success={n_success}  errors={n_error}  '
+                          f'phase={phase} skip_left={skip_remaining}  '
+                          f'rate={rate:.1f}/s  free_ram={free}MB  in_flight={len(in_flight)}',
+                          flush=True)
+                    last_log = now
 
             # Cleanup downloaded source shard
             try: Path(p).unlink()
