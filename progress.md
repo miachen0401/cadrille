@@ -143,6 +143,41 @@ benchcad-simple-100k/  46 parquet shards = 90,175 rows
 ```
 ~9k helix/spline/twist samples remain unprocessed (would need OS-level watchdog).
 
+## Phase B' — scale recode-bench to 140k  ✅ DONE 2026-04-27
+
+User requested another +20k–40k recode-bench. Took the upper end (+40k):
+
+- Script: `data_prep/prepare_hf_cadrecode_v2.py` (unchanged from Phase B)
+- Command: `--offset 100000 --n 40000 --workers 4 --shard-size 2000 --max-tasks-per-child 100`
+- Sampling slice [int(100000×1.3) : int(140000×1.3)] = **[130000, 182000]** of the
+  seed=42 shuffled cad-recode-v1.5/train candidate list — zero overlap with
+  Phase A (took [0:26000]) or Phase B ([26000:130000]).
+- Started 01:42, completed 03:35. Wall time 113.7 min, rate 5.86/s
+  (recent steady ~8/s; cumulative pulled down by ~5 min worker cold-start).
+- Result: **40,000 successes / 0 errors** / 20 shards on HF
+- Output: `Hula0401/cad-sft/cad-recode-bench/train-{00000..00019}-of-00020.parquet`
+  (distinct from Phase A's of-00009 and Phase B's of-00040 naming; fetcher
+  uses list_repo_files so all 69 shards load without naming-convention concern.)
+
+### cad-recode-bench corpus after Phase B'
+```
+Phase A:   9 shards of-00009  →  20,000 rows  (re-pack of original 20k)
+Phase B:  40 shards of-00040  →  80,000 rows  (offset=20000)
+Phase B': 20 shards of-00020  →  40,000 rows  (offset=100000)
+                              ────────────────
+                              140,000 rows total bench-style recode + 4-view PNG
+```
+
+### Total bench data on HF (Hula0401/cad-sft) after T8 + Phase F + Phase B'
+```
+benchcad             ~20k
+cad-recode-bench    ~140k  ← was 100k
+text2cad-bench       ~90k
+benchcad-simple-100k ~90k
+                     ─────
+                    ~340k bench-style training samples
+```
+
 ## Wrap-up  ✅ DONE (08:35)
 
 - [x] Single commit with all changes
