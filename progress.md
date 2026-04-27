@@ -93,19 +93,25 @@ embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
    pointed at `data/benchcad-simple/` since on-disk layout is identical)
 - [x] New config `configs/sft/mix_all_bench.yaml` —
    benchcad:2 + benchcad_simple:2 + recode_bench:2 + text2cad_bench:1
-- [✅ PARTIAL] Full ~99k run completed at 78k (39/50 shards) at 19:53,
-   stopped early due to throughput collapse on the late upstream shards.
-   - Started 16:21, killed 19:53 (~3.5h wall time)
-   - Final: 78,000 rows / 39 shards / 0 errors
-   - Output: Hula0401/cad-sft/benchcad-simple-100k/train-{00000..00038}-of-00050.parquet
-   - Throughput timeline:
-     * shards 1..9 of upstream: rate 7-8/s sustained, RAM 9-12 GB free oscillating
-     * shards 10..12 of upstream: rate dropped to 0.6-1/s (complex shapes —
-       larger meshes → render takes 5+ sec/sample even with 4 workers at 110% CPU)
-   - Decision: stopped at shard 39/50 instead of pushing through 8+ more hours.
-     Marginal value of the last 21k complex samples not worth the time cost.
-     fetcher uses `list_repo_files` so the nominal "of-00050" suffix on
-     existing shards is harmless — they all load.
+- [✅] First run 78k (39/50) + smart resume v3 added 10,175 → **88,175 / 45 shards**
+   - **First attempt** (16:21–19:53, 3.5h): 78,000 rows / 39 shards / 0 errors.
+     Throughput collapsed to 0.6/s on upstream shards 9-11 because parametric-
+     surface families (sweep_helix, sweep_spline, twist_*) tessellate to
+     50k-500k triangles — render takes 5-30s vs 0.15s baseline.
+   - **Smart resume v3** (21:13–21:36, 23.5 min): 10,175 new / 6 shards /
+     0 errors / rate 7.21/s. Three new flags in import_benchcad_simple.py:
+     - `--start-upstream-shard 9 --skip-rows-in-first-upstream 3840`: don't
+       re-render shards 0-8 (already on HF) or first 3840 of shard 9 (done)
+     - `--skip-family-substr helix spline twist`: cheap pre-filter at the
+       main process. Drops 89% of shard 9 remaining (3905/4400), 24% of
+       shard 10 (1940/8240), ~58% of shard 11 — BEFORE any STEP load
+     - `--per-task-timeout-sec 30`: SIGALRM safety net (didn't fire — 0 errors)
+   - **Final**: 88,175 rows / 45 shards on HF
+     `Hula0401/cad-sft/benchcad-simple-100k/train-{00000..00044}-of-00050.parquet`
+     ("-of-00050" suffix nominal; fetcher uses list_repo_files so all 45 load.)
+   - **Excluded by design**: ~9k samples from helix/spline/twist families
+     (extreme tessellation cost vs marginal training value). To include them
+     later: drop --skip-family-substr and budget 8+ hours.
 
 ## Wrap-up  ✅ DONE (08:35)
 
