@@ -215,9 +215,15 @@ def fetch_recode_bench(out_root: Path, val_frac: float = 0.05) -> None:
     print(f'[recode-bench] done. total {n_total} rows.\n', flush=True)
 
 
-def fetch_benchcad_simple(out_root: Path, val_frac: float = 0.05) -> None:
-    """Download all benchcad-simple-100k parquet shards and materialise to
-    py + render PNG (same layout as cad-recode-bench)."""
+def _fetch_bench_shell_subset(out_root: Path, hf_subdir: str, label: str,
+                                val_frac: float = 0.05) -> None:
+    """Generic fetcher for a Hula0401/cad-sft sub-directory whose parquet
+    shards have schema {stem, code, render_img(bytes), ...}. Materialises to
+        out_root/train/{stem}.py
+        out_root/train/{stem}_render.png
+        out_root/{train,val}.pkl  with rows {uid, py_path, png_path}
+    Used by both `benchcad-simple-100k` and `cad-iso-106-175k` sub-folders.
+    """
     from huggingface_hub import HfApi, hf_hub_download
     import pyarrow.parquet as pq
 
@@ -228,8 +234,8 @@ def fetch_benchcad_simple(out_root: Path, val_frac: float = 0.05) -> None:
     api = HfApi()
     files = api.list_repo_files('Hula0401/cad-sft', repo_type='dataset', token=token)
     shards = sorted([f for f in files
-                     if f.startswith('benchcad-simple-100k/') and f.endswith('.parquet')])
-    print(f'[benchcad-simple] discovered {len(shards)} shards', flush=True)
+                     if f.startswith(f'{hf_subdir}/') and f.endswith('.parquet')])
+    print(f'[{label}] discovered {len(shards)} shards', flush=True)
 
     (out_root / 'train').mkdir(parents=True, exist_ok=True)
     (out_root / 'val').mkdir(parents=True, exist_ok=True)
@@ -237,7 +243,7 @@ def fetch_benchcad_simple(out_root: Path, val_frac: float = 0.05) -> None:
 
     n_total = 0
     for i, shard in enumerate(shards):
-        print(f'[benchcad-simple] downloading {shard} ({i + 1}/{len(shards)}) ...', flush=True)
+        print(f'[{label}] downloading {shard} ({i + 1}/{len(shards)}) ...', flush=True)
         p = hf_hub_download('Hula0401/cad-sft', shard, repo_type='dataset',
                             token=token, local_dir=str(cache))
         t = pq.read_table(p)
@@ -275,7 +281,21 @@ def fetch_benchcad_simple(out_root: Path, val_frac: float = 0.05) -> None:
         with pkl.open('wb') as fp:
             pickle.dump(ann[split], fp)
         print(f'  {split}.pkl: {len(ann[split])} rows → {pkl}', flush=True)
-    print(f'[benchcad-simple] done. total {n_total} rows.\n', flush=True)
+    print(f'[{label}] done. total {n_total} rows.\n', flush=True)
+
+
+def fetch_benchcad_simple(out_root: Path, val_frac: float = 0.05) -> None:
+    """BenchCAD/cad_simple_ops_100k via shared bench-shell fetcher."""
+    return _fetch_bench_shell_subset(out_root, 'benchcad-simple-100k',
+                                     'benchcad-simple', val_frac)
+
+
+def fetch_cad_iso_106(out_root: Path, val_frac: float = 0.05) -> None:
+    """BenchCAD/cad_iso_106 (~170k items) via shared bench-shell fetcher.
+    Pipe / flange / industrial parts; only source with non-trivial fillet
+    (~19% of items) for rare-op coverage."""
+    return _fetch_bench_shell_subset(out_root, 'cad-iso-106-175k',
+                                     'cad-iso-106', val_frac)
 
 
 def fetch_text2cad_bench(out_root: Path) -> None:
@@ -319,6 +339,7 @@ def main() -> None:
     ap.add_argument('--what', default='all',
                     choices=['recode20k', 'text2cad', 'recode-bench',
                              'text2cad-bench', 'benchcad-simple',
+                             'cad-iso-106',
                              'bench-all', 'all'])
     ap.add_argument('--out', default='data')
     ap.add_argument('--val-frac', type=float, default=0.05)
@@ -335,6 +356,8 @@ def main() -> None:
         fetch_text2cad_bench(out_root / 'text2cad-bench')
     if args.what in ('benchcad-simple', 'bench-all'):
         fetch_benchcad_simple(out_root / 'benchcad-simple', args.val_frac)
+    if args.what in ('cad-iso-106', 'bench-all'):
+        fetch_cad_iso_106(out_root / 'cad-iso-106', args.val_frac)
 
     print('DONE', flush=True)
 

@@ -536,6 +536,21 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 max_code_len=max_code_len,
                 mode='img')
 
+    # Phase F (T8 follow-up): BenchCAD/cad_iso_106 imported via the same
+    # data_prep/import_benchcad_simple.py pipeline (different upstream
+    # generator config — pipe_elbow / pipe_flange / ball_knob / industrial
+    # parts). 170k items, BenchCAD shell style, only dataset that has
+    # fillet (~19% of items) — primary source for rare-op coverage.
+    cad_iso_106_path = os.path.join(data_path, 'cad-iso-106')
+    if os.path.isdir(cad_iso_106_path) and os.path.exists(os.path.join(cad_iso_106_path, 'train.pkl')):
+        if mode != 'pc':
+            sources['cad_iso_106'] = CadRecode20kDataset(
+                root_dir=cad_iso_106_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+
     if use_text:
         text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
         if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
