@@ -140,10 +140,50 @@ def _process_row(row: dict) -> dict:
     }
 
 
+# Background upload thread pool — render loop submits, never blocks.
+_UPLOAD_POOL = None
+_UPLOAD_FUTURES = []
+_UPLOAD_LOCK = None
+
+
+def _ensure_upload_pool():
+    """Lazy-init upload pool. Single thread is enough — uploads are I/O bound,
+    multiple parallel uploads to same HF repo can collide on git lock anyway."""
+    global _UPLOAD_POOL, _UPLOAD_LOCK
+    if _UPLOAD_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        _UPLOAD_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='hf-upload')
+        _UPLOAD_LOCK = threading.Lock()
+    return _UPLOAD_POOL
+
+
+def _do_upload(fname_local_str, fname_remote, repo_id, commit_message):
+    """Upload single file to HF in background. File stays on disk after upload
+    (local-first, no unlink) for backup + resumability."""
+    from huggingface_hub import HfApi
+    api = HfApi()
+    t0 = time.time()
+    try:
+        api.upload_file(
+            path_or_fileobj=fname_local_str,
+            path_in_repo=fname_remote,
+            repo_id=repo_id,
+            repo_type='dataset',
+            token=os.environ.get('HF_TOKEN'),
+            commit_message=commit_message,
+        )
+        print(f'  [bg-upload] {fname_remote} in {time.time()-t0:.1f}s', flush=True)
+    except Exception as e:
+        print(f'  [bg-upload] FAILED {fname_remote}: {type(e).__name__}: {str(e)[:120]}',
+              flush=True)
+
+
 def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry_run):
+    """Write parquet locally (always kept on disk) + queue async HF upload.
+    Render loop never blocks on network I/O."""
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from huggingface_hub import HfApi
 
     fname_local = out_dir / f'train-{shard_idx:05d}-of-{total_shards:05d}.parquet'
     fname_remote = f'{dst_prefix}/train-{shard_idx:05d}-of-{total_shards:05d}.parquet'
@@ -160,21 +200,15 @@ def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry
     })
     pq.write_table(table, str(fname_local), compression='snappy')
     size_mb = fname_local.stat().st_size / 1024 / 1024
-    print(f'  shard {shard_idx + 1}/{total_shards}: {len(rows)} rows, {size_mb:.1f} MB', flush=True)
+    print(f'  shard {shard_idx + 1}/{total_shards}: {len(rows)} rows, '
+          f'{size_mb:.1f} MB → {fname_local}', flush=True)
 
     if not dry_run:
-        api = HfApi()
-        t0 = time.time()
-        api.upload_file(
-            path_or_fileobj=str(fname_local),
-            path_in_repo=fname_remote,
-            repo_id=repo_id,
-            repo_type='dataset',
-            token=os.environ.get('HF_TOKEN'),
-            commit_message=f'phase-F shard {shard_idx + 1}/{total_shards}',
-        )
-        print(f'    uploaded in {time.time()-t0:.1f}s', flush=True)
-    fname_local.unlink()
+        pool = _ensure_upload_pool()
+        future = pool.submit(_do_upload, str(fname_local), fname_remote, repo_id,
+                              f'shard {shard_idx + 1}/{total_shards}')
+        _UPLOAD_FUTURES.append(future)
+    # NOTE: do NOT unlink — local file stays for backup + resumability
 
 
 def main():
@@ -398,12 +432,25 @@ def main():
         shard_idx += 1
 
     elapsed = time.time() - t_start
-    print(f'\n=== Phase F done ===', flush=True)
+    print(f'\n=== Render done — waiting for background uploads ===', flush=True)
     print(f'  total successes: {n_success}', flush=True)
     print(f'  total errors:    {n_error}  by kind: {error_kinds}', flush=True)
-    print(f'  shards uploaded: {shard_idx} (start_shard={args.start_shard})', flush=True)
-    print(f'  elapsed:         {elapsed:.1f}s ({elapsed/60:.1f} min)', flush=True)
-    print(f'  rate:            {n_success/max(elapsed,1):.2f}/s', flush=True)
+    print(f'  shards rendered: {shard_idx} (start_shard={args.start_shard})', flush=True)
+    print(f'  render elapsed:  {elapsed:.1f}s ({elapsed/60:.1f} min)', flush=True)
+    print(f'  render rate:     {n_success/max(elapsed,1):.2f}/s', flush=True)
+
+    # Wait for all background uploads to finish before exiting
+    if _UPLOAD_FUTURES and not args.no_upload:
+        n_pending = sum(1 for f in _UPLOAD_FUTURES if not f.done())
+        print(f'  bg uploads:      {n_pending}/{len(_UPLOAD_FUTURES)} still in flight, waiting ...',
+              flush=True)
+        t_up = time.time()
+        for f in _UPLOAD_FUTURES:
+            f.result()
+        if _UPLOAD_POOL is not None:
+            _UPLOAD_POOL.shutdown(wait=True)
+        print(f'  bg uploads done in {time.time() - t_up:.1f}s', flush=True)
+    print(f'\n=== ALL DONE in {time.time() - t_start:.1f}s total ===', flush=True)
 
 
 if __name__ == '__main__':
