@@ -54,6 +54,39 @@ _DESCRIPTION = 'Generate cadquery code'
 # CadEvolve prompt (standard Qwen2-VL, image input)
 _CADEVOLVE_PROMPT = 'Generate CadQuery Python code for this 3D CAD model shown in multiple views.'
 
+# Zero-shot prompt for off-the-shelf VLMs (e.g. Qwen2.5-VL-3B). The model has
+# not seen cadquery during training. We deliberately omit a code example here
+# because Qwen2.5-VL-3B has been observed to copy the example verbatim instead
+# of looking at the image.
+_ZS_PROMPT = (
+    "Look at the 3D CAD model rendered in this image and write a complete "
+    "Python script using the cadquery library that reproduces this exact "
+    "geometry. Match the visible shape, dimensions, holes, fillets, and "
+    "features as closely as possible.\n\n"
+    "Strict output rules:\n"
+    "- Start the script with `import cadquery as cq`\n"
+    "- Bind the final shape to a variable named exactly `result`\n"
+    "- Output ONLY runnable Python — no prose, no markdown code fences, "
+    "no explanation before or after the code\n"
+    "- Use real numeric dimensions you can read or estimate from the image\n"
+    "- Use cadquery operations like Workplane, box, cylinder, sphere, "
+    "extrude, revolve, hole, fillet, chamfer, cut, union as appropriate"
+)
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove leading/trailing markdown code fences and surrounding prose
+    that VLMs sometimes wrap around generated code."""
+    import re
+    # Strip leading prose up to first ```python or ``` block
+    m = re.search(r'```(?:python|cadquery)?\s*\n(.*?)```', text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Single fence at start with no closing → strip the opening fence
+    text = re.sub(r'^\s*```(?:python|cadquery)?\s*\n', '', text)
+    text = re.sub(r'\n```\s*$', '', text)
+    return text.strip()
+
 # ---------------------------------------------------------------------------
 # GT code execution  →  temp STL
 # ---------------------------------------------------------------------------
@@ -150,8 +183,14 @@ def run_bench_cadevolve(
     max_new_tokens: int = 768,
     score_workers: int = 4,
     save_code: bool = True,
+    prompt: str = _CADEVOLVE_PROMPT,
 ) -> dict:
-    """Eval loop for CadEvolve: uses composite_png as single image, no point cloud."""
+    """Eval loop for single-image VLMs: uses composite_png, no point cloud.
+
+    Used by both `cadevolve` (trained on cadquery) and `qwen25vl_zs` (zero-shot
+    off-the-shelf VLM with strong cadquery prompt). The only thing that differs
+    is the user prompt → take it as a kwarg.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     meta_path = out_dir / 'metadata.jsonl'
 
@@ -200,7 +239,7 @@ def run_bench_cadevolve(
                 'role': 'user',
                 'content': [
                     {'type': 'image', 'image': img},
-                    {'type': 'text', 'text': _CADEVOLVE_PROMPT},
+                    {'type': 'text', 'text': prompt},
                 ],
             }])
 
@@ -225,13 +264,16 @@ def run_bench_cadevolve(
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                eos_token_id=model.config.eos_token_id,
+                eos_token_id=getattr(model.config, 'eos_token_id', None) or model.config.text_config.eos_token_id,
             )
 
         prompt_len = inputs['input_ids'].shape[1]
         for i, row in enumerate(batch):
             stem = row['stem']
             gen_code = processor.decode(out_ids[i, prompt_len:], skip_special_tokens=True)
+            # Off-the-shelf VLMs almost always wrap output in markdown fences;
+            # strip them so the code is directly executable.
+            gen_code = _strip_code_fences(gen_code)
             if save_code:
                 (out_dir / f'{stem}.py').write_text(gen_code)
             base_rec = {
@@ -361,7 +403,7 @@ def run_bench(
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                eos_token_id=model.config.eos_token_id,
+                eos_token_id=getattr(model.config, 'eos_token_id', None) or model.config.text_config.eos_token_id,
             )
 
         prompt_len = b['input_ids'].shape[1]
@@ -511,28 +553,46 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument('--ckpt',         required=True,  help='Checkpoint path (local dir)')
-    ap.add_argument('--model-type',   default='cadrille', choices=['cadrille', 'cadevolve'],
-                    help='Model architecture: cadrille (default) or cadevolve (Qwen2VL, image input)')
+    ap.add_argument('--ckpt',         required=False, default=None,
+                    help='Checkpoint path (local dir). Optional for --model-type qwen25vl_zs '
+                         '— in that case --base-model is loaded directly from HF.')
+    ap.add_argument('--model-type',   default='cadrille',
+                    choices=['cadrille', 'cadevolve', 'qwen25vl_zs'],
+                    help='Model: cadrille (point cloud + image), cadevolve (Qwen2VL image), '
+                         'or qwen25vl_zs (Qwen2.5-VL zero-shot, off-the-shelf, no ckpt needed)')
     ap.add_argument('--base-model',   default='Qwen/Qwen2-VL-2B-Instruct',
-                    help='Base model id for processor (default: Qwen/Qwen2-VL-2B-Instruct)')
+                    help='Base model id for processor (default: Qwen/Qwen2-VL-2B-Instruct). '
+                         'For qwen25vl_zs, set this to e.g. Qwen/Qwen2.5-VL-3B-Instruct.')
     ap.add_argument('--split',        default='test_iid',
-                    choices=['test_iid', 'test_ood_family', 'test_ood_plane', 'all'])
+                    help='Split name. Use "all" for the standard '
+                         'test_iid+test_ood_family+test_ood_plane triple. '
+                         'Any other string is treated as a single literal split name '
+                         '(e.g. "train" for BenchCAD/cad_bench_722).')
     ap.add_argument('--limit',        type=int, default=0,  help='Max samples per split (0=all)')
     ap.add_argument('--seed',         type=int, default=42,
                     help='Random seed for --limit shuffle (default: 42). Same seed = same samples.')
     ap.add_argument('--batch-size',   type=int, default=4)
     ap.add_argument('--max-new-tokens', type=int, default=768)
     ap.add_argument('--score-workers',  type=int, default=4)
+    ap.add_argument('--attn-impl',    default='sdpa',
+                    choices=['sdpa', 'flash_attention_2', 'eager'],
+                    help='Attention implementation (default: sdpa — works without flash-attn).')
     ap.add_argument('--out',          required=True, help='Output directory')
     ap.add_argument('--hf-repo',      default='Hula0401/test_bench')
     ap.add_argument('--label',        default=None,
                     help='Human-readable label for report (default: ckpt basename)')
     args = ap.parse_args()
 
-    ckpt_path  = Path(args.ckpt)
     out_dir    = Path(args.out)
-    ckpt_label = args.label or ckpt_path.name
+    if args.ckpt:
+        ckpt_path = Path(args.ckpt)
+        ckpt_label = args.label or ckpt_path.name
+    else:
+        if args.model_type != 'qwen25vl_zs':
+            print('ERROR: --ckpt is required unless --model-type qwen25vl_zs', file=sys.stderr)
+            sys.exit(1)
+        ckpt_path = None
+        ckpt_label = args.label or args.base_model.split('/')[-1] + '-zs'
 
     # ── Load dataset ────────────────────────────────────────────────────────
     from datasets import load_dataset
@@ -543,7 +603,17 @@ def main() -> None:
     splits = ['test_iid', 'test_ood_family', 'test_ood_plane'] if args.split == 'all' else [args.split]
     rows: list[dict] = []
     for sp in splits:
+        if sp not in ds:
+            print(f'ERROR: split "{sp}" not in dataset {args.hf_repo}. '
+                  f'Available: {list(ds.keys())}', file=sys.stderr)
+            sys.exit(1)
         sp_rows = list(ds[sp])
+        # Inject 'split' field for datasets that don't carry one (e.g. cad_bench_722
+        # only has a single 'train' split). Downstream report grouping needs it.
+        for r in sp_rows:
+            r.setdefault('split', sp)
+            r.setdefault('feature_tags', None)
+            r.setdefault('feature_count', None)
         if args.limit:
             import random as _random
             rng = _random.Random(args.seed)
@@ -554,48 +624,53 @@ def main() -> None:
     print(f'Total samples: {len(rows)} across splits: {splits}', flush=True)
 
     # ── Load model ──────────────────────────────────────────────────────────
-    if not (ckpt_path / 'model.safetensors').exists():
+    if ckpt_path is not None and not (ckpt_path / 'model.safetensors').exists():
         # Try sharded variant
         shards = list(ckpt_path.glob('model-*-of-*.safetensors'))
         if not shards:
             print(f'ERROR: no model weights found at {ckpt_path}', file=sys.stderr)
             sys.exit(1)
 
-    print(f'Loading processor from {args.base_model} ...', flush=True)
+    proc_src = args.base_model if args.model_type != 'qwen25vl_zs' else args.base_model
+    print(f'Loading processor from {proc_src} ...', flush=True)
     processor = AutoProcessor.from_pretrained(
-        args.base_model,
+        proc_src,
         min_pixels=200704,
         max_pixels=1003520,
         padding_side='left',
     )
 
-    print(f'Loading model ({args.model_type}) from {ckpt_path} ...', flush=True)
-    if args.model_type == 'cadevolve':
+    print(f'Loading model ({args.model_type}) from '
+          f'{ckpt_path or args.base_model} ...', flush=True)
+    if args.model_type == 'qwen25vl_zs':
+        from transformers import Qwen2_5_VLForConditionalGeneration
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            args.base_model,
+            torch_dtype=torch.bfloat16,
+            attn_implementation=args.attn_impl,
+            device_map='cuda',
+        )
+    elif args.model_type == 'cadevolve':
         from transformers import Qwen2VLForConditionalGeneration
-        from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig
-        # Workaround: in transformers 4.50.3, get_text_config(decoder=True) returns a plain
-        # dict for Qwen2VL, causing AttributeError in GenerationConfig.from_model_config.
-        # Patch it to return self so the conditional branch is skipped.
-        _orig_get_text_config = Qwen2VLConfig.get_text_config
-        Qwen2VLConfig.get_text_config = lambda self, **kw: self
-        try:
-            model = Qwen2VLForConditionalGeneration.from_pretrained(
-                str(ckpt_path),
-                torch_dtype=torch.bfloat16,
-                attn_implementation='flash_attention_2',
-                device_map='cuda',
-            )
-        finally:
-            Qwen2VLConfig.get_text_config = _orig_get_text_config
-        # lm_head.weight is not saved in checkpoint — tie to embed_tokens
-        if model.lm_head.weight.data_ptr() != model.model.embed_tokens.weight.data_ptr():
-            model.lm_head.weight = model.model.embed_tokens.weight
+        # Note: the old transformers 4.50.3 monkey-patch on get_text_config
+        # broke under transformers 5.x — removed.
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            str(ckpt_path),
+            torch_dtype=torch.bfloat16,
+            attn_implementation=args.attn_impl,
+            device_map='cuda',
+        )
+        # lm_head.weight is not saved in checkpoint — tie to embed_tokens.
+        # transformers 5.x removed `model.model.embed_tokens`; use get_input_embeddings.
+        _embed = model.get_input_embeddings()
+        if model.lm_head.weight.data_ptr() != _embed.weight.data_ptr():
+            model.lm_head.weight = _embed.weight
             print('  lm_head tied to embed_tokens.', flush=True)
     else:
         model = Cadrille.from_pretrained(
             str(ckpt_path),
             torch_dtype=torch.bfloat16,
-            attn_implementation='flash_attention_2',
+            attn_implementation=args.attn_impl,
             device_map='cuda',
         )
     model.eval()
@@ -603,7 +678,8 @@ def main() -> None:
 
     # ── Run eval ────────────────────────────────────────────────────────────
     print(f'\nRunning eval → {out_dir}', flush=True)
-    if args.model_type == 'cadevolve':
+    if args.model_type in ('cadevolve', 'qwen25vl_zs'):
+        prompt = _ZS_PROMPT if args.model_type == 'qwen25vl_zs' else _CADEVOLVE_PROMPT
         summary = run_bench_cadevolve(
             rows=rows,
             model=model,
@@ -612,6 +688,7 @@ def main() -> None:
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
             score_workers=args.score_workers,
+            prompt=prompt,
         )
     else:
         summary = run_bench(
