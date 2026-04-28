@@ -20,6 +20,9 @@ fi
 [[ -n "${HF_TOKEN:-}" ]] || { echo "HF_TOKEN not set"; exit 1; }
 
 SHARD_SIZE=2000
+WORKERS=6
+START_SHARD=4   # resume after the 4 bellows shards already on HF
+TASK_TIMEOUT=60  # seconds per render task (SIGALRM in worker)
 
 notify() {
     if [[ -n "${DISCORD_WEBHOOK_URL:-}" ]]; then
@@ -38,10 +41,13 @@ except Exception as e: print(f'discord ping failed: {e}', flush=True)
 }
 
 T0=$(date +%s)
-notify "🚀 benchcad-easy → Hula0401/cad-sft repackage start (109k rows, ~55 shards of ${SHARD_SIZE})"
+notify "🚀 benchcad-easy → Hula0401/cad-sft repackage start (workers=${WORKERS}, start_shard=${START_SHARD}, ~97k renders + 12k passthrough; ETA ~3.5h)"
 
 if uv run python -m data_prep.import_benchcad_easy \
     --shard-size "$SHARD_SIZE" \
+    --workers "$WORKERS" \
+    --start-shard "$START_SHARD" \
+    --per-task-timeout-sec "$TASK_TIMEOUT" \
     > logs/benchcad_easy_inner.log 2>&1; then
     DUR_MIN=$(( ($(date +%s) - T0) / 60 ))
     SHARDS=$(grep -c "uploaded in" logs/benchcad_easy_inner.log || echo "?")
