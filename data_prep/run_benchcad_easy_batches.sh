@@ -33,13 +33,16 @@ WORKERS=6
 SHARD_SIZE=2000
 TASK_TIMEOUT=60   # seconds per render task (SIGALRM)
 
-# label  start  end (exclusive)   approx_rows
+# label  end-shard-cap (exclusive)   approx_rows-this-batch
+# Each batch lets the importer auto-detect start_shard from HF, so if a
+# previous batch aborted early (e.g. RAM floor) the next batch picks up the
+# missing shards instead of skipping them.
 BATCHES=(
-    "A   6   16"   # shards 06..15  → 20k rows
-    "B  16   26"   # shards 16..25  → 20k rows
-    "C  26   36"   # shards 26..35  → 20k rows
-    "D  36   46"   # shards 36..45  → 20k rows
-    "E  46   55"   # shards 46..54  → ~18k + tail (final batch)
+    "A   16"   # process up through shard 15 (~10 shards if A is fresh)
+    "B   26"
+    "C   36"
+    "D   46"
+    "E   55"   # process up through shard 54 (final)
 )
 
 notify() {
@@ -62,16 +65,16 @@ T0=$(date +%s)
 notify "🚀 benchcad-easy batched upload start (5 batches, workers=${WORKERS}, ${SHARD_SIZE} rows/shard)"
 
 for batch in "${BATCHES[@]}"; do
-    read label start end <<< "$batch"
+    read label end <<< "$batch"
     LOG="logs/benchcad_easy_batch_${label}.log"
 
-    # Auto-resume protection: if all shards in this batch are already on HF,
-    # the importer will print "rows-to-process: 0" and exit fast.
-    notify "▶️ Batch ${label}: shards ${start}..$((end-1))"
+    # Auto-detect start_shard from HF inside the importer (no --start-shard
+    # passed). End-shard caps this batch. If everything below `end` is already
+    # done, the importer prints "rows-to-process: 0" and exits fast.
+    notify "▶️ Batch ${label}: process up through shard $((end-1)) (auto-detect start)"
     BSTART=$(date +%s)
 
     if uv run python -m data_prep.import_benchcad_easy \
-        --start-shard "$start" \
         --end-shard "$end" \
         --workers "$WORKERS" \
         --shard-size "$SHARD_SIZE" \
@@ -82,7 +85,7 @@ for batch in "${BATCHES[@]}"; do
         N_ERR=$(grep -oE "render_errors=[0-9]+" "$LOG" | tail -1 || echo "render_errors=?")
         notify "✅ Batch ${label} DONE in ${DUR}min — ${N_SHARDS} shards, ${N_ERR}"
     else
-        notify "❌ Batch ${label} FAILED at shards ${start}..$((end-1)) — see ${LOG}; aborting chain"
+        notify "❌ Batch ${label} FAILED (end-shard=${end}) — see ${LOG}; aborting chain"
         exit 1
     fi
 done
