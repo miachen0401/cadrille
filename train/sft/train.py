@@ -551,10 +551,23 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 max_code_len=max_code_len,
                 mode='img')
 
-    if use_text:
-        text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
-        if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
-            sources['text2cad_bench'] = Text2CADDataset(
+    # text2cad-bench available in TWO modes (separate sources, separate weights):
+    #   * text2cad_bench_img: image-conditioned (uses png_path, code) via CadRecode20kDataset
+    #   * text2cad_bench_text: text-conditioned (uses description, code) via Text2CADDataset
+    # Same train.pkl (each row has uid, code, description, png_path), but different
+    # __getitem__ produces different conditioning input. User policy 2026-04-28:
+    # do NOT mix img+text on the same sample — pick exactly one per training example.
+    text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
+    if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
+        if mode != 'pc':
+            sources['text2cad_bench_img'] = CadRecode20kDataset(
+                root_dir=text2cad_bench_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+        if use_text:
+            sources['text2cad_bench_text'] = Text2CADDataset(
                 root_dir=text2cad_bench_path,
                 split='train',
                 max_code_len=max_code_len)
