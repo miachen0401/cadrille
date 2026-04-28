@@ -299,12 +299,138 @@ def find_gt_stl(uid: str, bucket: str) -> Path | None:
 
 # ─── EVAL-SPECIFIC: log parse, input lookup ─────────────────────────────────
 
+def parse_all_eval_steps(log_path: Path) -> list[int]:
+    """Return all step numbers that have an IoU eval block in the log,
+    sorted ascending. Used to build the recent-evals history table."""
+    text = log_path.read_text()
+    return sorted({int(m) for m in re.findall(r'step=(\d+) running IoU eval', text)})
+
+
+def trend_arrow(values: list[float]) -> str:
+    """Return a small arrow char summarising the trend in a sequence of IoU
+    values. Looks at the last 3 values: ↑ if monotonic up, ↓ if monotonic
+    down, →/↝ otherwise."""
+    vs = [v for v in values if v is not None]
+    if len(vs) < 2: return '·'
+    tail = vs[-3:] if len(vs) >= 3 else vs[-2:]
+    deltas = [tail[i+1] - tail[i] for i in range(len(tail)-1)]
+    if all(d > 0.005 for d in deltas):  return '↑'
+    if all(d < -0.005 for d in deltas): return '↓'
+    if abs(sum(deltas)) < 0.01:         return '→'
+    return '↝'
+
+
+def build_history_table(log_path: Path, current_step: int,
+                         max_history: int = 6) -> tuple[list[dict], str]:
+    """Returns (history_rows, history_text_block).
+
+    history_rows: list of {'step', 'bc', 'dc', 'fu', 'bc_max', 'dc_max', 'fu_max'}
+                  for the last N evals up to and including current_step.
+    """
+    all_steps = [s for s in parse_all_eval_steps(log_path) if s <= current_step]
+    recent = all_steps[-max_history:]
+    rows = []
+    for s in recent:
+        d = parse_eval_block(log_path, s)
+        bc = d.get('BenchCAD val', {}); dc = d.get('DeepCAD test', {}); fu = d.get('Fusion360 test', {})
+        rows.append({
+            'step': s,
+            'bc':   bc.get('iou'),
+            'dc':   dc.get('iou'),
+            'fu':   fu.get('iou'),
+            'bc_max': bc.get('max_iou_at8'),
+            'dc_max': dc.get('max_iou_at8'),
+            'fu_max': fu.get('max_iou_at8'),
+        })
+
+    # Format text block
+    if not rows: return rows, ''
+    bc_arrow = trend_arrow([r['bc'] for r in rows])
+    dc_arrow = trend_arrow([r['dc'] for r in rows])
+    fu_arrow = trend_arrow([r['fu'] for r in rows])
+
+    lines = [f'**Recent {len(rows)} evals (greedy IoU):**']
+    lines.append('```')
+    lines.append(f'  step    BC val   DC test  FU test')
+    for r in rows:
+        bc_s = f'{r["bc"]:.3f}' if r['bc'] is not None else '  -  '
+        dc_s = f'{r["dc"]:.3f}' if r['dc'] is not None else '  -  '
+        fu_s = f'{r["fu"]:.3f}' if r['fu'] is not None else '  -  '
+        marker = ' ← now' if r['step'] == current_step else ''
+        lines.append(f'  {r["step"]:5d}   {bc_s}    {dc_s}    {fu_s}{marker}')
+    lines.append(f'  trend     {bc_arrow}        {dc_arrow}        {fu_arrow}')
+    lines.append('```')
+
+    # max_iou@8 history (only the rows that have it)
+    max_rows = [r for r in rows if r['bc_max'] is not None]
+    if max_rows:
+        lines.append(f'**Recent max_iou@8 (only on max_iou eval-cycles):**')
+        lines.append('```')
+        lines.append(f'  step    BC@8     DC@8     FU@8')
+        for r in max_rows:
+            bcm = f'{r["bc_max"]:.3f}' if r['bc_max'] is not None else '  -  '
+            dcm = f'{r["dc_max"]:.3f}' if r['dc_max'] is not None else '  -  '
+            fum = f'{r["fu_max"]:.3f}' if r['fu_max'] is not None else '  -  '
+            marker = ' ← now' if r['step'] == current_step else ''
+            lines.append(f'  {r["step"]:5d}   {bcm}    {dcm}    {fum}{marker}')
+        lines.append('```')
+    return rows, '\n'.join(lines)
+
+
+def auto_analysis(rows: list[dict], current_step: int) -> str:
+    """Generate brief analysis comments based on history."""
+    if len(rows) < 2: return ''
+    cur = rows[-1]
+    prev = rows[-2]
+
+    points = []
+    # Per-bucket delta vs prev
+    for bucket, key in [('BC val', 'bc'), ('DC test', 'dc'), ('FU test', 'fu')]:
+        cv, pv = cur.get(key), prev.get(key)
+        if cv is None or pv is None: continue
+        d = cv - pv
+        if d >= 0.03:
+            points.append(f'{bucket} jumped +{d:.3f} since step {prev["step"]}')
+        elif d <= -0.03:
+            points.append(f'{bucket} dropped {d:.3f} since step {prev["step"]} (watch for noise vs trend)')
+
+    # Best-so-far
+    bc_best = max((r['bc'] for r in rows if r['bc'] is not None), default=None)
+    dc_best = max((r['dc'] for r in rows if r['dc'] is not None), default=None)
+    fu_best = max((r['fu'] for r in rows if r['fu'] is not None), default=None)
+    new_records = []
+    if bc_best is not None and cur.get('bc') == bc_best and len(rows) >= 3:
+        new_records.append(f'BC val: new high {bc_best:.3f}')
+    if dc_best is not None and cur.get('dc') == dc_best and len(rows) >= 3:
+        new_records.append(f'DC test: new high {dc_best:.3f}')
+    if fu_best is not None and cur.get('fu') == fu_best and len(rows) >= 3:
+        new_records.append(f'FU test: new high {fu_best:.3f}')
+
+    # max_iou@8 record check
+    max_rows = [r for r in rows if r['bc_max'] is not None]
+    if max_rows:
+        last = max_rows[-1]
+        for bucket, key in [('BC val', 'bc_max'), ('DC test', 'dc_max'), ('FU test', 'fu_max')]:
+            best = max((r[key] for r in max_rows if r[key] is not None), default=None)
+            if best is not None and last.get(key) == best and len(max_rows) >= 2:
+                new_records.append(f'{bucket} max@8: new high {best:.3f}')
+
+    parts = []
+    if points: parts.append('**Observations:** ' + '; '.join(points))
+    if new_records: parts.append('🏆 **New highs**: ' + '; '.join(new_records))
+    if not parts: parts.append('Trajectory steady, no notable moves vs previous eval.')
+    return '\n'.join(parts)
+
+
 def parse_eval_block(log_path: Path, step: int) -> dict:
+    """Parse eval results for a given step. Returns {bucket: {...metrics}}.
+    Includes both greedy IoU and max_iou@8 (when present) for IoU buckets."""
     text = log_path.read_text()
     marker = f'step={step} running IoU eval'
     idx = text.find(marker)
     if idx < 0: return {}
-    block = text[idx:idx + 6000]
+    # Look ahead enough to capture both greedy eval AND max_iou@8 block
+    block = text[idx:idx + 12000]
     out = {}
     for bucket in ('BenchCAD val', 'recode20k train', 'text2cad train',
                    'DeepCAD test', 'Fusion360 test'):
@@ -316,14 +442,26 @@ def parse_eval_block(log_path: Path, step: int) -> dict:
             rf'(?:IoU=(?P<iou>[\d.]+))?'
         )
         m = pat.search(block)
+        entry = {}
         if m:
             d = m.groupdict()
-            out[bucket] = {
+            entry = {
                 'op_loss': float(d['op']) if d['op'] else None,
                 'recall':  float(d['rec']) if d['rec'] else None,
                 'rare':    float(d['rare']) if d['rare'] else None,
                 'iou':     float(d['iou']) if d['iou'] else None,
             }
+        # max_iou@8 line: e.g. "[BenchCAD val] max_iou@8 (t=1.0)=0.638  pass>0.5=70.0%"
+        max_pat = re.compile(
+            rf'\[{re.escape(bucket)}\]\s+max_iou@8 \(t=[\d.]+\)=(?P<m>[\d.]+)\s+'
+            rf'pass>0.5=(?P<p>[\d.]+)%'
+        )
+        m2 = max_pat.search(block)
+        if m2:
+            entry['max_iou_at8'] = float(m2.group('m'))
+            entry['pass_gt_0_5'] = float(m2.group('p'))
+        if entry:
+            out[bucket] = entry
     return out
 
 
@@ -635,18 +773,41 @@ def eval_main(args):
     fu = evals.get('Fusion360 test', {})
 
     lines = [f'**🚀 Big-50k SFT — step {args.step}/50000**', '']
-    lines.append('**IoU vs curriculum (same step):**')
+    lines.append('**Greedy IoU vs curriculum (same step):**')
     lines.append(f'• BenchCAD val:    `{fmt_iou(bc.get("iou"))}`'
                  + fmt_delta(bc.get('iou'), CURR_BC, args.step))
     lines.append(f'• DeepCAD test:    `{fmt_iou(dc.get("iou"))}`'
                  + fmt_delta(dc.get('iou'), CURR_DC, args.step))
     lines.append(f'• Fusion360 test:  `{fmt_iou(fu.get("iou"))}`'
                  + fmt_delta(fu.get('iou'), CURR_FU, args.step))
+    # max_iou@8 if available
+    has_max = any('max_iou_at8' in d for d in (bc, dc, fu))
+    if has_max:
+        lines.append('')
+        lines.append('**max_iou@8 (best of 8 candidates, t=1.0):**')
+        for label, d in (('BenchCAD val   ', bc), ('DeepCAD test   ', dc),
+                          ('Fusion360 test ', fu)):
+            mx = d.get('max_iou_at8')
+            ps = d.get('pass_gt_0_5')
+            mx_s = f'{mx:.3f}' if mx is not None else 'N/A'
+            ps_s = f'{ps:.0f}%' if ps is not None else 'N/A'
+            lines.append(f'• {label}:  max@8 `{mx_s}`  pass>0.5 `{ps_s}`')
     lines.append('')
     lines.append('**Op metrics (BenchCAD val):**')
     lines.append(f'• rare_recall (fillet/chamfer/etc): `{fmt_iou(bc.get("rare"))}`')
     lines.append(f'• recall: `{fmt_iou(bc.get("recall"))}`,  '
                  f'op_loss: `{fmt_iou(bc.get("op_loss"))}`')
+    lines.append('')
+
+    # Recent history table + auto-analysis
+    history_rows, history_block = build_history_table(log_path, args.step,
+                                                       max_history=6)
+    if history_block:
+        lines.append(history_block)
+    analysis = auto_analysis(history_rows, args.step)
+    if analysis:
+        lines.append('')
+        lines.append(analysis)
     lines.append('')
     lines.append(f'trajectory: {len(steps)} steps × {n_anchor} anchors per bucket'
                  f'  ({len(steps) * n_anchor * len(IOU_BUCKETS)} pred cells)')

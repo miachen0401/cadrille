@@ -48,10 +48,23 @@ while true; do
                 $0 ~ m {found=1}
                 found {print}
             ' "$LOG_PATH")
+            # Threshold: 4 buckets (text2cad legacy deleted; only BC val + recode20k train +
+            # DC test + FU test now reliably show. text2cad train counts but if 0 items it's skipped).
             n_done=$(echo "$block" | grep -cE '\[(img|text)/(BenchCAD val|recode20k train|text2cad train|DeepCAD test|Fusion360 test)\]' || true)
-            if [ "$n_done" -lt 5 ]; then
-                echo "[watch] step=$step only $n_done/5 buckets logged, waiting"
+            if [ "$n_done" -lt 4 ]; then
+                echo "[watch] step=$step only $n_done/4 buckets logged, waiting"
                 continue
+            fi
+            # max_iou@8 cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
+            # When applicable, wait for all 3 max_iou@8 bucket lines too so the
+            # Discord post includes both greedy + max@8.
+            half_step=$((step / 1000))
+            if [ $((half_step % 2)) -eq 1 ]; then
+                n_max=$(echo "$block" | grep -cE '\] max_iou@8 \(t=[0-9.]+\)=' || true)
+                if [ "$n_max" -lt 3 ]; then
+                    echo "[watch] step=$step max_iou@8 only $n_max/3 buckets logged, waiting"
+                    continue
+                fi
             fi
 
             echo "[watch] $(date -u +%H:%M:%S) firing eval_to_discord for step=$step"
