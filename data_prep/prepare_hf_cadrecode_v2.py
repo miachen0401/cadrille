@@ -145,16 +145,40 @@ def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry
 
     if not dry_run:
         api = HfApi()
-        t0 = time.time()
-        api.upload_file(
-            path_or_fileobj=str(fname_local),
-            path_in_repo=fname_remote,
-            repo_id=repo_id,
-            repo_type='dataset',
-            token=os.environ.get('HF_TOKEN'),
-            commit_message=f'phase-B shard {shard_idx + 1}/{total_shards}',
-        )
-        print(f'    uploaded in {time.time()-t0:.1f}s', flush=True)
+        # Upload with thread-based wall-clock timeout — huggingface_hub's
+        # upload_file has no timeout, and we've seen it hang silently on
+        # shard-write boundaries (3 ESTAB connections to HF, 0% CPU,
+        # never returns). Abandon hung threads and retry up to 3 times.
+        import threading
+        TIMEOUT_SEC = 300
+        for attempt in range(3):
+            result = {'ok': False, 'err': None}
+            def task():
+                try:
+                    api.upload_file(
+                        path_or_fileobj=str(fname_local),
+                        path_in_repo=fname_remote,
+                        repo_id=repo_id,
+                        repo_type='dataset',
+                        token=os.environ.get('HF_TOKEN'),
+                        commit_message=f'shard {shard_idx + 1}/{total_shards}',
+                    )
+                    result['ok'] = True
+                except Exception as e:
+                    result['err'] = f'{type(e).__name__}: {e}'
+            t0 = time.time()
+            th = threading.Thread(target=task, daemon=True)
+            th.start()
+            th.join(timeout=TIMEOUT_SEC)
+            if result['ok']:
+                print(f'    uploaded in {time.time()-t0:.1f}s', flush=True)
+                break
+            if th.is_alive():
+                print(f'    !! upload hung > {TIMEOUT_SEC}s, abandoning thread + retry {attempt+1}/3', flush=True)
+            elif result['err']:
+                print(f'    upload error: {result["err"]}; retry {attempt+1}/3', flush=True)
+        else:
+            raise RuntimeError(f'upload failed after 3 retries: {fname_remote}')
     fname_local.unlink()
 
 
@@ -178,6 +202,12 @@ def main():
     ap.add_argument('--max-tasks-per-child', type=int, default=100,
                     help='Recycle each worker after N tasks — mitigates '
                          'cadquery/open3d memory leaks (default 100)')
+    ap.add_argument('--total-shards-override', type=int, default=None,
+                    help='Override the "-of-NNNNN" suffix in shard filenames. '
+                         'Lets multiple sequential batches share a unified '
+                         'naming scheme (e.g. 8 batches of 50k each, totaling '
+                         '200 shards → all use --total-shards-override 200, '
+                         'with --start-shard 0/25/50/.../175 for each batch).')
     args = ap.parse_args()
 
     if not args.no_upload and not os.environ.get('HF_TOKEN'):
@@ -199,18 +229,33 @@ def main():
 
     n_target = args.n
     n_per_shard = args.shard_size
-    total_shards = (n_target + n_per_shard - 1) // n_per_shard
+    total_shards = args.total_shards_override or \
+        ((n_target + n_per_shard - 1) // n_per_shard)
 
     # Bookkeeping
     successes_buf = []
     n_success = 0
-    n_skip_for_resume = args.start_shard * n_per_shard
+    # Two start-shard semantics:
+    # (a) chain mode: --total-shards-override set → --start-shard is just
+    #     the output filename offset; do NOT skip successes (this run writes
+    #     immediately starting at shard_idx).
+    # (b) resume mode: no override → --start-shard means "first N output
+    #     shards already done", discard first N*shard_size successes to
+    #     re-establish state from where the previous crashed run left off.
+    if args.total_shards_override is not None:
+        n_skip_for_resume = 0
+    else:
+        n_skip_for_resume = args.start_shard * n_per_shard
     n_error = 0
     error_kinds = {}
     shard_idx = args.start_shard
 
     print(f'\nLaunching workers={args.workers}, shard_size={n_per_shard}, total_shards={total_shards}', flush=True)
-    print(f'(resume: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
+    if args.total_shards_override is not None:
+        print(f'(chain mode: --total-shards-override={args.total_shards_override}; '
+              f'output starts immediately at shard idx {args.start_shard}; no success-skip)', flush=True)
+    else:
+        print(f'(resume mode: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
 
     t_start = time.time()
     last_log = t_start
