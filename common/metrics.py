@@ -72,6 +72,43 @@ _WORKER_SCRIPT = textwrap.dedent('''\
             return None
 
 
+    def _rotation_matrices_24():
+        """24 rotational symmetries of the cube. Identity at idx 0."""
+        from itertools import permutations, product
+        mats = [np.eye(3)]
+        seen = {tuple(np.eye(3).flatten())}
+        for perm in permutations(range(3)):
+            for signs in product((1, -1), repeat=3):
+                R = np.zeros((3, 3))
+                for i, p in enumerate(perm):
+                    R[i, p] = signs[i]
+                if abs(np.linalg.det(R) - 1.0) >= 1e-6:
+                    continue
+                key = tuple(R.flatten())
+                if key in seen:
+                    continue
+                seen.add(key); mats.append(R)
+        return mats
+
+
+    def compute_iou_24(gt_mesh, pred_mesh, early_stop_threshold=0.95):
+        """Max IoU over the 24 cube rotations of pred_mesh. Returns (iou, idx)."""
+        best_iou, best_idx = None, -1
+        for i, R in enumerate(_rotation_matrices_24()):
+            if i == 0:
+                pred_rot = pred_mesh
+            else:
+                pred_rot = pred_mesh.copy()
+                T = np.eye(4); T[:3, :3] = R
+                pred_rot.apply_transform(T)
+            iou = compute_iou(gt_mesh, pred_rot)
+            if iou is None: continue
+            if best_iou is None or iou > best_iou:
+                best_iou, best_idx = iou, i
+                if best_iou >= early_stop_threshold: break
+        return best_iou, best_idx
+
+
     def compute_cd(gt_mesh, pred_mesh, n_points=8192):
         """Chamfer Distance via surface point sampling.
 
@@ -92,7 +129,8 @@ _WORKER_SCRIPT = textwrap.dedent('''\
             return None
 
 
-    def run_worker(code_str, gt_mesh_path, compute_chamfer=False):
+    def run_worker(code_str, gt_mesh_path, compute_chamfer=False, iou_24=False,
+                   iou_24_early_stop=0.95):
         import io
         import trimesh
         import cadquery as cq  # noqa: F401 (used implicitly via exec)
@@ -133,19 +171,29 @@ _WORKER_SCRIPT = textwrap.dedent('''\
         gt_mesh = transform_real_mesh(trimesh.load_mesh(gt_mesh_path))
         iou = compute_iou(gt_mesh, pred_mesh)
         cd  = compute_cd(gt_mesh, pred_mesh) if compute_chamfer else None
-        return iou, cd
+        iou24, rot_idx = (None, -1)
+        if iou_24:
+            iou24, rot_idx = compute_iou_24(
+                gt_mesh, pred_mesh, early_stop_threshold=iou_24_early_stop)
+        return iou, cd, iou24, rot_idx
 
 
     if __name__ == '__main__':
         payload = json.loads(sys.stdin.read())
         try:
-            iou, cd = run_worker(
+            iou, cd, iou24, rot_idx = run_worker(
                 payload['code_str'],
                 payload['gt_mesh_path'],
-                compute_chamfer=payload.get('compute_chamfer', False))
-            print(json.dumps({'iou': iou, 'cd': cd, 'error': None}))
+                compute_chamfer=payload.get('compute_chamfer', False),
+                iou_24=payload.get('iou_24', False),
+                iou_24_early_stop=payload.get('iou_24_early_stop', 0.95))
+            print(json.dumps({'iou': iou, 'cd': cd,
+                              'iou_24': iou24, 'rot_idx': rot_idx,
+                              'error': None}))
         except Exception as e:
-            print(json.dumps({'iou': None, 'cd': None, 'error': str(e)}))
+            print(json.dumps({'iou': None, 'cd': None,
+                              'iou_24': None, 'rot_idx': -1,
+                              'error': str(e)}))
         sys.stdout.flush()
 ''')
 
@@ -166,6 +214,45 @@ def _get_worker_path() -> str:
         f.write(_WORKER_SCRIPT)
     _worker_path = path
     return path
+
+
+def _execute_code_in_subprocess_24(
+    code_str: str,
+    gt_mesh_path: str,
+    timeout: float = 300.0,
+    iou_24_early_stop: float = 0.95,
+) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
+    """Like `_execute_code_in_subprocess` but also returns rotation-invariant IoU.
+
+    Returns (iou, cd, iou_24, rot_idx). iou_24 is the max volumetric IoU over
+    the 24 cube rotations of pred_mesh; rot_idx ∈ [0, 23] is the winning
+    rotation (0 ≡ identity). Use this for offline rescoring of saved
+    generations where wall-clock matters less than score quality.
+
+    Default timeout is 300s because 24 boolean intersections at ~1-3s each.
+    """
+    payload = json.dumps({
+        'code_str': code_str,
+        'gt_mesh_path': gt_mesh_path,
+        'compute_chamfer': True,
+        'iou_24': True,
+        'iou_24_early_stop': iou_24_early_stop,
+    })
+    global _error_log_count
+    try:
+        proc = subprocess.run(
+            [sys.executable, _get_worker_path()],
+            input=payload, capture_output=True, text=True, timeout=timeout,
+        )
+        if not proc.stdout.strip():
+            return None, None, None, -1
+        data = json.loads(proc.stdout.strip())
+        return (data.get('iou'), data.get('cd'),
+                data.get('iou_24'), data.get('rot_idx', -1))
+    except subprocess.TimeoutExpired:
+        return None, None, None, -1
+    except Exception:
+        return None, None, None, -1
 
 
 def _execute_code_in_subprocess(
@@ -681,6 +768,28 @@ def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> f
     if float(iou) < 0:
         return 0.0
     return float(iou)
+
+
+def compute_metrics_24(
+    code_str: str,
+    gt_mesh_path: str,
+    timeout: float = 300.0,
+    iou_24_early_stop: float = 0.95,
+) -> Tuple[float, Optional[float], Optional[float], int]:
+    """Compute (iou_naive, cd, iou_24, rot_idx) for one sample.
+
+    iou_naive matches `compute_metrics` exactly (no rotation). iou_24 is the
+    max IoU over the 24 axis-aligned rotations of pred_mesh; rot_idx is the
+    winning rotation index (0 ≡ identity). Returned IoU values follow the
+    same convention as compute_metrics: -1.0 on subprocess/exec failure,
+    0.0 on zero-overlap, otherwise the float in [0, 1].
+    """
+    iou, cd, iou_24, rot_idx = _execute_code_in_subprocess_24(
+        code_str, gt_mesh_path,
+        timeout=timeout, iou_24_early_stop=iou_24_early_stop)
+    iou_out    = -1.0 if iou    is None else max(0.0, float(iou))
+    iou24_out  = None if iou_24 is None else max(0.0, float(iou_24))
+    return iou_out, cd, iou24_out, rot_idx
 
 
 def compute_metrics(
