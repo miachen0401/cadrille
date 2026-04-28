@@ -590,6 +590,86 @@ def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
         return None
 
 
+def _rotation_matrices_24() -> List[np.ndarray]:
+    """The 24 rotational symmetries of an axis-aligned cube as 3x3 matrices.
+
+    Equivalent to all signed axis-permutation matrices with determinant +1.
+    Index 0 is always the identity. Cached on first call.
+    """
+    cache = getattr(_rotation_matrices_24, '_cache', None)
+    if cache is not None:
+        return cache
+    from itertools import permutations, product
+    mats: List[np.ndarray] = [np.eye(3)]  # identity first so idx 0 ≡ no rotation
+    seen = {tuple(np.eye(3).flatten())}
+    for perm in permutations(range(3)):
+        for signs in product((1, -1), repeat=3):
+            R = np.zeros((3, 3))
+            for i, p in enumerate(perm):
+                R[i, p] = signs[i]
+            if abs(np.linalg.det(R) - 1.0) >= 1e-6:
+                continue
+            key = tuple(R.flatten())
+            if key in seen:
+                continue
+            seen.add(key)
+            mats.append(R)
+    assert len(mats) == 24, f'expected 24 rotations, got {len(mats)}'
+    _rotation_matrices_24._cache = mats  # type: ignore[attr-defined]
+    return mats
+
+
+def compute_iou_24(
+    gt_mesh,
+    pred_mesh,
+    early_stop_threshold: float = 0.95,
+) -> Tuple[Optional[float], int]:
+    """Rotation-invariant IoU under the 24 cube symmetries.
+
+    Tries each of the 24 axis-aligned rotations on pred_mesh and returns the
+    maximum volumetric IoU vs gt_mesh, plus the index of the winning rotation
+    (0 = identity, 1..23 = the 90°/180°/270° axis-permutations + sign flips).
+
+    Use this when the prediction may be a correct shape but rotated by a
+    multiple of 90° on some axis — common for CAD generations whose output
+    base_plane / orientation drifts from GT.
+
+    Both meshes should already be centred at the origin and scaled to a
+    common cube (the existing `transform_real_mesh` normalisation to
+    [-1, 1]^3 satisfies this); rotating around the origin then keeps the
+    mesh inside the same cube.
+
+    Args:
+        early_stop_threshold: stop the search once IoU ≥ this value (default
+            0.95). Cuts wall-clock by up to 24× on near-perfect matches.
+            Set to 1.0+ to always try all 24.
+
+    Returns:
+        (best_iou, best_rotation_idx). best_iou is None if every rotation's
+        boolean intersection failed (non-manifold mesh, etc.); idx is -1 in
+        that case.
+    """
+    best_iou: Optional[float] = None
+    best_idx = -1
+    for i, R in enumerate(_rotation_matrices_24()):
+        if i == 0:
+            pred_rot = pred_mesh
+        else:
+            pred_rot = pred_mesh.copy()
+            T = np.eye(4)
+            T[:3, :3] = R
+            pred_rot.apply_transform(T)
+        iou = compute_iou(gt_mesh, pred_rot)
+        if iou is None:
+            continue
+        if best_iou is None or iou > best_iou:
+            best_iou = iou
+            best_idx = i
+            if best_iou >= early_stop_threshold:
+                break
+    return best_iou, best_idx
+
+
 def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> float:
     """Compute IoU-based reward for a single generated code string.
 
