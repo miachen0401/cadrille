@@ -476,10 +476,17 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     accumulation_steps = accum_steps_override or 1
 
     if use_text:
-        sources['text2cad'] = Text2CADDataset(
-            root_dir=os.path.join(data_path, 'text2cad'),
-            split='train',
-            max_code_len=max_code_len)
+        # Legacy text2cad — only load if local data is still present (deleted
+        # in v3 prep on 2026-04-28). Without this guard, train.py crashes when
+        # the legacy folder has been removed but use_text is still True for
+        # text2cad_bench_text below.
+        text2cad_legacy_path = os.path.join(data_path, 'text2cad')
+        if (os.path.isdir(text2cad_legacy_path)
+                and os.path.exists(os.path.join(text2cad_legacy_path, 'train.pkl'))):
+            sources['text2cad'] = Text2CADDataset(
+                root_dir=text2cad_legacy_path,
+                split='train',
+                max_code_len=max_code_len)
         batch_size = batch_size_override or 8
         accumulation_steps = accum_steps_override or 4
 
