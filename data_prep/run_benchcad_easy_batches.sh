@@ -34,15 +34,17 @@ SHARD_SIZE=2000
 TASK_TIMEOUT=60   # seconds per render task (SIGALRM)
 
 # label  end-shard-cap (exclusive)   approx_rows-this-batch
-# Each batch lets the importer auto-detect start_shard from HF, so if a
-# previous batch aborted early (e.g. RAM floor) the next batch picks up the
-# missing shards instead of skipping them.
+# Each batch lets the importer auto-detect start_shard from HF (subject to
+# the global VM-side cap below), so if a previous batch aborted early
+# (e.g. RAM floor) the next batch picks up the missing shards instead of
+# skipping them.
+#
+# This driver runs on VM1 and is capped at shard 32 (end=33).
+# Shards 33..54 are owned by VM2 — must NOT be auto-detected here, so we
+# must NEVER set an end-shard ≥ 33 when a parallel VM is active.
 BATCHES=(
-    "A   16"   # process up through shard 15 (~10 shards if A is fresh)
-    "B   26"
-    "C   36"
-    "D   46"
-    "E   55"   # process up through shard 54 (final)
+    "A   24"   # shards 15..23   (9 shards if starting fresh from 15)
+    "B   33"   # shards 24..32   (9 shards)
 )
 
 notify() {
