@@ -217,10 +217,16 @@ def main() -> None:
                     help='Cap total rows processed (default: all 109,804)')
     ap.add_argument('--shard-size',  type=int, default=2000)
     ap.add_argument('--workers',     type=int, default=6)
-    ap.add_argument('--start-shard', type=int, default=0,
+    ap.add_argument('--start-shard', type=int, default=-1,
                     help='Skip first N output shards (= first N*shard_size rows). '
-                         'Use 4 to resume after the bellows-prefix run that '
-                         'crashed at row 8132.')
+                         '-1 (default) = auto-detect from HF: list existing '
+                         f'{DST_PREFIX}/ shards and resume after the highest one. '
+                         'Set explicitly to override.')
+    ap.add_argument('--end-shard',   type=int, default=-1,
+                    help='Stop *before* this output shard idx (Python-slice '
+                         'semantics, exclusive). -1 = no limit. Use to drive '
+                         'one batch at a time, e.g. --start-shard 6 --end-shard 16 '
+                         'processes shards 6..15.')
     ap.add_argument('--per-task-timeout-sec', type=int, default=60,
                     help='SIGALRM cap per render task. 60s skips pathological '
                          'shapes that would otherwise stall a worker.')
@@ -232,6 +238,30 @@ def main() -> None:
 
     if not args.no_upload and not os.environ.get('HF_TOKEN'):
         print('HF_TOKEN not set', file=sys.stderr); sys.exit(1)
+
+    # Auto-detect resume point from HF if --start-shard not given
+    if args.start_shard < 0:
+        if args.no_upload:
+            args.start_shard = 0
+            print('--start-shard auto + --no-upload: defaulting to 0', flush=True)
+        else:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            files = api.list_repo_files(DST_REPO, repo_type='dataset',
+                                        token=os.environ.get('HF_TOKEN'))
+            done_idx = []
+            for f in files:
+                if not (f.startswith(f'{DST_PREFIX}/') and f.endswith('.parquet')):
+                    continue
+                # train-NNNNN-of-MMMMM.parquet
+                try:
+                    n = int(f.rsplit('/', 1)[1].split('-')[1])
+                    done_idx.append(n)
+                except Exception:
+                    pass
+            args.start_shard = (max(done_idx) + 1) if done_idx else 0
+            print(f'auto-resume: found {len(done_idx)} existing shards on HF '
+                  f'→ start_shard={args.start_shard}', flush=True)
 
     # ── 1. Read upstream parquet directly (no Image decode upfront)  ──────
     from huggingface_hub import hf_hub_download
@@ -262,6 +292,14 @@ def main() -> None:
         print(f'(resume: skipping rows 0..{n_skip-1} for start-shard={args.start_shard})',
               flush=True)
         rows = rows[n_skip:]
+
+    # Apply --end-shard (exclusive) if set: trim rows so we stop after the
+    # last row of shard (end_shard - 1).
+    if args.end_shard > 0:
+        n_keep = (args.end_shard - args.start_shard) * args.shard_size
+        rows = rows[:n_keep]
+        print(f'(batch mode: capped at end-shard={args.end_shard} → '
+              f'{len(rows)} rows in this batch)', flush=True)
 
     # Stats: how many rows already have an image?
     n_have = sum(1 for r in rows if isinstance(r['composite_png'], dict)
