@@ -1,0 +1,8 @@
+source,n_total,n_sampled,n_no_code,n_no_stl,lines_p50,lines_p90,ops_p50,ops_p90,faces_p50,faces_p90,log_vol_p50
+benchcad,18167,500,0,0,18.0,40.0,6.0,9.0,2066.0,14186.800000000003,4.590455806174868
+cad_iso_106,162145,500,0,500,19.0,45.0,6.0,9.0,NA,NA,NA
+benchcad_simple,85597,500,0,500,11.0,15.0,4.0,6.0,NA,NA,NA
+text2cad_bench,76238,500,0,500,19.0,33.0,5.0,7.100000000000023,NA,NA,NA
+text2cad_legacy,76238,500,0,500,26.0,46.0,3.0,4.0,NA,NA,NA
+recode_bench,142411,500,0,500,29.0,46.0,8.0,11.0,NA,NA,NA
+cad_recode_20k,18987,500,0,500,3.0,4.0,6.0,9.0,NA,NA,NA
