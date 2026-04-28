@@ -772,14 +772,58 @@ def eval_main(args):
     dc = evals.get('DeepCAD test', {})
     fu = evals.get('Fusion360 test', {})
 
-    lines = [f'**🚀 Big-50k SFT — step {args.step}/50000**', '']
-    lines.append('**Greedy IoU vs curriculum (same step):**')
-    lines.append(f'• BenchCAD val:    `{fmt_iou(bc.get("iou"))}`'
-                 + fmt_delta(bc.get('iou'), CURR_BC, args.step))
-    lines.append(f'• DeepCAD test:    `{fmt_iou(dc.get("iou"))}`'
-                 + fmt_delta(dc.get('iou'), CURR_DC, args.step))
-    lines.append(f'• Fusion360 test:  `{fmt_iou(fu.get("iou"))}`'
-                 + fmt_delta(fu.get('iou'), CURR_FU, args.step))
+    # Pull v2 phase2 IoU at same step. v2 lives across 2 log files because the
+    # original from-scratch run was killed and resumed from ckpt-12000:
+    #   - phase2  (from scratch): step 0..12000   →  20260427_090843.log
+    #   - phase2b (resumed):       step 12000..30000 → 20260427_184015.log
+    v2_logs = [
+        REPO_ROOT / 'logs/big_bench_shell_50k_phase2_20260427_090843.log',
+        REPO_ROOT / 'logs/big_bench_shell_50k_phase2b_20260427_184015.log',
+    ]
+    v2_at_step = {}
+    for vl in v2_logs:
+        if vl.exists():
+            d = parse_eval_block(vl, args.step)
+            if d:
+                v2_at_step = d; break
+    v2_bc = v2_at_step.get('BenchCAD val', {}).get('iou')
+    v2_dc = v2_at_step.get('DeepCAD test', {}).get('iou')
+    v2_fu = v2_at_step.get('Fusion360 test', {}).get('iou')
+
+    # Parse wandb run id from v3 log
+    v3_wandb_id = ''
+    try:
+        log_text = log_path.read_text(errors='ignore')
+        m = re.search(r'wandb/run-\d+_\d+-([a-z0-9]+)', log_text)
+        if m: v3_wandb_id = m.group(1)
+    except Exception:
+        pass
+
+    cur_bc = CURR_BC.get(args.step); cur_dc = CURR_DC.get(args.step); cur_fu = CURR_FU.get(args.step)
+
+    def _fmt(v): return f'{v:.3f}' if isinstance(v, (int, float)) else '  -  '
+    def _delta(my, base):
+        if my is None or base is None: return '   -   '
+        d = my - base
+        sign = '+' if d >= 0 else ''
+        emoji = '🟢' if d >= 0.03 else '🔴' if d <= -0.03 else '🟡'
+        return f'{sign}{d:.3f}{emoji}'
+
+    wandb_suffix = f' · wandb `{v3_wandb_id}`' if v3_wandb_id else ''
+    lines = [f'**🚀 v3 SFT — step {args.step}/50000**  '
+              f'`sft-s50k-lr2e-4-b8a4-img-0428-1320`{wandb_suffix}', '']
+    lines.append('**Run lineage** (3 versions compared in the table below):')
+    lines.append('• **v3 (now)** = clean filtered data + 60% HQ mix + text2cad-bench in img+text dual-mode (50k from scratch)')
+    lines.append('• **v2 phase2** = 50% HQ + text2cad text-only (KILLED at step 30k, blank after)')
+    lines.append('• **curriculum** = 2-phase 5:1:1→1:9:0 mix, paper-style baseline (20k total, blank after)')
+    lines.append('')
+    lines.append(f'**Greedy IoU @ step {args.step}:**')
+    lines.append('```')
+    lines.append(f'  bucket     v3 (now)   v2 phase2   curriculum   Δ v3-curr')
+    lines.append(f'  BC val      {_fmt(bc.get("iou"))}      {_fmt(v2_bc)}        {_fmt(cur_bc)}        {_delta(bc.get("iou"), cur_bc)}')
+    lines.append(f'  DC test     {_fmt(dc.get("iou"))}      {_fmt(v2_dc)}        {_fmt(cur_dc)}        {_delta(dc.get("iou"), cur_dc)}')
+    lines.append(f'  FU test     {_fmt(fu.get("iou"))}      {_fmt(v2_fu)}        {_fmt(cur_fu)}        {_delta(fu.get("iou"), cur_fu)}')
+    lines.append('```')
     # max_iou@8 if available
     has_max = any('max_iou_at8' in d for d in (bc, dc, fu))
     if has_max:
