@@ -127,166 +127,46 @@ docs/                # session reports, diagnostics, learnings_<date>.md
 
 ## Data sources
 
-### v3 SFT training overview (~789k items after dedup + 80% drop)
+All training data lives under **`Hula0401/cad-sft/<name>/`** on HF and
+mirrors to `data/<name>/`. Use `data_prep/fetch_cad_sft.py` to pull.
 
-| source | local | filtered | mode | step share | per-item epochs over 50k |
-|---|---|---:|---|---:|---:|
-| benchcad | `data/benchcad/` | 11,443 | image | 2.1% | 3.0 |
-| cad_iso_106 | `data/cad-iso-106/` | 122,483 | image | 23.2% | 3.0 |
-| benchcad_simple | `data/benchcad-simple/` | 76,671 | image | 14.7% | 3.0 |
-| text2cad_bench (img) | `data/text2cad-bench/` | 53,339 | image | 5.5% | 1.65 |
-| text2cad_bench (text) | (same) | 53,339 | text | 5.5% | 1.65 |
-| cad_recode_bench | `data/cad-recode-bench/` | 472,244 | image | 49.0% | 1.65 |
+### v3 training mix (789k items, 60% HQ / 40% bench-stack)
 
-**Mix design**: 60% HQ (text2cad_bench×2 + recode_bench), 40% bench-stack
-(benchcad + iso + simple). Equal-per-item *within* group, so every item in
-the bench-stack gets ~3× the exposure of every item in the HQ group.
+| source | items | mode | step % | what it adds | watch out |
+|---|---:|---|---:|---|---|
+| `benchcad` | 11k | img | 2% | BC val anchor — the smallest source but highest BC val leverage (v2 saw +0.16 BC at 50× weight) | tiny op vocab, over-fits if cranked too high |
+| `cad_iso_106` | 122k | img | 23% | only source with non-trivial **fillet** (19% of items) — drives rare-op recall on real parts | family-clustered → must shuffle before render |
+| `benchcad_simple` | 77k | img | 15% | base-plane/workplane diversity, fast clean codes | lowest op-count (median 4) — collapses if too heavy |
+| `text2cad_bench (img)` | 53k | img | 5.5% | extra image variants of t2c codes | overlaps with text variant — pick one mode per sample |
+| `text2cad_bench (text)` | 53k | text | 5.5% | only **text-conditioned** path | descriptions vary in quality |
+| `cad_recode_bench` | 472k | img | **49%** | the workhorse — wide op vocab, primary long-tail signal | 1.65 epochs/item; rare ops still mode-collapse at eval |
 
-### Per-source detail (with pros / cons / op stats)
+Per-source op stats (n=500, seed=42): median ops/code is 4-5 across
+all sources except `cad_recode_20k` (7, NOT in v3). See
+`docs/op_distribution_2026-04-29/` for plots.
 
-Op stats from n=500 sample per source, seed=42 (regenerate with
-`scripts/analysis/op_distribution_plot.py`).
+**v3 cleaning**: 80% drop on trivial families + code-hash dedup removed
+37% of benchcad / 24% of iso / 29% of t2c — pure compute saved.
 
-#### `benchcad` — 11,443 items
-- **HF**: `Hula0401/cad-sft/benchcad/`
-- **Origin**: `BenchCAD/cad_bench` upstream → cleaned (37% dupes removed) +
-  90/10 train/val hash split.
-- **Family**: `simple_*` synthetic CAD families (block, bracket, channel,
-  bar, plate, hole, ...). Every code uses 3-8 cadquery ops out of a small
-  closed vocabulary (~30 distinct ops total).
-- **Ops/case**: median 5, mean 4.89, p95 7.
-- **✅ Pros**:
-  - Clean cadquery surface, easy to reproduce mesh from code → high IoU
-    achievable.
-  - Anchors **BenchCAD val** (the eval bucket teammates report on most).
-  - High per-item exposure in v3 (3.0 epochs over 50k) — small but
-    weight-rich.
-  - In v2 phase2b, bumping benchcad weight 18→50× lifted BC val greedy
-    from 0.43 → 0.59. **Highest-leverage source for BC val.**
-- **❌ Cons**:
-  - Tiny vocabulary → ceiling on diversity. Cannot teach new ops.
-  - Many families are visually similar (e.g. plate-with-hole variants);
-    real generalization may be lower than IoU implies.
-  - Can over-fit if weighted too high (curriculum's 8:1:1 phase regressed
-    DC by training too benchcad-heavy).
+### Available but not in v3
 
-#### `cad_iso_106` — 122,483 items
-- **HF**: `Hula0401/cad-sft/cad-iso-106-175k/`
-- **Origin**: BenchCAD `cad_iso_106` family — industrial-parts catalog
-  (ISO standard parts, brackets, fasteners, gears, pulleys, ...).
-- **Ops/case**: median 5, mean 4.81, p95 7.
-- **✅ Pros**:
-  - Only source with non-trivial **`fillet`** coverage (~19% of items have
-    fillet; benchcad has <2%). Critical for the `fillet/chamfer/shell`
-    rare-op recall target.
-  - Real-world part shapes, not synthetic geometry — closer to DeepCAD/
-    Fusion360 distribution than benchcad.
-  - 122k items at 3 epochs gives wide rare-op coverage.
-- **❌ Cons**:
-  - Family-clustered codes — workers can stall if not shuffled (fixed in
-    `data_prep/render_benchcad_easy.py`'s shuffle pre-step).
-  - Some industrial parts have very fine tessellation tolerances → slow
-    render (we use loose `tessellate(0.01, 0.5)` for thumbnails to
-    compensate).
-  - Op vocabulary leans toward common ops; not a long-tail source on its
-    own.
+- **`benchcad-easy`** — 109k items, 55 shards, render_img 100% on
+  `Hula0401/cad-sft/benchcad-easy/`. Same `simple_*` family as benchcad,
+  10× larger. Likely v4 candidate (+0.03-0.05 BC val expected).
+- **`cad_recode_20k`** — 19k legacy. Has the highest ops/case (median 7)
+  but small; superseded by the 472k `cad_recode_bench` variant.
 
-#### `benchcad_simple` — 76,671 items
-- **HF**: `Hula0401/cad-sft/benchcad-simple/`
-- **Origin**: BenchCAD `benchcad_simple` — even simpler than benchcad,
-  ~3-5 ops per code (extrude + workplane + 1-2 sketch primitives).
-- **Ops/case**: median 4, mean 3.79, p95 5.
-- **✅ Pros**:
-  - Vocabulary breadth (lots of `workplane` placements, base_planes).
-  - Fast to render, codes always exec cleanly (high quality signal).
-  - Helps the model learn the "minimum viable" cadquery skeleton.
-- **❌ Cons**:
-  - **Lowest op-count source** — risks model collapsing to "always emit
-    extrude+1 sketch" if weighted too high.
-  - 12% dupes pre-clean (now removed).
-  - No rare ops at all; do not rely on this for fillet/chamfer/shell signal.
+### Evaluation buckets (held-out)
 
-#### `text2cad_bench` — 53,339 items × 2 modes
-- **HF**: `Hula0401/cad-sft/text2cad-bench/`
-- **Origin**: filapro/text2cad benchmark, re-rendered for our 4-view
-  268×268 PNG format.
-- **Ops/case**: median 4, mean 3.63, p95 6.
-- **Two modalities, treated as separate v3 sources** with separate weights:
-  - **`text2cad_bench_img`**: image (4-view PNG) → cadquery code
-  - **`text2cad_bench_text`**: natural-language description → cadquery code
-  - Per training step, exactly ONE modality is sampled per item
-    (never img+text mixed on same sample → avoids encoder confusion).
-- **✅ Pros**:
-  - Only source with **natural-language descriptions** — gives the LLM a
-    text-conditioned path that complements the visual path.
-  - Diverse code styles (different humans wrote the originals).
-- **❌ Cons**:
-  - 29% dupes pre-clean (now removed).
-  - 38 codes silently failed render in the upstream parquet (caught by
-    pre-flight check, fixed). **Always run pre-flight before training.**
-  - Text descriptions vary in quality (some are auto-generated, terse).
-  - `text2cad_legacy` (different older corpus, 76k items) was deleted —
-    measured 28% trivial codes, was dragging eval.
+| bucket | source | size | n_per_eval |
+|---|---|---:|---:|
+| BenchCAD val | local 90/10 split of `BenchCAD/cad_bench` | 1,973 | 50 |
+| **DeepCAD test** | `Hula0401/deepCAD_test` | 8,046 | 50 |
+| **Fusion360 test** | `Hula0401/fusion360_test_mesh` | 1,725 | 50 |
+| recode20k train (probe) | sampled from training corpus | – | 50 |
 
-#### `cad_recode_bench` — 472,244 items (the workhorse)
-- **HF**: `Hula0401/cad-sft/cad-recode-bench/`
-- **Origin**: synthetically generated from filapro/cad-recode-v1.5 base,
-  then re-rendered for our 268×268 4-view format. **49% of v3 step share.**
-- **Ops/case**: median 5, mean 5.16, p95 7. (Same per-case op count as
-  benchcad — surprisingly compact.)
-- **✅ Pros**:
-  - **Largest source by ~4×** — primary diversity driver.
-  - Wide global op vocabulary (100+ distinct ops across the corpus). The
-    long-tail breadth is what the rare-op recall metric actually measures.
-  - Catches the model up on op-vocabulary that BC-family sources don't.
-- **❌ Cons**:
-  - At 49% step share with 1.65 epochs/item, individual rare items get
-    seen <2× — model may mode-collapse on the long-tail at eval time
-    (this drives the recode20k op_loss=0.77 vs benchcad=0.20 gap).
-  - Some synth codes have unusual control-flow that doesn't render cleanly
-    (~0.2% timeout / mesh failures on render — within tolerance).
-
-### Available but not yet in v3 mix
-
-#### `benchcad-easy` — 109,804 items (NEW, just filled this session)
-- **HF**: `Hula0401/cad-sft/benchcad-easy/` (55 shards, all render_img filled)
-  + `BenchCAD/benchcad-easy` upstream parquet (88,773 / 109,804 = 80.8% covered).
-- **Family**: same `simple_*` taxonomy as benchcad/benchcad_simple.
-- **Status**: data is ready, NOT yet wired into a config.
-- **✅ Pros**:
-  - 10× the size of `benchcad`. Same family signal at scale.
-  - Likely +0.03-0.05 BC val from added image diversity (estimate based on
-    v2's 50× benchcad ablation).
-- **❌ Cons**:
-  - Same family as benchcad/simple — does NOT add new op vocabulary.
-  - Some codes have pathological tessellations (50w-face coil-spring
-    family); already mitigated via loose `tessellate(0.01, 0.5)`.
-
-#### `cad_recode_20k` — 18,987 items (legacy, NOT in v3)
-- **Ops/case**: median **7**, mean 6.64, p95 10. (~40% more ops/case than
-  any other source.)
-- **Status**: was used in pre-v3 mixes. Replaced by `cad_recode_bench` at
-  scale. Keep for ablations / single-source baselines.
-- **✅ Pros**: per-case complexity; only source where each item has 7+ ops
-  on average.
-- **❌ Cons**: only 19k items; v3 prefers the 472k `cad_recode_bench`
-  variant.
-
----
-
-### Evaluation (held-out, never trained on)
-
-| corpus | source | local | size | use |
-|---|---|---|---:|---|
-| BenchCAD val | local 90/10 hash split of `BenchCAD/cad_bench` | `data/benchcad/val/` | 1,973 | online IoU, n=50 sample |
-| DeepCAD test | `Hula0401/deepCAD_test` | `data/deepcad_test_mesh/` | 8,046 | online IoU, n=50 sample. **The RL gate is greedy IoU ≥ 0.8 here.** |
-| Fusion360 test | `Hula0401/fusion360_test_mesh` | `data/fusion360_test_mesh/` | 1,725 | online IoU, n=50 sample |
-| recode20k train (probe) | uses `cad_recode_20k` from training corpus (n=50 sample) | – | 50/eval | rare-op recall sanity probe (NOT held-out) |
-
-All eval buckets render meshes from `gt_code` then compare via
-`compute_metrics`. See `train/sft/online_eval.py` for the exact eval loop;
-greedy IoU + max@8 (8 candidates at t=1.0) emit per-bucket every
-`eval_steps`.
+**The RL gate is greedy IoU ≥ 0.8 on DeepCAD/Fusion360.** Greedy + max@8
+(8 candidates at t=1.0) report every `eval_steps` per bucket.
 
 ---
 
