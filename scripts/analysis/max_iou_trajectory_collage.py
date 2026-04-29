@@ -43,14 +43,21 @@ from scripts.analysis.eval_to_discord import (  # noqa: E402
 )
 
 
-def list_max_iou_jsonls(pred_dir: Path) -> dict[int, Path]:
-    """Find all step-NNNNNN.max@K.jsonl files in `pred_dir`. Returns {step: path}."""
-    out: dict[int, Path] = {}
-    pat = re.compile(r'step-(\d{6})\.max@\d+\.jsonl$')
+def list_max_iou_jsonls(pred_dir: Path) -> dict[tuple[int, int], Path]:
+    """Find all step-NNNNNN.max@K.jsonl files in `pred_dir`.
+
+    Returns `{(step, k): path}` — keying by both step and K matters because
+    a predictions/ dir can hold artifacts from multiple K configs (e.g.
+    step-010000.max@8.jsonl AND step-010000.max@16.jsonl from different runs);
+    keying by step alone would silently drop one and let the collage mix
+    incompatible candidate sets.
+    """
+    out: dict[tuple[int, int], Path] = {}
+    pat = re.compile(r'step-(\d{6})\.max@(\d+)\.jsonl$')
     for p in pred_dir.glob('step-*.max@*.jsonl'):
         m = pat.search(p.name)
         if m:
-            out[int(m.group(1))] = p
+            out[(int(m.group(1)), int(m.group(2)))] = p
     return dict(sorted(out.items()))
 
 
@@ -73,7 +80,7 @@ def pick_anchors(jsonl_path: Path, n_per_bucket: int, seed: int = 42
 def build_max_iou_collage(bucket: str,
                           anchors: list[dict],
                           steps: list[int],
-                          step_to_jsonl: dict[int, Path],
+                          step_to_jsonl: dict[tuple[int, int], Path],
                           k: int) -> bytes:
     """Build long collage for one bucket: rows=case, cols=GT_input, GT_mesh,
     best-of-K pred at each step. Returns PNG bytes."""
@@ -81,10 +88,11 @@ def build_max_iou_collage(bucket: str,
     # (one extra read per step file; cheap)
     best_by_step: dict[int, dict[str, str]] = {}  # step → uid → best_code
     for step in steps:
-        if step not in step_to_jsonl:
+        path = step_to_jsonl.get((step, k))
+        if path is None:
             continue
         d = best_by_step.setdefault(step, {})
-        for line in step_to_jsonl[step].read_text().splitlines():
+        for line in path.read_text().splitlines():
             r = json.loads(line)
             if r['bucket'] == bucket:
                 d[r['uid']] = r.get('best_code') or ''
@@ -145,7 +153,10 @@ def main():
     ap.add_argument('--n-anchors', type=int, default=6,
                     help='cases per bucket')
     ap.add_argument('--steps', default='',
-                    help='Comma-sep step list (default = all max@ jsonls found)')
+                    help='Comma-sep step list (default = all max@K jsonls found)')
+    ap.add_argument('--k', type=int, default=0,
+                    help='K to render (default 0 = auto-detect; if multiple K '
+                         'present in predictions/, pick the highest)')
     ap.add_argument('--post-discord', action='store_true')
     ap.add_argument('--out', default='',
                     help='Local output dir (default = <output-dir>/max_iou_collages)')
@@ -155,26 +166,43 @@ def main():
     if not pred_dir.is_dir():
         raise SystemExit(f'predictions/ not found at {pred_dir}')
 
-    step_to_jsonl = list_max_iou_jsonls(pred_dir)
+    step_to_jsonl = list_max_iou_jsonls(pred_dir)   # {(step, k): path}
     if not step_to_jsonl:
         print(f'No max@K jsonls found in {pred_dir}. Run training with '
               f'`max_iou_k > 0` to generate them.')
         return
-    available_steps = sorted(step_to_jsonl)
-    print(f'Found max@K jsonls for steps: {available_steps}')
+
+    # Pick K — explicit --k or auto from highest K present
+    ks_present = sorted({k for (_step, k) in step_to_jsonl.keys()})
+    if args.k:
+        if args.k not in ks_present:
+            raise SystemExit(f'--k={args.k} not present. Available K: {ks_present}')
+        k = args.k
+    else:
+        k = ks_present[-1]
+        if len(ks_present) > 1:
+            print(f'Multiple K values present {ks_present}; using --k={k} '
+                  f'(pass --k explicitly to pick another).')
+
+    # Steps available for the selected K
+    available_steps = sorted(step for (step, kk) in step_to_jsonl.keys() if kk == k)
+    print(f'Found {len(available_steps)} max@{k} jsonls (steps {available_steps})')
 
     if args.steps:
-        steps = [int(s) for s in args.steps.split(',') if s.strip()]
-        steps = [s for s in steps if s in step_to_jsonl]
+        requested = [int(s) for s in args.steps.split(',') if s.strip()]
+        steps = [s for s in requested if s in available_steps]
+        missing = [s for s in requested if s not in available_steps]
+        if missing:
+            print(f'Warning: steps {missing} not present at K={k}; skipping.')
+        if not steps:
+            raise SystemExit(
+                f'None of the requested steps {requested} have a max@{k} '
+                f'artifact. Available steps for K={k}: {available_steps}')
     else:
         steps = available_steps
 
-    # Detect K from filename of first jsonl
-    k_match = re.search(r'\.max@(\d+)\.', step_to_jsonl[steps[0]].name)
-    k = int(k_match.group(1)) if k_match else 8
-
     # Use latest jsonl as anchor source (so anchors reflect latest case set)
-    anchors_per_bucket = pick_anchors(step_to_jsonl[steps[-1]], args.n_anchors)
+    anchors_per_bucket = pick_anchors(step_to_jsonl[(steps[-1], k)], args.n_anchors)
     print(f'Buckets: {list(anchors_per_bucket.keys())}')
 
     out_dir = Path(args.out) if args.out else (Path(args.output_dir) / 'max_iou_collages')
