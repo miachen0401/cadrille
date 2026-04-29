@@ -100,7 +100,10 @@ def build_max_iou_collage(bucket: str,
 
     print(f'  [{bucket}] rendering {len(pred_tasks)} pred meshes (max@{k})...',
           flush=True)
-    pred_pngs = render_meshes_parallel(pred_tasks, workers=8)
+    # render_*_parallel return {label: (png_bytes_or_None, status)}; we only
+    # need the bytes (status is for diagnostic prints inside eval_to_discord).
+    pred_raw = render_meshes_parallel(pred_tasks, max_workers=8)
+    pred_pngs = {lbl: t[0] for lbl, t in pred_raw.items()}
 
     # GT mesh + GT input image
     gt_tasks, gt_imgs = [], {}
@@ -112,7 +115,8 @@ def build_max_iou_collage(bucket: str,
         img_bytes = find_input_image(uid, bucket)
         if img_bytes:
             gt_imgs[uid] = img_bytes
-    gt_mesh_pngs = render_stls_parallel(gt_tasks, workers=4) if gt_tasks else {}
+    gt_raw = render_stls_parallel(gt_tasks, max_workers=4) if gt_tasks else {}
+    gt_mesh_pngs = {lbl: t[0] for lbl, t in gt_raw.items()}
 
     # Compose grid: rows = anchor; col 0 = GT input, col 1 = GT mesh, col 2+ = max@K per step
     rows = []
@@ -128,8 +132,10 @@ def build_max_iou_collage(bucket: str,
         })
 
     cols = ['GT input', 'GT mesh'] + [f'step {s}' for s in steps]
-    return build_grid_collage(rows, col_labels=cols, cell_px=192,
-                              header=f'[{bucket}] max_iou@{k} trajectory')
+    return build_grid_collage(rows,
+                              title=f'[{bucket}] max_iou@{k} trajectory',
+                              col_titles=cols,
+                              cell=192)
 
 
 def main():
@@ -190,7 +196,7 @@ def main():
                f'steps {steps[0]} → {steps[-1]} '
                f'({len(steps)} ckpts × {args.n_anchors} cases per bucket)')
         post_to_discord(content=msg,
-                        attachments=[(p.name, p.read_bytes()) for p in collage_paths])
+                        files=[(p.name, p.read_bytes()) for p in collage_paths])
 
 
 if __name__ == '__main__':
