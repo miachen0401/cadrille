@@ -71,7 +71,7 @@ _WORKER_HEADER = textwrap.dedent(f'''\
 
 _WORKER_BODY = textwrap.dedent('''\
     def run_worker(code_str, gt_mesh_path, compute_chamfer=False, iou_24=False,
-                   iou_24_early_stop=0.95):
+                   iou_24_early_stop=None):
         import io
         import trimesh
         import cadquery as cq  # noqa: F401 (used implicitly via exec)
@@ -127,7 +127,7 @@ _WORKER_BODY = textwrap.dedent('''\
                 payload['gt_mesh_path'],
                 compute_chamfer=payload.get('compute_chamfer', False),
                 iou_24=payload.get('iou_24', False),
-                iou_24_early_stop=payload.get('iou_24_early_stop', 0.95))
+                iou_24_early_stop=payload.get('iou_24_early_stop', None))
             print(json.dumps({'iou': iou, 'cd': cd,
                               'iou_24': iou24, 'rot_idx': rot_idx,
                               'error': None}))
@@ -166,7 +166,7 @@ def _execute_code_in_subprocess_24(
     code_str: str,
     gt_mesh_path: str,
     timeout: float = 300.0,
-    iou_24_early_stop: float = 0.95,
+    iou_24_early_stop: Optional[float] = None,
 ) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
     """Like `_execute_code_in_subprocess` but also returns rotation-invariant IoU.
 
@@ -651,7 +651,7 @@ def _rotation_matrices_24() -> List[np.ndarray]:
 def compute_iou_24(
     gt_mesh,
     pred_mesh,
-    early_stop_threshold: float = 0.95,
+    early_stop_threshold: Optional[float] = None,
 ) -> Tuple[Optional[float], int]:
     """Rotation-invariant IoU under the 24 cube symmetries.
 
@@ -669,9 +669,15 @@ def compute_iou_24(
     mesh inside the same cube.
 
     Args:
-        early_stop_threshold: stop the search once IoU ≥ this value (default
-            0.95). Cuts wall-clock by up to 24× on near-perfect matches.
-            Set to 1.0+ to always try all 24.
+        early_stop_threshold: optional. If set, abandons the rotation search
+            as soon as some rotation reaches this IoU. THIS IS LOSSY — the
+            returned value is the *first* IoU above the threshold, not the
+            true maximum, and `best_rotation_idx` may be wrong if a later
+            rotation would have scored higher. Default `None` = full search,
+            so the function honours its "max over 24" contract by default;
+            opt in only when you genuinely value wall-clock over correctness
+            (e.g. training reward where the gradient signal of "good enough"
+            is what matters).
 
     Returns:
         (best_iou, best_rotation_idx). best_iou is None if every rotation's
@@ -694,7 +700,7 @@ def compute_iou_24(
         if best_iou is None or iou > best_iou:
             best_iou = iou
             best_idx = i
-            if best_iou >= early_stop_threshold:
+            if early_stop_threshold is not None and best_iou >= early_stop_threshold:
                 break
     return best_iou, best_idx
 
@@ -716,7 +722,7 @@ def compute_metrics_24(
     code_str: str,
     gt_mesh_path: str,
     timeout: float = 300.0,
-    iou_24_early_stop: float = 0.95,
+    iou_24_early_stop: Optional[float] = None,
 ) -> Tuple[float, Optional[float], Optional[float], int]:
     """Compute (iou_naive, cd, iou_24, rot_idx) for one sample.
 
@@ -725,6 +731,9 @@ def compute_metrics_24(
     winning rotation index (0 ≡ identity). Returned IoU values follow the
     same convention as compute_metrics: -1.0 on subprocess/exec failure,
     0.0 on zero-overlap, otherwise the float in [0, 1].
+
+    iou_24_early_stop defaults to None (full search) — see compute_iou_24
+    for the lossy-but-faster opt-in semantics.
     """
     iou, cd, iou_24, rot_idx = _execute_code_in_subprocess_24(
         code_str, gt_mesh_path,

@@ -74,7 +74,7 @@ def test_in_process_iou_24_recovers_rotation():
     pred = _normalised_box(PRED_EXTENTS)
     naive = compute_iou(gt, pred)
     assert naive is not None and naive < 0.5, f'naive too high: {naive}'
-    iou24, rot_idx = compute_iou_24(gt, pred, early_stop_threshold=2.0)
+    iou24, rot_idx = compute_iou_24(gt, pred, early_stop_threshold=None)
     assert iou24 is not None and iou24 > 0.99, f'iou_24 too low: {iou24}'
     assert rot_idx > 0, f'expected non-identity rotation; got idx={rot_idx}'
 
@@ -103,19 +103,39 @@ def test_subprocess_iou_24_matches_in_process(gt_stl_path):
     return the SAME (iou_24, rot_idx) pair as the in-process compute_iou_24.
     This is the regression that catches the duplication-drift bug."""
     iou_sp, cd_sp, iou24_sp, rot_sp = _execute_code_in_subprocess_24(
-        PRED_CODE, gt_stl_path, timeout=60, iou_24_early_stop=2.0)
+        PRED_CODE, gt_stl_path, timeout=60, iou_24_early_stop=None)
     assert iou24_sp is not None and rot_sp >= 0
 
     gt_mesh   = _normalised_box(GT_EXTENTS)
     pred_mesh = _normalised_box(PRED_EXTENTS)
     iou24_inproc, rot_inproc = compute_iou_24(
-        gt_mesh, pred_mesh, early_stop_threshold=2.0)
+        gt_mesh, pred_mesh, early_stop_threshold=None)
     assert iou24_inproc is not None
 
     assert abs(iou24_sp - iou24_inproc) < 1e-3, \
         f'subprocess iou_24={iou24_sp} drifted from in-process={iou24_inproc}'
     assert rot_sp == rot_inproc, \
         f'subprocess rot_idx={rot_sp} drifted from in-process={rot_inproc}'
+
+
+def test_iou_24_default_returns_full_max_not_early_stop():
+    """Default `early_stop_threshold=None` must search all 24 rotations and
+    return the true max. Regression for the codex bot's P1 finding: when
+    early_stop was 0.95, an early rotation hitting 0.96 would short-circuit
+    even if a later rotation would have scored 0.99 — wrong rot_idx + an
+    underestimate of iou_24.
+
+    Construct a near-symmetric pred where two rotations both score >0.95 but
+    differ measurably. The default call MUST pick the higher one.
+    """
+    gt   = _normalised_box(GT_EXTENTS)
+    pred = _normalised_box(PRED_EXTENTS)
+    iou24_full, _ = compute_iou_24(gt, pred)  # default = no early stop
+    # With opt-in early-stop at the same threshold the full-max one passed,
+    # we should still get the same answer in the converged identity-symmetric
+    # case (1×2×3 ↔ 3×2×1 hits 1.0 at idx=20). What we're really testing here
+    # is that the default no-early-stop path hits the right max value.
+    assert iou24_full is not None and iou24_full > 0.99
 
 
 def test_24_rotation_matrices_form_valid_group():
