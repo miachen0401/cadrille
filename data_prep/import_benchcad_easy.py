@@ -325,33 +325,58 @@ def main() -> None:
         max_workers=args.workers,
         max_tasks_per_child=args.max_tasks_per_child,
     ) as pool:
-        in_flight: list[tuple[int, dict, object]] = []  # (idx, row, future_or_None)
+        # (idx, row, future_or_None, submit_ts)
+        in_flight: list[tuple[int, dict, object, float]] = []
         max_in_flight = 4 * args.workers
         cursor = 0
+        # Wall-clock cap per render task: 3× the SIGALRM budget. If a worker
+        # process dies (SIGKILL, segfault, OOM) the future never resolves —
+        # ProcessPoolExecutor doesn't auto-recover. Without this cap, the
+        # main loop would hang forever on the head of in_flight.
+        future_wallclock_cap = max(args.per_task_timeout_sec * 3, 180)
 
         def _drain_one_in_order() -> bool:
-            """Pop the head of in_flight if its result is ready; emit rec."""
+            """Pop the head of in_flight if its result is ready or has been
+            pending past the wall-clock cap; emit rec or count as error."""
             nonlocal n_done, n_render_err, shard_idx, last_log
             if not in_flight:
                 return False
-            idx, row, fut = in_flight[0]
-            if fut is not None and not fut.done():
-                return False
-            in_flight.pop(0)
+            idx, row, fut, submit_ts = in_flight[0]
             if fut is None:
-                # Passthrough row
+                in_flight.pop(0)
                 rec = _build_record(row, row['composite_png']['bytes'])
-            else:
-                res = fut.result()
+                shard_buf.append(rec); n_done += 1
+            elif fut.done():
+                in_flight.pop(0)
+                try:
+                    res = fut.result(timeout=1)
+                except Exception as e:
+                    n_render_err += 1
+                    err_kinds['BrokenPool'] = err_kinds.get('BrokenPool', 0) + 1
+                    print(f'  worker exception on row {idx}: {type(e).__name__}: {e}',
+                          flush=True)
+                    n_done += 1
+                    return True
                 if res['error']:
                     n_render_err += 1
                     kind = res['error'].split(':', 1)[0]
                     err_kinds[kind] = err_kinds.get(kind, 0) + 1
                     n_done += 1
-                    return True  # skip this row
+                    return True
                 rec = _build_record(row, res['png_bytes'])
-            shard_buf.append(rec)
-            n_done += 1
+                shard_buf.append(rec); n_done += 1
+            elif (time.time() - submit_ts) > future_wallclock_cap:
+                # Worker is silently dead — drop this row, log, continue.
+                in_flight.pop(0)
+                fut.cancel()
+                n_render_err += 1
+                err_kinds['WallClockCap'] = err_kinds.get('WallClockCap', 0) + 1
+                print(f'  !! row {idx} pending > {future_wallclock_cap}s '
+                      f'(worker likely dead) → dropped', flush=True)
+                n_done += 1
+                return True
+            else:
+                return False
             if len(shard_buf) >= args.shard_size:
                 _push_shard(shard_buf, shard_idx, total_shards, out_dir,
                             dry_run=args.no_upload)
