@@ -402,6 +402,7 @@ def _list_train_pyfiles(source: str) -> list[Path]:
         'text2cad':           ('data/text2cad',           'uid'),  # legacy
         'cad_iso_106':        ('data/cad-iso-106',        'py_path'),
         'benchcad_simple':    ('data/benchcad-simple',    'py_path'),
+        'benchcad_easy':      ('data/benchcad-easy',      'py_path'),
         'text2cad_bench_img': ('data/text2cad-bench',     'uid'),
         'text2cad_bench_text':('data/text2cad-bench',     'uid'),
         'text2cad_bench':     ('data/text2cad-bench',     'uid'),  # legacy alias
