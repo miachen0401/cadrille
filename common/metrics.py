@@ -43,92 +43,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ---------------------------------------------------------------------------
-# Training worker (subprocess-per-call, unchanged)
+# Training worker (subprocess-per-call)
 # ---------------------------------------------------------------------------
 
-# Worker script embedded as a string; written to a temp file on first use.
-# Runs in a fresh Python interpreter — no CUDA context, no memory leaks.
-_WORKER_SCRIPT = textwrap.dedent('''\
-    """CadQuery mesh executor — spawned by rl/reward.py as a subprocess."""
+# `_WORKER_SCRIPT` runs in a fresh Python interpreter — no CUDA context, no
+# memory leaks. It is intentionally thin: the *metrics* live as top-level
+# functions in this same module (compute_iou / compute_cd / compute_iou_24)
+# and the worker imports them so there is a single source of truth.
+#
+# Build the script as `header_with_repo_path + body` so the body can be a
+# plain triple-string (no f-string {} escaping needed for the algo code).
+_REPO_ROOT_FOR_WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_WORKER_HEADER = textwrap.dedent(f'''\
+    """CadQuery mesh executor — spawned by rl/reward.py as a subprocess.
+
+    Metrics (compute_iou, compute_cd, compute_iou_24) are imported from the
+    parent project's common.metrics module — DO NOT redefine them here.
+    """
     import sys
     import json
+    sys.path.insert(0, {_REPO_ROOT_FOR_WORKER!r})
     import numpy as np
+    from common.metrics import compute_iou, compute_cd, compute_iou_24
 
+''')
 
-    def compute_iou(gt_mesh, pred_mesh):
-        try:
-            intersection_volume = 0
-            for gt_mesh_i in gt_mesh.split():
-                for pred_mesh_i in pred_mesh.split():
-                    intersection = gt_mesh_i.intersection(pred_mesh_i)
-                    volume = intersection.volume if intersection is not None else 0
-                    intersection_volume += volume
-            gt_volume = sum(m.volume for m in gt_mesh.split())
-            pred_volume = sum(m.volume for m in pred_mesh.split())
-            union_volume = gt_volume + pred_volume - intersection_volume
-            assert union_volume > 0
-            return float(intersection_volume / union_volume)
-        except Exception:
-            return None
-
-
-    def _rotation_matrices_24():
-        """24 rotational symmetries of the cube. Identity at idx 0."""
-        from itertools import permutations, product
-        mats = [np.eye(3)]
-        seen = {tuple(np.eye(3).flatten())}
-        for perm in permutations(range(3)):
-            for signs in product((1, -1), repeat=3):
-                R = np.zeros((3, 3))
-                for i, p in enumerate(perm):
-                    R[i, p] = signs[i]
-                if abs(np.linalg.det(R) - 1.0) >= 1e-6:
-                    continue
-                key = tuple(R.flatten())
-                if key in seen:
-                    continue
-                seen.add(key); mats.append(R)
-        return mats
-
-
-    def compute_iou_24(gt_mesh, pred_mesh, early_stop_threshold=0.95):
-        """Max IoU over the 24 cube rotations of pred_mesh. Returns (iou, idx)."""
-        best_iou, best_idx = None, -1
-        for i, R in enumerate(_rotation_matrices_24()):
-            if i == 0:
-                pred_rot = pred_mesh
-            else:
-                pred_rot = pred_mesh.copy()
-                T = np.eye(4); T[:3, :3] = R
-                pred_rot.apply_transform(T)
-            iou = compute_iou(gt_mesh, pred_rot)
-            if iou is None: continue
-            if best_iou is None or iou > best_iou:
-                best_iou, best_idx = iou, i
-                if best_iou >= early_stop_threshold: break
-        return best_iou, best_idx
-
-
-    def compute_cd(gt_mesh, pred_mesh, n_points=8192):
-        """Chamfer Distance via surface point sampling.
-
-        Matches evaluate.py:compute_chamfer_distance() exactly:
-          - 8192 surface samples on each mesh
-          - Bidirectional: mean(d²(pred→gt)) + mean(d²(gt→pred))  ← L2 Chamfer
-        """
-        try:
-            from scipy.spatial import cKDTree
-            pred_pts = pred_mesh.sample(n_points).astype(np.float32)
-            gt_pts   = gt_mesh.sample(n_points).astype(np.float32)
-            tree_gt   = cKDTree(gt_pts)
-            tree_pred = cKDTree(pred_pts)
-            d_pg, _ = tree_gt.query(pred_pts, k=1)
-            d_gp, _ = tree_pred.query(gt_pts, k=1)
-            return float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
-        except Exception:
-            return None
-
-
+_WORKER_BODY = textwrap.dedent('''\
     def run_worker(code_str, gt_mesh_path, compute_chamfer=False, iou_24=False,
                    iou_24_early_stop=0.95):
         import io
@@ -196,6 +137,11 @@ _WORKER_SCRIPT = textwrap.dedent('''\
                               'error': str(e)}))
         sys.stdout.flush()
 ''')
+
+# Final script written to the temp file = header (with sys.path + imports)
+# followed by the body (run_worker + main entry).
+_WORKER_SCRIPT = _WORKER_HEADER + _WORKER_BODY
+
 
 # Module-level cache: written once per process lifetime
 _worker_path: Optional[str] = None
@@ -561,34 +507,10 @@ def _eval_worker_run(
         pred_mesh = _transform(pred_mesh)
         gt_mesh   = _transform(trimesh.load_mesh(gt_mesh_path))
 
-        # IoU
-        iou = None
-        try:
-            intersection_volume = 0.0
-            for gt_i in gt_mesh.split():
-                for pred_i in pred_mesh.split():
-                    sect = gt_i.intersection(pred_i)
-                    intersection_volume += sect.volume if sect is not None else 0.0
-            gt_vol   = sum(m.volume for m in gt_mesh.split())
-            pred_vol = sum(m.volume for m in pred_mesh.split())
-            union_vol = gt_vol + pred_vol - intersection_volume
-            if union_vol > 0:
-                iou = float(intersection_volume / union_vol)
-        except Exception:
-            pass
-
-        # Chamfer Distance
-        cd = None
-        if compute_chamfer and iou is not None:
-            try:
-                from scipy.spatial import cKDTree
-                pred_pts = pred_mesh.sample(8192).astype(np.float32)
-                gt_pts   = gt_mesh.sample(8192).astype(np.float32)
-                d_pg, _  = cKDTree(gt_pts).query(pred_pts, k=1)
-                d_gp, _  = cKDTree(pred_pts).query(gt_pts, k=1)
-                cd = float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
-            except Exception:
-                pass
+        # Single source of truth: call the module-level metric implementations
+        # rather than re-inlining the formulas (used to be a third silent copy).
+        iou = compute_iou(gt_mesh, pred_mesh)
+        cd  = compute_cd(gt_mesh, pred_mesh) if (compute_chamfer and iou is not None) else None
 
         signal.alarm(0)
         return iou, cd
@@ -658,8 +580,9 @@ def _execute_in_eval_pool(
 def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
     """Volumetric IoU between two trimesh objects.
 
-    Copied from evaluate.py for use when both meshes are already loaded in
-    the main process (e.g. during evaluation without CUDA).
+    Single source of truth for the IoU formula. The subprocess worker
+    (`_WORKER_SCRIPT`) and the warm-pool worker (`_eval_worker_run`) both
+    call back into this function instead of re-implementing it.
     """
     try:
         intersection_volume = 0
@@ -673,6 +596,25 @@ def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
         union_volume = gt_volume + pred_volume - intersection_volume
         assert union_volume > 0
         return float(intersection_volume / union_volume)
+    except Exception:
+        return None
+
+
+def compute_cd(gt_mesh, pred_mesh, n_points: int = 8192) -> Optional[float]:
+    """Bidirectional L2 Chamfer Distance via 8192 surface samples per mesh.
+
+    Single source of truth — both subprocess and warm-pool workers import this
+    rather than re-implementing it. Matches evaluate.py:compute_chamfer_distance.
+    """
+    try:
+        from scipy.spatial import cKDTree
+        pred_pts = pred_mesh.sample(n_points).astype(np.float32)
+        gt_pts   = gt_mesh.sample(n_points).astype(np.float32)
+        tree_gt   = cKDTree(gt_pts)
+        tree_pred = cKDTree(pred_pts)
+        d_pg, _ = tree_gt.query(pred_pts, k=1)
+        d_gp, _ = tree_pred.query(gt_pts, k=1)
+        return float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
     except Exception:
         return None
 
