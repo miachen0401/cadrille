@@ -65,8 +65,14 @@ def _free_ram_mb():
     return None
 
 
-def _step_to_mesh(step_bytes: bytes):
-    """Load STEP from bytes → trimesh. Returns Trimesh or raises."""
+def _step_to_mesh(step_bytes: bytes, max_triangles: int = 0):
+    """Load STEP from bytes → trimesh. Returns Trimesh or raises.
+
+    If max_triangles > 0 and the tessellated mesh has more triangles than
+    the cap, raises ValueError('mesh_too_complex'). Use this to skip
+    parametric-surface families (twist/sweep/helix) whose dense tessellation
+    blows up render time by 10-100x.
+    """
     import cadquery as cq
     import trimesh
     from OCP.STEPControl import STEPControl_Reader
@@ -86,6 +92,8 @@ def _step_to_mesh(step_bytes: bytes):
         verts, faces = compound.tessellate(0.001, 0.1)
         if len(verts) < 4 or len(faces) < 4:
             raise ValueError('degenerate mesh')
+        if max_triangles > 0 and len(faces) > max_triangles:
+            raise ValueError(f'mesh_too_complex: {len(faces)} tri > {max_triangles}')
         return trimesh.Trimesh([(v.x, v.y, v.z) for v in verts], faces)
     finally:
         try: os.unlink(step_path)
@@ -109,24 +117,55 @@ def _render_png_bytes(mesh) -> bytes:
         except Exception: pass
 
 
-def _process_row(row: dict) -> dict:
+class _Timeout(Exception):
+    pass
+
+
+def _alarm_handler(signum, frame):
+    raise _Timeout(f'task exceeded budget')
+
+
+def _process_row(row_and_args) -> dict:
     """Per-row worker: clean code + STEP→mesh + render → packed dict.
 
+    `row_and_args` is (row_dict, timeout_sec, max_triangles). When timeout_sec
+    > 0 we set SIGALRM so a single pathological shape (e.g. very high-poly
+    mesh whose Open3D render stalls) times out and we move on instead of
+    blocking the pool on it for minutes. Late shards in
+    BenchCAD/cad_simple_ops_100k can have shapes whose render takes 30+ sec
+    each — without timeout the rate collapses from 7/s to <1/s.
+
+    When max_triangles > 0, we pre-filter on tessellated triangle count so
+    parametric-surface families (twist/sweep/helix) get rejected fast (no
+    render attempt) instead of timing out during render.
+
     Returns {stem, code, png_bytes, family, difficulty, n_ops, ops_json,
-             base_plane, error}. On any failure, error is set; other fields
-    may be None.
+             base_plane, error}. On any failure (incl. timeout), error is
+    set; other fields may be None.
     """
+    row, timeout_sec, max_triangles = row_and_args
     stem = row['stem']
+
+    if timeout_sec and timeout_sec > 0:
+        import signal
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(int(timeout_sec))
+
     try:
         code_clean = _clean_code(row['code'])
-        mesh = _step_to_mesh(row['step_bytes'])
+        mesh = _step_to_mesh(row['step_bytes'], max_triangles=max_triangles)
         png_bytes = _render_png_bytes(mesh)
     except Exception as e:
-        return {'stem': stem, 'error': f'{type(e).__name__}: {str(e)[:120]}',
+        kind = 'timeout' if isinstance(e, _Timeout) else type(e).__name__
+        return {'stem': stem, 'error': f'{kind}: {str(e)[:120]}',
                 'code': None, 'png_bytes': None,
                 'family': row.get('family'), 'difficulty': row.get('difficulty'),
                 'n_ops': row.get('n_ops'), 'ops_json': row.get('ops_json'),
                 'base_plane': row.get('base_plane')}
+    finally:
+        if timeout_sec and timeout_sec > 0:
+            import signal
+            signal.alarm(0)
     return {
         'stem': stem,
         'code': code_clean,
@@ -196,6 +235,33 @@ def main():
     ap.add_argument('--no-upload', action='store_true')
     ap.add_argument('--max-tasks-per-child', type=int, default=100)
     ap.add_argument('--ram-floor-mb', type=int, default=1500)
+    ap.add_argument('--per-task-timeout-sec', type=int, default=0,
+                    help='Per-task SIGALRM timeout in worker (0=disabled). '
+                         'Use 30-60 to skip pathological complex shapes that '
+                         'stall Open3D render.')
+    ap.add_argument('--max-mesh-triangles', type=int, default=0,
+                    help='Skip rows whose tessellated mesh exceeds this '
+                         'triangle count (0=disabled). Pre-filter for '
+                         'parametric-surface families (twist/sweep/helix) '
+                         'that produce 50k-500k triangles. Try 50000.')
+    ap.add_argument('--start-upstream-shard', type=int, default=0,
+                    help='Skip first N upstream parquet shards entirely (0-indexed). '
+                         'Combine with --skip-rows-in-first-upstream to resume '
+                         'mid-upstream-shard without re-rendering shards already done.')
+    ap.add_argument('--skip-rows-in-first-upstream', type=int, default=0,
+                    help='Skip the first N rows of --start-upstream-shard '
+                         '(useful when previous run died mid-upstream-shard).')
+    ap.add_argument('--skip-family-substr', nargs='+', default=[],
+                    help='Skip rows whose family contains any of these substrings '
+                         '(case-sensitive). Cheap pre-filter at the main process — '
+                         'never even tessellate, never dispatch. Useful for '
+                         'BenchCAD families known to produce extreme triangle counts: '
+                         'helix, spline, twist.')
+    ap.add_argument('--only-family-substr', nargs='+', default=[],
+                    help='Inverse of --skip-family-substr: KEEP only rows whose '
+                         'family contains any of these substrings. Useful for '
+                         'targeting specific subsets (e.g. picking up the helix/'
+                         'spline/twist samples that an earlier run skipped).')
     args = ap.parse_args()
 
     if not args.no_upload and not os.environ.get('HF_TOKEN'):
@@ -214,11 +280,26 @@ def main():
     if args.n is not None:
         total_src_rows = min(total_src_rows, args.n)
     total_shards_out = (total_src_rows + args.shard_size - 1) // args.shard_size
-    n_skip_for_resume = args.start_shard * args.shard_size
+
+    # Two resume modes:
+    # (a) success-skip: --start-shard N → discard first N*shard_size successes
+    #     (forced to re-render upstream shards; safe for any restart point but wasteful)
+    # (b) upstream-skip: --start-upstream-shard K → don't even download/dispatch
+    #     upstream shards 0..K-1 (assumes their successes are already on HF). When
+    #     this is enabled, we set n_skip_for_resume=0 (no further success-skipping
+    #     because we're not re-rendering shards already done).
+    if args.start_upstream_shard > 0:
+        n_skip_for_resume = 0
+        print(f'(upstream-skip mode: skipping upstream shards 0..{args.start_upstream_shard - 1}; '
+              f'output starts at shard idx {args.start_shard})', flush=True)
+    else:
+        n_skip_for_resume = args.start_shard * args.shard_size
+        print(f'(success-skip mode: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
 
     print(f'workers={args.workers}  shard_size={args.shard_size}  '
-          f'estimated_output_shards={total_shards_out}', flush=True)
-    print(f'(resume: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
+          f'estimated_output_shards={total_shards_out}  '
+          f'per_task_timeout={args.per_task_timeout_sec}s  '
+          f'max_triangles={args.max_mesh_triangles}', flush=True)
 
     # Stream rows from upstream parquet shards, dispatch to workers, batch into output shards.
     from huggingface_hub import hf_hub_download
@@ -240,8 +321,8 @@ def main():
         in_flight = []
         max_in_flight = 4 * args.workers
 
-        # Iterate over upstream parquet shards lazily
-        for src_shard_i in range(args.total_src_shards):
+        # Iterate over upstream parquet shards lazily, starting at start-upstream-shard
+        for src_shard_i in range(args.start_upstream_shard, args.total_src_shards):
             if args.n is not None and n_dispatched >= args.n:
                 break
             src_fname = f'{args.src_prefix}/train-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
@@ -252,6 +333,28 @@ def main():
                                  local_dir=str(cache_dir))
             t = pq.read_table(p)
             rows = t.to_pylist()
+            # Skip rows in the first upstream shard if resuming mid-upstream-shard
+            if src_shard_i == args.start_upstream_shard and args.skip_rows_in_first_upstream > 0:
+                skip_n = min(args.skip_rows_in_first_upstream, len(rows))
+                print(f'  skipping first {skip_n} rows in this upstream shard', flush=True)
+                rows = rows[skip_n:]
+            # Family blacklist pre-filter (cheap — no tessellate)
+            if args.skip_family_substr:
+                before = len(rows)
+                rows = [r for r in rows
+                        if not any(s in (r.get('family') or '')
+                                   for s in args.skip_family_substr)]
+                if before != len(rows):
+                    print(f'  family-skip: dropped {before - len(rows)}/{before} rows '
+                          f'matching {args.skip_family_substr}', flush=True)
+            # Family whitelist (inverse) — keep only matching rows
+            if args.only_family_substr:
+                before = len(rows)
+                rows = [r for r in rows
+                        if any(s in (r.get('family') or '')
+                               for s in args.only_family_substr)]
+                print(f'  family-only: kept {len(rows)}/{before} rows '
+                      f'matching {args.only_family_substr}', flush=True)
             print(f'  loaded {len(rows)} rows in {time.time()-t0:.1f}s', flush=True)
 
             # Dispatch + drain loop
@@ -261,7 +364,7 @@ def main():
                 while len(in_flight) < max_in_flight and row_idx < len(rows):
                     if args.n is not None and n_dispatched >= args.n:
                         break
-                    in_flight.append(pool.submit(_process_row, rows[row_idx]))
+                    in_flight.append(pool.submit(_process_row, (rows[row_idx], args.per_task_timeout_sec, args.max_mesh_triangles)))
                     row_idx += 1
                     n_dispatched += 1
                 if not in_flight:
