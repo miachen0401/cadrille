@@ -270,10 +270,16 @@ class Text2CADDataset(Dataset):
         }
 
         if self.split in ['train', 'val']:
-            py_path = f'{item["uid"]}.py'
-            py_path = os.path.join(self.root_dir, self.code_dir, py_path)
-            with open(py_path, 'r') as f:
-                answer = f.read()
+            # Prefer inline `code` field if present (newer pkl layouts like
+            # text2cad-bench have it); fall back to {code_dir}/{uid}.py for
+            # older filesystem-only layouts. Avoids breakage if a future
+            # fetcher stops materializing the .py tree.
+            answer = item.get('code')
+            if not answer:
+                py_path = os.path.join(self.root_dir, self.code_dir,
+                                       f'{item["uid"]}.py')
+                with open(py_path, 'r') as f:
+                    answer = f.read()
             input_item['answer'] = answer
         return input_item
 
