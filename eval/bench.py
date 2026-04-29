@@ -45,7 +45,7 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-from common.model import Cadrille, collate  # noqa: E402
+from common.model import Cadrille, get_cadrille_class, collate  # noqa: E402
 from common.metrics import compute_metrics   # noqa: E402
 
 _N_POINTS    = 256
@@ -562,7 +562,14 @@ def main() -> None:
                          'or qwen25vl_zs (Qwen2.5-VL zero-shot, off-the-shelf, no ckpt needed)')
     ap.add_argument('--base-model',   default='Qwen/Qwen2-VL-2B-Instruct',
                     help='Base model id for processor (default: Qwen/Qwen2-VL-2B-Instruct). '
-                         'For qwen25vl_zs, set this to e.g. Qwen/Qwen2.5-VL-3B-Instruct.')
+                         'For qwen25vl_zs, set this to e.g. Qwen/Qwen2.5-VL-3B-Instruct. '
+                         'For backbone=qwen3_vl, the processor lives in the ckpt itself, '
+                         'so this is ignored.')
+    ap.add_argument('--backbone',     default='qwen2_vl',
+                    choices=['qwen2_vl', 'qwen2_5_vl', 'qwen3_vl'],
+                    help='Cadrille backbone family. Only used when --model-type cadrille. '
+                         'qwen3_vl matches the Cadrille_Qwen3VLForConditionalGeneration '
+                         'architecture from `--config` v3 SFT runs.')
     ap.add_argument('--split',        default='test_iid',
                     help='Split name. Use "all" for the standard '
                          'test_iid+test_ood_family+test_ood_plane triple. '
@@ -667,7 +674,20 @@ def main() -> None:
             model.lm_head.weight = _embed.weight
             print('  lm_head tied to embed_tokens.', flush=True)
     else:
-        model = Cadrille.from_pretrained(
+        # Cadrille — pick the right backbone-flavoured class.
+        # For Qwen3-VL the processor lives inside the ckpt (saved by trainer),
+        # not in the public --base-model id, so re-load it from ckpt_path.
+        cadrille_cls = get_cadrille_class(args.backbone)
+        if args.backbone == 'qwen3_vl':
+            print(f'  re-loading processor from {ckpt_path} (Qwen3-VL ships in-ckpt) …',
+                  flush=True)
+            processor = AutoProcessor.from_pretrained(
+                str(ckpt_path),
+                min_pixels=200704,
+                max_pixels=1003520,
+                padding_side='left',
+            )
+        model = cadrille_cls.from_pretrained(
             str(ckpt_path),
             torch_dtype=torch.bfloat16,
             attn_implementation=args.attn_impl,

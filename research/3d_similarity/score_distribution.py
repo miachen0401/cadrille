@@ -41,9 +41,10 @@ EVAL_ROOT = REPO / 'eval_outputs' / 'cad_bench_722'
 OUT_JSON  = EVAL_ROOT / 'distribution_metrics.json'
 
 MODELS = [
-    ('cadrille_rl',     'Cadrille-rl'),
-    ('cadevolve_rl1',   'CADEvolve-rl1'),
-    ('qwen25vl_3b_zs',  'Qwen-zs'),
+    ('cadrille_rl',         'Cadrille-rl'),
+    ('cadevolve_rl1',       'CADEvolve-rl1'),
+    ('qwen25vl_3b_zs',      'Qwen-zs'),
+    ('cadrille_qwen3vl_v3', 'Cadrille-Q3VL-v3'),
 ]
 
 

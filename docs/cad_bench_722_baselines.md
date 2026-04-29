@@ -1,63 +1,70 @@
-# `BenchCAD/cad_bench_722` baselines — official Cadrille, official CADEvolve, zero-shot Qwen2.5-VL
+# `cad_bench_722` — multi-baseline evaluation
 
-**Dataset:** [`BenchCAD/cad_bench_722`](https://huggingface.co/datasets/BenchCAD/cad_bench_722) — 720 rows, single `train` split, the *diversified / substituted-parts* track of the BenchCAD benchmark (`is_substituted=True` for half the rows; OOD by construction). Each row carries `composite_png` (single 268×268 multi-view collage), `gt_code` (CadQuery), `family / difficulty / base_plane / feature_tags / ops_used`.
+**Dataset:** [`BenchCAD/cad_bench_722`](https://huggingface.co/datasets/BenchCAD/cad_bench_722) — 720 rows, single `train` split, the *diversified / substituted-parts* track of the BenchCAD benchmark.
 
-**Run date:** 2026-04-28
-**Hardware:** RTX 4080 SUPER (16 GB)
-**Branch:** `eval/cad-bench-722` · commits `c56747c` (eval adapters), `6374203` (`compute_iou_24`), `b0e2be1` (rescore driver)
+**Hardware:** RTX 4080 SUPER (16 GB).
+
+**Branch:** `eval/cad-bench-722`
 
 ---
 
-## Headline (greedy, single attempt per sample)
+## 1. Headline (greedy, single attempt)
 
-| model                                 | input format                  | exec    | mean IoU | mean CD   |
-|---                                    |---                            |---:     |---:      |---:       |
-| **CADEvolve-rl1** (official)          | 8-view 476×952 axis-coloured  | **86.5%** | **0.367** | **0.034** |
-| **Cadrille-rl** (official, filapro)   | point cloud + composite_png   | 66.9%   | 0.054    | 0.412     |
-| **Qwen2.5-VL-3B-Instruct** (zero-shot)| composite_png 268×268 only    | 2.2%    | 0.146*   | 0.365     |
-
-*Qwen IoU is over the 16 successful samples only — the model has never seen CadQuery and crashes on 98% of inputs.
+| model                            | input                        |   exec | mean IoU |   mean CD |
+|----------------------------------|------------------------------|--------|----------|-----------|
+| Cadrille-rl (filapro)            | pc + composite_png           |  66.9% |   0.0538 |  0.411574 |
+| CADEvolve-rl1 (kulibinai)        | 8-view 476×952 axis-coloured |  86.5% |   0.3672 |  0.034397 |
+| Qwen2.5-VL-3B (zero-shot)        | composite_png 268×268        |   2.2% |   0.1460 |  0.365229 |
+| Cadrille-Q3VL-v3 (50k clean)     | composite_png 268×268 (Qwen3-VL) |  92.1% |   0.6529 |  0.025873 |
 
 ### Per-difficulty (exec / mean IoU)
 
-```
-                    easy           medium         hard
-cadevolve_rl1   83% / 0.392    92% / 0.364    85% / 0.348
-cadrille_rl     67% / 0.054    71% / 0.048    63% / 0.060
-qwen2.5-vl-3b    3% / 0.101     3% / 0.221     2% / 0.102
-```
+| model                            | easy           | medium         | hard           |
+|----------------------------------|----------------|----------------|----------------|
+| Cadrille-rl (filapro)            | 66.5% / 0.054  | 71.0% / 0.048  | 63.5% / 0.060  |
+| CADEvolve-rl1 (kulibinai)        | 83.0% / 0.391  | 91.6% / 0.364  | 84.9% / 0.348  |
+| Qwen2.5-VL-3B (zero-shot)        | 2.6% / 0.101   | 2.5% / 0.220   | 1.6% / 0.102   |
+| Cadrille-Q3VL-v3 (50k clean)     | 93.0% / 0.705  | 94.1% / 0.663  | 89.3% / 0.593  |
 
-CADEvolve generalises smoothly across difficulty; Cadrille's IoU is uniformly low across `easy / medium / hard`, which is itself a clue (see §3).
+## 2. IoU-24 rotation rescue
 
----
+`Δ = mean(iou_24 − iou)` over paired cases. `pct_rot_win` = fraction of cases where a non-identity rotation beat the identity, i.e. correct shape but oriented wrong.
 
-## Rotation-invariant rescore (IoU-24)
+| model                            | n_paired | mean iou | mean iou_24 |       Δ | pct_rot_win |
+|----------------------------------|----------|----------|-------------|---------|-------------|
+| Cadrille-rl (filapro)            |      661 |   0.0393 |      0.0680 | +0.0288 |       84.1% |
+| CADEvolve-rl1 (kulibinai)        |      688 |   0.3325 |      0.3387 | +0.0062 |       50.0% |
+| Qwen2.5-VL-3B (zero-shot)        |       17 |   0.1374 |      0.2101 | +0.0727 |       88.2% |
+| Cadrille-Q3VL-v3 (50k clean)     |      686 |   0.6310 |      0.6546 | +0.0236 |       40.4% |
 
-For each prediction, we tried all 24 axis-aligned rotations of `pred_mesh` and kept the maximum volumetric IoU. Implementation: `common.metrics.compute_iou_24` plus the iou-24 mode of the existing CadQuery subprocess worker, with early-stop at IoU ≥ 0.95. Re-scored on the same 720 samples per model:
+## 3. Distribution-level metrics
 
-| model           | n paired | mean iou | mean iou_24 | Δ (mean) | rotation-win rate |
-|---              |---:      |---:      |---:         |---:      |---:               |
-| cadevolve_rl1   | 688      | 0.273    | **0.339**   | +0.066   | 344/688 = 50.0%   |
-| cadrille_rl     | 661      | 0.039    | **0.068**   | +0.029   | **556/661 = 84.1%** |
-| qwen25vl_3b_zs  | 17       | 0.137    | 0.210       | +0.073   | 15/17 = 88.2%     |
+Computed against the full 720 GT image distribution. FID / KID lower = better; CLIP R-Precision higher = better.
 
-(`mean iou` here averages over `success ∪ zero_iou` records — the same denominator as `mean iou_24` — which is why it differs from the headline-table `mean IoU` that excludes zero-IoU records.)
+| model                            | n_pred |      FID |       KID |    R@1 |    R@5 |   R@10 |
+|----------------------------------|--------|----------|-----------|--------|--------|--------|
+| Cadrille-rl (filapro)            |    482 |   191.87 |   0.07610 |  0.000 |  0.017 |  0.042 |
+| CADEvolve-rl1 (kulibinai)        |    600 |   165.80 |   0.08654 |  0.023 |  0.125 |  0.197 |
+| Qwen2.5-VL-3B (zero-shot)        |     16 |   499.10 |   0.52383 |  0.000 |  0.000 |  0.062 |
+| Cadrille-Q3VL-v3 (50k clean)     |    600 |   118.26 |   0.03679 |  0.082 |  0.255 |  0.382 |
 
-### What this tells us
-- **Cadrille-rl: orientation drift dominates.** 84% of Cadrille's well-formed predictions are correct shape with the wrong orientation. The naive IoU 0.039 → 0.068 (+73% relative) is large compared to CADEvolve's much smaller relative gain (+24% relative). On this diversified test track, Cadrille is mostly losing geometry to choice of `base_plane` / axis convention, not to incorrect part topology.
-- **CADEvolve-rl1: shape and orientation usually align.** 50% rotation-win rate means half the time identity already wins, the other half a 90° rotation snaps a slightly-mis-oriented model into place for a small score boost. The official 8-view input with axis-encoded green channel is doing the heavy lifting here.
-- **Qwen2.5-VL-3B zero-shot: not a useful baseline number from 17 successes.** Useful as a "VLM has no idea what CadQuery is" floor.
+## 4a. Out-of-distribution: Deepcad (300 samples, seed=42)
 
----
+| model                            |    n |   exec | mean IoU |   mean CD |
+|----------------------------------|------|--------|----------|-----------|
+| Cadrille-rl (filapro)            |  300 |  59.7% |   0.1396 |  0.317448 |
+| CADEvolve-rl1 (kulibinai)        |  300 |  74.7% |   0.1433 |  0.482483 |
+| Qwen2.5-VL-3B (zero-shot)        |  300 |  21.7% |   0.1706 |  0.212922 |
+| Cadrille-Q3VL-v3 (50k clean)     |  300 |  95.7% |   0.7802 |  0.010317 |
 
-## Methodology
+## 4b. Out-of-distribution: Fusion360 (300 samples, seed=42)
 
-1. **Single-attempt eval.** Greedy decoding, `do_sample=False`, `max_new_tokens=768` (1024 for Qwen). One prediction per sample.
-2. **Cadrille input** = `composite_png` (the dataset's GT render), point-cloud branch fed via the existing `Cadrille.collate` path with `n_points=256`.
-3. **CADEvolve input** = `gt_code` exec → STL → 8-view 476×952 collage rendered by `experiments/cadevolve/render.py` (matplotlib-coloured by the per-view depth axis). Falls back to `composite_png` only if the 8-view render fails.
-4. **Qwen2.5-VL-3B input** = `composite_png` 268×268 + a strict CadQuery-only prompt (no example geometry to copy). Output stripped of markdown fences before scoring.
-5. **Scoring** for both naive IoU and Chamfer Distance: bounding box → `[-1, 1]^3` normalisation, trimesh boolean intersection for IoU (`common.metrics.compute_iou`), 8192-sample bidirectional L2 chamfer (`compute_cd`).
-6. **IoU-24:** same scoring pipeline, but pred_mesh is rotated through all 24 cube symmetries (signed axis-permutations with det=+1) and the maximum is kept. Early-stop at IoU ≥ 0.95.
+| model                            |    n |   exec | mean IoU |   mean CD |
+|----------------------------------|------|--------|----------|-----------|
+| Cadrille-rl (filapro)            |  300 |  60.0% |   0.1472 |  0.283255 |
+| CADEvolve-rl1 (kulibinai)        |  300 |  70.7% |   0.0946 |  0.585575 |
+| Qwen2.5-VL-3B (zero-shot)        |  300 |  25.3% |   0.1388 |  0.301565 |
+| Cadrille-Q3VL-v3 (50k clean)     |  300 |  90.7% |   0.6843 |  0.017836 |
 
 ---
 
@@ -65,28 +72,47 @@ For each prediction, we tried all 24 axis-aligned rotations of `pred_mesh` and k
 
 ```
 eval_outputs/cad_bench_722/
-  cadevolve_rl1/         metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
-  cadrille_rl/           metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
-  qwen25vl_3b_zs/        metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
-  summary.json
-  summary_iou_24.json
+  cadrille_rl/      metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
+  cadevolve_rl1/    metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
+  qwen25vl_3b_zs/   metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
+  cadrille_qwen3vl_v3/  metadata.jsonl  metadata_24.jsonl  720 × <stem>.py
+  summary.json                  — model-level IoU/CD
+  summary_iou_24.json           — IoU-24 rescue summary
+  distribution_metrics.json     — FID / KID / CLIP R-Precision
+  metrics_per_case_full.json    — per-case Fs / DINO / LPIPS / SSIM / PSNR
+  iou_vs_iou24/{report.md, scatter.png, histogram.png, rotation_dist.png}
+  full_case_grids/cases_NNNN-NNNN.png × 15  — visual grid, 4 model columns
+  RESULTS.md                    — this file
+eval_outputs/deepcad_n300/<model>/metadata.jsonl   — OOD sample
+eval_outputs/fusion360_n300/<model>/metadata.jsonl — OOD sample
 ```
-
-`metadata.jsonl` schema (one line per sample): `stem, family, difficulty, base_plane, split, feature_tags, feature_count, code_len, error_type, iou, cd`. `metadata_24.jsonl` adds `iou_24`, `rot_idx` (0 = identity, 1–23 = the 24 rotations), and `iou_recheck`.
 
 ## How to reproduce
 
 ```bash
-# Three baselines + Discord summary
 set -a; source .env; eval "$(grep '^export DISCORD' ~/.bashrc)"; set +a
-nohup bash scripts/eval_cad_bench_722.sh > logs/eval_cad_bench_722.log 2>&1 &
 
-# Rotation-invariant rescore on the resulting metadata
-nohup bash scripts/run_rescore_iou_24.sh > logs/rescore_iou_24.log 2>&1 &
+# 1. cad_bench_722 (greedy, all 4 models — already wired in eval/bench.py)
+bash scripts/eval_cad_bench_722.sh
+
+# 2. IoU-24 rotation rescore on the resulting metadata
+bash scripts/run_rescore_iou_24.sh
+
+# 3. Extended per-case metrics (F-score / DINO / LPIPS / SSIM)
+uv run python research/3d_similarity/compute_full_metrics.py
+
+# 4. Distribution-level (FID / KID / CLIP R-Precision)
+uv run python research/3d_similarity/score_distribution.py
+
+# 5. IoU vs IoU-24 analysis (figures + report.md)
+uv run python research/3d_similarity/analyze_iou_vs_iou24.py
+
+# 6. Full 720-case visual grid (15 PNG pages)
+uv run python research/3d_similarity/build_full_grid.py
+
+# 7. OOD: DeepCAD + Fusion360 sampled n=300 each
+bash scripts/run_stl_eval_all.sh
+
+# 8. Rebuild this markdown
+uv run python scripts/analysis/build_summary_md.py
 ```
-
-## Caveats
-
-- The exec-failure mass (Cadrille 33%, Qwen 98%) is excluded from mean-IoU figures — these are conditional-on-exec scores. A complete picture would multiply by exec rate.
-- `cad_bench_722` is the diversified split — heavy substitution and synthesised stems put it well outside Cadrille's training distribution. Headline numbers are not directly comparable to numbers reported on the original BenchCAD benchmark.
-- Qwen2.5-VL-3B is purely zero-shot. A single-shot or few-shot prompt with one or two CadQuery examples would likely push exec rate well above 2%, but that is not the comparison we ran.

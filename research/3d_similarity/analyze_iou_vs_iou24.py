@@ -39,14 +39,16 @@ EVAL_ROOT = REPO / 'eval_outputs' / 'cad_bench_722'
 OUT_DIR   = EVAL_ROOT / 'iou_vs_iou24'
 
 MODELS = [
-    ('cadrille_rl',     'Cadrille-rl'),
-    ('cadevolve_rl1',   'CADEvolve-rl1'),
-    ('qwen25vl_3b_zs',  'Qwen2.5-VL-3B-zs'),
+    ('cadrille_rl',         'Cadrille-rl'),
+    ('cadevolve_rl1',       'CADEvolve-rl1'),
+    ('qwen25vl_3b_zs',      'Qwen2.5-VL-3B-zs'),
+    ('cadrille_qwen3vl_v3', 'Cadrille-Q3VL-v3 (50k)'),
 ]
 MODEL_COLORS = {
-    'cadrille_rl':    '#4C72B0',
-    'cadevolve_rl1':  '#55A868',
-    'qwen25vl_3b_zs': '#C44E52',
+    'cadrille_rl':         '#4C72B0',
+    'cadevolve_rl1':       '#55A868',
+    'qwen25vl_3b_zs':      '#C44E52',
+    'cadrille_qwen3vl_v3': '#8172B2',
 }
 
 
@@ -98,7 +100,7 @@ def render_figures(per_model: dict[str, list[dict]]) -> dict[str, Path]:
     out_paths: dict[str, Path] = {}
 
     # --- Scatter: iou (x) vs iou_24 (y), 1 panel per model ---
-    fig, axes = plt.subplots(1, len(MODELS), figsize=(15, 5), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, len(MODELS), figsize=(20, 5), sharex=True, sharey=True)
     for ax, (slug, label) in zip(axes, MODELS):
         rows = per_model[slug]
         x = np.asarray([r['iou']    for r in rows])
@@ -127,7 +129,7 @@ def render_figures(per_model: dict[str, list[dict]]) -> dict[str, Path]:
     out_paths['scatter'] = p
 
     # --- Histogram: distribution of iou vs iou_24 per model ---
-    fig, axes = plt.subplots(1, len(MODELS), figsize=(15, 4.5), sharey=True)
+    fig, axes = plt.subplots(1, len(MODELS), figsize=(20, 4.5), sharey=True)
     bins = np.linspace(0, 1, 31)
     for ax, (slug, label) in zip(axes, MODELS):
         rows = per_model[slug]
@@ -149,7 +151,7 @@ def render_figures(per_model: dict[str, list[dict]]) -> dict[str, Path]:
     out_paths['histogram'] = p
 
     # --- Rotation idx winning distribution ---
-    fig, axes = plt.subplots(1, len(MODELS), figsize=(15, 4), sharey=True)
+    fig, axes = plt.subplots(1, len(MODELS), figsize=(20, 4), sharey=True)
     for ax, (slug, label) in zip(axes, MODELS):
         rows = per_model[slug]
         rots = [r.get('rot_idx', -1) for r in rows if r.get('rot_idx', -1) >= 0]

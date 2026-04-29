@@ -41,9 +41,10 @@ OUT_DIR   = EVAL_ROOT / 'full_case_grids'
 RENDER_CACHE = Path('/tmp/cad_bench_722_renders')   # PNG bytes by f'{slug}__{stem}.png'
 
 MODELS = [
-    ('cadrille_rl',     'Cadrille-rl'),
-    ('cadevolve_rl1',   'CADEvolve-rl1'),
-    ('qwen25vl_3b_zs',  'Qwen-zs'),
+    ('cadrille_rl',         'Cadrille-rl'),
+    ('cadevolve_rl1',       'CADEvolve-rl1'),
+    ('qwen25vl_3b_zs',      'Qwen-zs'),
+    ('cadrille_qwen3vl_v3', 'Cadrille-Q3VL-v3'),
 ]
 
 SIDE     = 268    # cell pixel size (square)
@@ -185,37 +186,52 @@ def number_cell(idx: int, total: int, stem: str, family: str, difficulty: str,
     return img
 
 
+def _fmt(v, spec='{:.3f}', na='—'):
+    return spec.format(v) if v is not None else na
+
+
 def scores_cell(model_records: dict, width: int, height: int):
-    """Right-side score column. model_records[slug] = {'iou','cd','iou_24',...}"""
+    """Right-side score column. model_records[slug] = {iou, cd, iou_24,
+    fscore_05?, dino_cos?, lpips?, ssim?, psnr?, error_type}.
+
+    When the extended fields are present (set by metrics_per_case_full.json),
+    we render two compact lines per model: IoU/IoU-24/CD and Fs/DINO/LPIPS/SSIM.
+    Otherwise we fall back to the older two-line IoU/CD layout.
+    """
     from PIL import Image, ImageDraw
     img = Image.new('RGB', (width, height), color=(15, 15, 15))
     d = ImageDraw.Draw(img)
     f_label = _font(11, bold=True)
     f_val   = _font(11)
-    # Per-model row
     row_h = (height - 16) // len(MODELS)
     for mi, (slug, label) in enumerate(MODELS):
         y0 = 8 + mi * row_h
         rec = model_records.get(slug, {})
         et  = rec.get('error_type', 'missing')
-        # color band per model
         band_color = (50, 70, 50) if et == 'success' else (60, 40, 40)
         d.rectangle([2, y0, width - 2, y0 + row_h - 4], fill=band_color)
         d.text((6, y0 + 2), label, fill=(225, 225, 225), font=f_label)
         if et != 'success':
             d.text((6, y0 + 16), f'{et}', fill=(220, 150, 150), font=f_val)
             continue
-        # IoU / IoU-24 / CD lines
-        iou    = rec.get('iou')
-        iou24  = rec.get('iou_24')
-        rotidx = rec.get('rot_idx', -1)
-        cd     = rec.get('cd')
-        line1 = f'IoU={iou:.3f}' if iou is not None else 'IoU=—'
-        if iou24 is not None:
-            line1 += f'  IoU24={iou24:.3f} (r{rotidx})'
-        line2 = f'CD={cd:.4f}' if cd is not None else 'CD=—'
-        d.text((6, y0 + 16), line1, fill=(225, 225, 225), font=f_val)
-        d.text((6, y0 + 30), line2, fill=(180, 180, 200), font=f_val)
+        # Line 1: geometry (IoU / IoU-24 / CD)
+        line1_parts = [f'IoU={_fmt(rec.get("iou"))}']
+        if rec.get('iou_24') is not None:
+            line1_parts.append(
+                f'IoU24={_fmt(rec["iou_24"])} (r{rec.get("rot_idx", -1)})')
+        if rec.get('cd') is not None:
+            line1_parts.append(f'CD={_fmt(rec["cd"], "{:.4f}")}')
+        d.text((6, y0 + 16), '  '.join(line1_parts),
+               fill=(225, 225, 225), font=f_val)
+        # Line 2: visual / perceptual (Fs / DINO / LPIPS / SSIM)
+        if any(k in rec for k in ('fscore_05', 'dino_cos', 'lpips', 'ssim')):
+            line2_parts = []
+            if 'fscore_05' in rec: line2_parts.append(f'Fs={_fmt(rec["fscore_05"])}')
+            if 'dino_cos'  in rec: line2_parts.append(f'DINO={_fmt(rec["dino_cos"])}')
+            if 'lpips'     in rec: line2_parts.append(f'LP={_fmt(rec["lpips"])}')
+            if 'ssim'      in rec: line2_parts.append(f'SSIM={_fmt(rec["ssim"])}')
+            d.text((6, y0 + 30), '  '.join(line2_parts),
+                   fill=(180, 200, 180), font=f_val)
     return img
 
 
@@ -308,6 +324,23 @@ def main() -> None:
         metas[slug] = merged
         print(f'  {slug}: {len(merged)} samples ({len(d24)} with iou_24)', flush=True)
 
+    # Optional: merge in the extended per-case metrics (Fs / DINO / LPIPS / SSIM
+    # / PSNR) from research/3d_similarity/compute_full_metrics.py output.
+    full_metrics_path = EVAL_ROOT / 'metrics_per_case_full.json'
+    if full_metrics_path.exists():
+        full = json.loads(full_metrics_path.read_text())
+        n_merged = 0
+        for stem, d in full.get('cases', {}).items():
+            for slug, rec in d.get('models', {}).items():
+                if slug not in metas: continue
+                if stem not in metas[slug]: continue
+                for k in ('fscore_05', 'dino_cos', 'lpips', 'ssim', 'psnr'):
+                    if k in rec and rec[k] is not None:
+                        metas[slug][stem][k] = rec[k]
+                        n_merged += 1
+        print(f'  merged {n_merged} extended-metric values from {full_metrics_path.name}',
+              flush=True)
+
     # 2. Build canonical ordered case list (sorted by stem; numbered 1..720)
     all_stems = sorted(set().union(*[set(m.keys()) for m in metas.values()]))
     if args.limit:
@@ -373,7 +406,8 @@ def main() -> None:
 
     chunk_size = (n_cases + args.n_chunks - 1) // args.n_chunks
     row_height = SIDE + LABEL_H
-    page_w = NUM_W + 4 * (SIDE + PAD) + SCORES_W
+    # 1 GT column + len(MODELS) pred columns = (1 + N) image cells per row
+    page_w = NUM_W + (1 + len(MODELS)) * (SIDE + PAD) + SCORES_W
     out_paths = []
 
     for ci in range(args.n_chunks):
