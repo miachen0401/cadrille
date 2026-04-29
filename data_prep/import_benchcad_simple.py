@@ -32,11 +32,11 @@ from __future__ import annotations
 
 import argparse
 import io
+import multiprocessing as mp
 import os
 import sys
 import tempfile
 import time
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -140,10 +140,57 @@ def _process_row(row: dict) -> dict:
     }
 
 
+# Background upload thread pool — render loop submits, never blocks.
+_UPLOAD_POOL = None
+_UPLOAD_FUTURES = []
+_UPLOAD_LOCK = None
+
+
+def _ensure_upload_pool():
+    """Lazy-init upload pool. Single thread is enough — uploads are I/O bound,
+    multiple parallel uploads to same HF repo can collide on git lock anyway."""
+    global _UPLOAD_POOL, _UPLOAD_LOCK
+    if _UPLOAD_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        _UPLOAD_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='hf-upload')
+        _UPLOAD_LOCK = threading.Lock()
+    return _UPLOAD_POOL
+
+
+def _do_upload(fname_local_str, fname_remote, repo_id, commit_message):
+    """Upload single file to HF in background. File stays on disk after upload
+    (local-first, no unlink) for backup + resumability.
+
+    Returns the remote path on success, raises on failure so the run's exit
+    status reflects upload health (silent failures had hidden a missing-shard
+    bug for hours in the past).
+    """
+    from huggingface_hub import HfApi
+    api = HfApi()
+    t0 = time.time()
+    try:
+        api.upload_file(
+            path_or_fileobj=fname_local_str,
+            path_in_repo=fname_remote,
+            repo_id=repo_id,
+            repo_type='dataset',
+            token=os.environ.get('HF_TOKEN'),
+            commit_message=commit_message,
+        )
+        print(f'  [bg-upload] {fname_remote} in {time.time()-t0:.1f}s', flush=True)
+        return fname_remote
+    except Exception as e:
+        print(f'  [bg-upload] FAILED {fname_remote}: {type(e).__name__}: {str(e)[:120]}',
+              flush=True)
+        raise
+
+
 def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry_run):
+    """Write parquet locally (always kept on disk) + queue async HF upload.
+    Render loop never blocks on network I/O."""
     import pyarrow as pa
     import pyarrow.parquet as pq
-    from huggingface_hub import HfApi
 
     fname_local = out_dir / f'train-{shard_idx:05d}-of-{total_shards:05d}.parquet'
     fname_remote = f'{dst_prefix}/train-{shard_idx:05d}-of-{total_shards:05d}.parquet'
@@ -160,21 +207,15 @@ def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry
     })
     pq.write_table(table, str(fname_local), compression='snappy')
     size_mb = fname_local.stat().st_size / 1024 / 1024
-    print(f'  shard {shard_idx + 1}/{total_shards}: {len(rows)} rows, {size_mb:.1f} MB', flush=True)
+    print(f'  shard {shard_idx + 1}/{total_shards}: {len(rows)} rows, '
+          f'{size_mb:.1f} MB → {fname_local}', flush=True)
 
     if not dry_run:
-        api = HfApi()
-        t0 = time.time()
-        api.upload_file(
-            path_or_fileobj=str(fname_local),
-            path_in_repo=fname_remote,
-            repo_id=repo_id,
-            repo_type='dataset',
-            token=os.environ.get('HF_TOKEN'),
-            commit_message=f'phase-F shard {shard_idx + 1}/{total_shards}',
-        )
-        print(f'    uploaded in {time.time()-t0:.1f}s', flush=True)
-    fname_local.unlink()
+        pool = _ensure_upload_pool()
+        future = pool.submit(_do_upload, str(fname_local), fname_remote, repo_id,
+                              f'shard {shard_idx + 1}/{total_shards}')
+        _UPLOAD_FUTURES.append(future)
+    # NOTE: do NOT unlink — local file stays for backup + resumability
 
 
 def main():
@@ -182,6 +223,13 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--src-repo', default='BenchCAD/cad_simple_ops_100k')
     ap.add_argument('--src-prefix', default='data')
+    ap.add_argument('--src-shard-prefix', default='train',
+                    help='Per-shard filename prefix; e.g. cad_simple_ops_100k '
+                         "uses 'train-XXXXX-of-NNNNN.parquet', cad_iso_106 "
+                         "uses 'data-XXXXX-of-NNNNN.parquet'.")
+    ap.add_argument('--rows-per-src-shard', type=int, default=8240,
+                    help='Used only for shard-count estimation; default '
+                         'matches cad_simple_ops_100k (~8240 rows/shard).')
     ap.add_argument('--total-src-shards', type=int, default=12)
     ap.add_argument('--repo-id', default='Hula0401/cad-sft')
     ap.add_argument('--dst-prefix', default='benchcad-simple-100k')
@@ -190,7 +238,12 @@ def main():
     ap.add_argument('--out-dir', default='data/_phase_f_out')
     ap.add_argument('--cache-dir', default='data/_cache_phase_f')
     ap.add_argument('--start-shard', type=int, default=0,
-                    help='Skip first N output shards (resume after crash)')
+                    help='Skip first N output shards (resume after crash). '
+                         'For multi-VM split, set this to where THIS VM starts.')
+    ap.add_argument('--end-shard', type=int, default=None,
+                    help='Stop after writing this many output shards (exclusive). '
+                         'Default = all shards. For multi-VM split, this VM writes '
+                         '[start-shard, end-shard) range only.')
     ap.add_argument('--n', type=int, default=None,
                     help='Process at most N rows total (for smoke test)')
     ap.add_argument('--no-upload', action='store_true')
@@ -209,16 +262,26 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Estimate total output shards
-    rows_per_src_shard = 8240  # observed
+    rows_per_src_shard = args.rows_per_src_shard
     total_src_rows = rows_per_src_shard * args.total_src_shards
     if args.n is not None:
         total_src_rows = min(total_src_rows, args.n)
     total_shards_out = (total_src_rows + args.shard_size - 1) // args.shard_size
     n_skip_for_resume = args.start_shard * args.shard_size
 
+    # Multi-VM split: this VM writes shards [start-shard, end-shard).
+    # Stop dispatching when n_dispatched >= end_shard * shard_size.
+    end_shard = args.end_shard if args.end_shard is not None else total_shards_out
+    end_shard = min(end_shard, total_shards_out)
+    n_stop_at = end_shard * args.shard_size
+    n_to_save_this_vm = n_stop_at - n_skip_for_resume
+
     print(f'workers={args.workers}  shard_size={args.shard_size}  '
-          f'estimated_output_shards={total_shards_out}', flush=True)
-    print(f'(resume: skipping first {n_skip_for_resume} successes for start-shard={args.start_shard})', flush=True)
+          f'total_output_shards={total_shards_out}', flush=True)
+    print(f'(this VM: shards [{args.start_shard}, {end_shard}) = '
+          f'{n_to_save_this_vm} items to save, '
+          f'skip-by-shard for first {n_skip_for_resume} already-uploaded items)',
+          flush=True)
 
     # Stream rows from upstream parquet shards, dispatch to workers, batch into output shards.
     from huggingface_hub import hf_hub_download
@@ -235,16 +298,50 @@ def main():
     t_start = time.time()
     last_log = t_start
 
-    with ProcessPoolExecutor(max_workers=args.workers,
-                              max_tasks_per_child=args.max_tasks_per_child) as pool:
-        in_flight = []
+    # Use multiprocessing.Pool — has `maxtasksperchild` on Python 3.10
+    # (concurrent.futures.ProcessPoolExecutor's `max_tasks_per_child` is 3.11+).
+    pool = mp.Pool(processes=args.workers, maxtasksperchild=args.max_tasks_per_child)
+    try:
+        in_flight = []  # list of AsyncResult
         max_in_flight = 4 * args.workers
 
-        # Iterate over upstream parquet shards lazily
+        # Iterate over upstream parquet shards lazily.
+        # Resume optimisation: instead of render-and-discard for the first
+        # N items in skip range, skip whole src shards that fall entirely
+        # below the skip threshold (don't even download), and partial-skip
+        # the boundary src shard that straddles the threshold.
         for src_shard_i in range(args.total_src_shards):
             if args.n is not None and n_dispatched >= args.n:
                 break
-            src_fname = f'{args.src_prefix}/train-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
+            # Multi-VM split: this VM's range ends at n_stop_at
+            if n_dispatched >= n_stop_at:
+                print(f'[stop] reached end-shard={end_shard} '
+                      f'(n_dispatched={n_dispatched} >= n_stop_at={n_stop_at})', flush=True)
+                break
+
+            rows_processed_before = src_shard_i * args.rows_per_src_shard
+
+            # Whole src shard already past this VM's range → skip download
+            if rows_processed_before >= n_stop_at:
+                break
+
+            # Whole src shard already covered by previous run → skip download.
+            # Clamp `advance` against the actual remaining row count: the final
+            # upstream parquet shard is often shorter than rows_per_src_shard,
+            # and assuming full size here corrupts resume bookkeeping (resume
+            # state would skip past rows that don't exist).
+            if rows_processed_before + args.rows_per_src_shard <= n_skip_for_resume:
+                advance = min(args.rows_per_src_shard,
+                              total_src_rows - rows_processed_before)
+                n_success += advance
+                n_dispatched += advance
+                skip_remaining = max(0, skip_remaining - advance)
+                print(f'[src shard {src_shard_i + 1}/{args.total_src_shards}] '
+                      f'SKIP-WHOLE (rows {rows_processed_before}-{rows_processed_before + advance - 1} '
+                      f'already on HF)', flush=True)
+                continue
+
+            src_fname = f'{args.src_prefix}/{args.src_shard_prefix}-{src_shard_i:05d}-of-{args.total_src_shards:05d}.parquet'
             print(f'[src shard {src_shard_i + 1}/{args.total_src_shards}] downloading {src_fname} ...', flush=True)
             t0 = time.time()
             p = hf_hub_download(args.src_repo, src_fname, repo_type='dataset',
@@ -254,6 +351,23 @@ def main():
             rows = t.to_pylist()
             print(f'  loaded {len(rows)} rows in {time.time()-t0:.1f}s', flush=True)
 
+            # Partial skip: this src shard straddles the skip threshold
+            if rows_processed_before < n_skip_for_resume:
+                partial = n_skip_for_resume - rows_processed_before
+                print(f'  partial-skip first {partial} rows '
+                      f'({rows_processed_before}-{rows_processed_before + partial - 1} already on HF)',
+                      flush=True)
+                n_success += partial
+                n_dispatched += partial
+                skip_remaining = max(0, skip_remaining - partial)
+                rows = rows[partial:]
+
+            # End-shard truncation: this src shard partly past this VM's range
+            rows_remaining_in_vm = n_stop_at - n_dispatched
+            if rows_remaining_in_vm < len(rows):
+                rows = rows[:rows_remaining_in_vm]
+                print(f'  truncate to {len(rows)} rows (end of this VM range)', flush=True)
+
             # Dispatch + drain loop
             row_idx = 0
             while row_idx < len(rows) or in_flight:
@@ -261,20 +375,20 @@ def main():
                 while len(in_flight) < max_in_flight and row_idx < len(rows):
                     if args.n is not None and n_dispatched >= args.n:
                         break
-                    in_flight.append(pool.submit(_process_row, rows[row_idx]))
+                    in_flight.append(pool.apply_async(_process_row, (rows[row_idx],)))
                     row_idx += 1
                     n_dispatched += 1
                 if not in_flight:
                     break
 
-                done = [f for f in in_flight if f.done()]
+                done = [r for r in in_flight if r.ready()]
                 if not done:
                     time.sleep(0.1)
                     continue
-                for fut in done:
-                    in_flight.remove(fut)
+                for r in done:
+                    in_flight.remove(r)
                     try:
-                        result = fut.result(timeout=1.0)
+                        result = r.get(timeout=1.0)
                     except Exception as e:
                         n_error += 1
                         error_kinds['fut_err'] = error_kinds.get('fut_err', 0) + 1
@@ -287,35 +401,41 @@ def main():
                     if skip_remaining > 0:
                         skip_remaining -= 1
                         n_success += 1
-                        continue
-                    successes_buf.append(result)
-                    n_success += 1
+                    else:
+                        successes_buf.append(result)
+                        n_success += 1
 
-                    if len(successes_buf) >= args.shard_size:
-                        _push_shard(successes_buf, shard_idx, total_shards_out,
-                                    args.repo_id, args.dst_prefix, out_dir,
-                                    dry_run=args.no_upload)
-                        successes_buf = []
-                        shard_idx += 1
-                        free = _free_ram_mb()
-                        if free is not None and free < args.ram_floor_mb:
-                            print(f'  !! RAM floor {free} MB < {args.ram_floor_mb} MB — aborting', flush=True)
-                            for f in in_flight: f.cancel()
-                            return
+                        if len(successes_buf) >= args.shard_size:
+                            _push_shard(successes_buf, shard_idx, total_shards_out,
+                                        args.repo_id, args.dst_prefix, out_dir,
+                                        dry_run=args.no_upload)
+                            successes_buf = []
+                            shard_idx += 1
+                            free = _free_ram_mb()
+                            if free is not None and free < args.ram_floor_mb:
+                                print(f'  !! RAM floor {free} MB < {args.ram_floor_mb} MB — aborting', flush=True)
+                                return
 
-                    now = time.time()
-                    if now - last_log > 30:
-                        elapsed = now - t_start
-                        rate = n_success / max(elapsed, 1)
-                        free = _free_ram_mb()
-                        print(f'  progress: success={n_success}  errors={n_error}  '
-                              f'rate={rate:.1f}/s  free_ram={free}MB  in_flight={len(in_flight)}',
-                              flush=True)
-                        last_log = now
+                # Progress log fires every 30s regardless of skip/success/error
+                # so we can see throughput during skip-phase (resume warmup).
+                now = time.time()
+                if now - last_log > 30:
+                    elapsed = now - t_start
+                    rate = n_success / max(elapsed, 1)
+                    free = _free_ram_mb()
+                    phase = 'SKIP' if skip_remaining > 0 else 'SAVE'
+                    print(f'  progress: success={n_success}  errors={n_error}  '
+                          f'phase={phase} skip_left={skip_remaining}  '
+                          f'rate={rate:.1f}/s  free_ram={free}MB  in_flight={len(in_flight)}',
+                          flush=True)
+                    last_log = now
 
             # Cleanup downloaded source shard
             try: Path(p).unlink()
             except Exception: pass
+    finally:
+        pool.close()
+        pool.join()
 
     # Flush remaining buffer
     if successes_buf:
@@ -324,12 +444,38 @@ def main():
         shard_idx += 1
 
     elapsed = time.time() - t_start
-    print(f'\n=== Phase F done ===', flush=True)
+    print(f'\n=== Render done — waiting for background uploads ===', flush=True)
     print(f'  total successes: {n_success}', flush=True)
     print(f'  total errors:    {n_error}  by kind: {error_kinds}', flush=True)
-    print(f'  shards uploaded: {shard_idx} (start_shard={args.start_shard})', flush=True)
-    print(f'  elapsed:         {elapsed:.1f}s ({elapsed/60:.1f} min)', flush=True)
-    print(f'  rate:            {n_success/max(elapsed,1):.2f}/s', flush=True)
+    print(f'  shards rendered: {shard_idx} (start_shard={args.start_shard})', flush=True)
+    print(f'  render elapsed:  {elapsed:.1f}s ({elapsed/60:.1f} min)', flush=True)
+    print(f'  render rate:     {n_success/max(elapsed,1):.2f}/s', flush=True)
+
+    # Wait for all background uploads to finish before exiting. Collect every
+    # failure so we surface aggregate count (one transient HF error shouldn't
+    # tank a 50k-step run, but `=== ALL DONE ===` lying about it is worse).
+    upload_failures: list[tuple[int, str]] = []
+    if _UPLOAD_FUTURES and not args.no_upload:
+        n_pending = sum(1 for f in _UPLOAD_FUTURES if not f.done())
+        print(f'  bg uploads:      {n_pending}/{len(_UPLOAD_FUTURES)} still in flight, waiting ...',
+              flush=True)
+        t_up = time.time()
+        for i, f in enumerate(_UPLOAD_FUTURES):
+            try:
+                f.result()
+            except Exception as e:
+                upload_failures.append((i, f'{type(e).__name__}: {str(e)[:120]}'))
+        if _UPLOAD_POOL is not None:
+            _UPLOAD_POOL.shutdown(wait=True)
+        print(f'  bg uploads done in {time.time() - t_up:.1f}s', flush=True)
+        if upload_failures:
+            print(f'\n=== UPLOAD FAILURES: {len(upload_failures)}/{len(_UPLOAD_FUTURES)} ===')
+            for idx, msg in upload_failures[:20]:
+                print(f'  shard #{idx}: {msg}')
+            print(f'\n=== ALL DONE in {time.time() - t_start:.1f}s '
+                  f'(WITH {len(upload_failures)} UPLOAD FAILURES) ===', flush=True)
+            sys.exit(2)
+    print(f'\n=== ALL DONE in {time.time() - t_start:.1f}s total ===', flush=True)
 
 
 if __name__ == '__main__':

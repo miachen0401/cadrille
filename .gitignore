@@ -47,3 +47,6 @@ DeepCAD/
 uv.lock
 data/analysis/
 notes/
+
+# experiments_log: keep PNGs (analysis plots, sample collages)
+!experiments_log/**/*.png

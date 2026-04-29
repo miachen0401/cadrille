@@ -1,0 +1,26 @@
+step,bucket,modality,op_loss_w,recall,rare_recall,iou,exec_pct,distinct_ops,distinct_codes,n
+0,BenchCAD val,img,0.842,0.075,0.000,0.000,0.0,11,1.00,20
+0,recode20k train,img,0.958,0.080,0.000,,,7,1.00,20
+0,text2cad train,text,1.000,0.000,0.000,,,0,1.00,20
+0,DeepCAD test,img,,,,0.000,0.0,9,1.00,20
+0,Fusion360 test,img,,,,0.000,0.0,6,0.90,20
+1000,BenchCAD val,img,0.498,0.300,0.083,0.196,90.0,13,1.00,20
+1000,recode20k train,img,0.804,0.258,0.000,,,13,0.95,20
+1000,text2cad train,text,0.815,0.631,0.000,,,6,1.00,20
+1000,DeepCAD test,img,,,,0.270,80.0,15,1.00,20
+1000,Fusion360 test,img,,,,0.284,95.0,14,0.95,20
+2000,BenchCAD val,img,0.429,0.320,0.117,0.348,65.0,16,1.00,20
+2000,recode20k train,img,0.872,0.206,0.000,,,16,1.00,20
+2000,text2cad train,text,0.939,0.217,0.000,,,6,1.00,20
+2000,DeepCAD test,img,,,,0.301,80.0,16,1.00,20
+2000,Fusion360 test,img,,,,0.257,85.0,14,0.85,20
+3000,BenchCAD val,img,0.328,0.480,0.167,0.405,95.0,16,1.00,20
+3000,recode20k train,img,0.770,0.362,0.000,,,10,1.00,20
+3000,text2cad train,text,0.785,0.639,0.000,,,7,1.00,20
+3000,DeepCAD test,img,,,,0.326,95.0,14,1.00,20
+3000,Fusion360 test,img,,,,0.381,95.0,15,1.00,20
+4000,BenchCAD val,img,0.313,0.623,0.383,0.356,100.0,17,1.00,20
+4000,recode20k train,img,0.807,0.306,0.000,,,9,1.00,20
+4000,text2cad train,text,0.762,0.640,0.000,,,8,1.00,20
+4000,DeepCAD test,img,,,,0.384,95.0,17,1.00,20
+4000,Fusion360 test,img,,,,0.405,90.0,16,1.00,20

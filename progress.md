@@ -133,3 +133,97 @@ embedded for fast geometry (~30ms STEP→mesh vs ~1s exec).
 | 05:48 | B | abort 11996/80k | 654M | — | 583G | RAM floor breach (worker leak) |
 | 05:50 | B | resume (PID 24442) | 11G | — | 583G | --start-shard 6 --max-tasks-per-child 100 |
 | 06:32 | B | 20772/80k (26%) | 11G | — | 583G | RAM oscillates 11.2-11.5G (recycle works) |
+
+---
+
+# progress — autonomous 8h session 2026-04-26
+
+GPU granted: 8h on A100 80GB. Track per-task progress + key decisions.
+
+## Snapshot — start of session (08:50 UTC)
+
+- Curriculum Qwen3-VL-2B run (PID 2026701, config `curriculum_qwen3vl_2b.yaml`)
+  was at step ~16018/20000, eval just landed at step 16000:
+    | bucket | greedy IoU | max@8 (t=1.0) | pass>0.5 |
+    |---|---:|---:|---:|
+    | BenchCAD val   | 0.523 | 0.566 | 65% |
+    | DeepCAD test   | 0.477 | 0.616 | 60% |
+    | Fusion360 test | 0.556 | 0.652 | 70% |
+- Phase 3 (8:1:1 benchcad:recode:text2cad weights) is **degrading** IoU vs
+  prior phases — train_loss is 0.015, eval_loss 0.457 (overfit).
+- Disk: `/` 87/97 GB (90%), `/ephemeral` 105/738 GB (16%). Working dir for
+  new data goes to `/ephemeral` with symlink at `data/cad-recode-v1.5/`.
+- 28 CPU cores idle (load 1.5).
+
+## 8h plan (decided autonomously)
+
+1. **(in progress)** Wait for curriculum → step 20000 (~30 min remaining)
+2. **(parallel)** Render 100k subset of `filapro/cad-recode-v1.5` to
+   `/ephemeral/data/cad-recode-v1.5/{train,val}` for tomorrow's Option B
+3. **(after curriculum)** T8 final eval sweep on best ckpt + write phase 3
+   verdict to `docs/comparison_2026-04-26.md`
+4. **(after T8)** Launch Option A run — `qwen3vl_2b_recode_30k_clean.yaml`,
+   30k steps, no text2cad, no curriculum, bc:r=1:9
+5. **(end of session)** Summary report + recommendation for Option B launch
+
+## Per-task status
+
+### #41 — Wait for curriculum to step 20000 (in progress)
+- Started curriculum at step 16000+; expected completion at 09:30 UTC
+- Eval at step 14000 / 15000 / 16000 logged. Phase 3 hurts (verdict pending T8).
+
+### #42 — Option B data prep script (DONE)
+- Wrote `data_prep/fetch_cadrecode_full.py` with subcommands: download, render, pkl
+- snapshot_download hit HF 5000-req/5min rate limit — switched to `git clone`
+- Clone of `filapro/cad-recode-v1.5` finished: 981,865 train + 982 val .py
+  files, 4.2 GB on `/ephemeral/data/cad-recode-v1.5/`
+- Render worker validated on a single sample (3.19s cold; ~0.5s warm with 16
+  parallel workers measured at 19.8/s aggregate)
+
+### #46 — Render 100k subset (in progress)
+- Started 16-worker render at ~08:53 UTC, 100k subset
+- Throughput 19.8/s → ETA ~85 min (completion ~10:18 UTC)
+- Output: `{stem}.py` + `{stem}_render.png` + later `train.pkl` manifest
+
+### #43 — T8 final eval sweep (queued, blocked on #41)
+- Once ckpt-20000 lands, fire:
+  ```
+  uv run python -u -m eval.bench_sweep \
+    --ckpt /ephemeral/checkpoints/sft-s20k-lr2e-4-b8a4-img-0425-1929/checkpoint-20000 \
+    --base-model Qwen/Qwen3-VL-2B-Instruct \
+    --backbone qwen3_vl \
+    --datasets benchcad,deepcad,fusion360 \
+    --temps 0,1.0 --n-samples 8 --limit 50 \
+    --out eval_outputs/t8_curriculum_final
+  ```
+- Patched `eval/bench_sweep.py` to accept `--backbone` (was Qwen2-VL hardcoded;
+  any Qwen3-VL ckpt eval would have failed to load)
+
+### #44 — Launch Option A (queued, blocked on #41)
+- Config: `configs/sft/qwen3vl_2b_recode_30k_clean.yaml`
+- Strategy: 30k steps not 100k — at 20k items × 100k steps = 152 epochs
+  (overfit risk); 30k steps = ~45 epochs (still high but tolerable)
+- Real fix is Option B (1M data + 100k steps), but 100k items isn't fully
+  rendered until later in session
+- A100 timing: 30k steps × ~0.6s/step = ~5h total
+
+### #45 — End-of-8h summary (queued, last)
+
+## Key decisions logged
+
+1. **`/home` filling at 90%** → all new data goes to `/ephemeral` via symlinks
+2. **HF rate limit (5000/5min)** kills snapshot_download for 1M files →
+   `git clone` with LFS instead (1 HTTP request total)
+3. **Phase 3 (8:1:1) hurts IoU** → next run drops curriculum entirely
+4. **text2cad saturated at step 1000** (recall=1.0, op_loss=0) → drop from mix
+5. **A100 8h budget too small for 100k steps** (~17h on A100) → reduce target to 30k
+
+## Next-session work (Option B prep)
+
+If 100k subset render finishes tonight, tomorrow:
+- (a) Wire `CadRecode20kDataset` to also accept `cad-recode-v1.5` path
+  (or rename symlink)
+- (b) Re-launch Option A on 100k corpus (5× current data); should reduce
+  overfitting at 30k steps
+- (c) If results encouraging, start the remaining 880k render → full 1M
+  Option B path (~30h CPU)

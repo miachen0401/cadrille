@@ -1,200 +1,245 @@
-# BenchCAD SFT + RL
+# Cadrille — SFT + RL for image → CadQuery
 
-Two-stage training stack for **image / point-cloud → CadQuery code** generation,
-built on Qwen2-VL-2B.
+Two-stage training stack for **image → CadQuery code** generation, built on
+Qwen3-VL-2B with a swappable backbone mixin (Qwen2-VL / Qwen3-VL today;
+Qwen2.5-VL adapter ready).
 
-1. **SFT** — supervised fine-tune Qwen2-VL-2B on a 3-source CAD corpus
-   (BenchCAD + cad-recode-20k + text2cad) to emit CadQuery code from
-   pre-rendered images (or, optionally, point clouds).
+1. **SFT** — supervised fine-tune on a 5-source CAD corpus (~789k items
+   after dedup + drop) to emit CadQuery from pre-rendered 4-view 268×268
+   PNGs. Optional text-conditioning path for `text2cad-bench`.
 2. **RL post-train** — CPPO / DPO with mesh-IoU reward on top of an SFT
-   checkpoint. (Same stack as the cadrille paper, hardened for our data
-   pipeline + eval.)
+   checkpoint (cadrille paper algorithm, hardened for our pipeline).
 
-Online IoU + Failures eval runs every `eval_steps` against fixed subsets of
-BenchCAD val / DeepCAD test / Fusion360 test, logged to W&B alongside
-`eval_loss`. Checkpoints are pushed to a private HF model repo by a
-non-blocking thread on every `save_steps`.
+Online IoU + Failures eval runs every `eval_steps` against fixed subsets
+of BenchCAD val / DeepCAD test / Fusion360 test. Greedy + max@8 (best of
+8 candidates at t=1.0). Logged to W&B alongside `eval_loss`. Checkpoints
+push to a public/private HF model repo by a non-blocking thread on every
+`save_steps`.
+
+> **Where the recipe lives**: the active SFT config is
+> [`configs/sft/big_bench_shell_50k_v3.yaml`](configs/sft/big_bench_shell_50k_v3.yaml).
+> Its header comments (lines 1-38) document mix design + per-source step
+> share. Latest run learnings (data cleaning numbers, trajectory vs prior
+> versions, op_loss interpretation, rendering pitfalls) are in
+> [`docs/learnings_2026-04-29.md`](docs/learnings_2026-04-29.md).
 
 ---
 
 ## Quick Start — From Zero on a Fresh A100/H100 VM
 
-Five commands. Required tokens are documented in `.env.example`:
-`HF_TOKEN` (read), `WANDB_API_KEY`.
+Required tokens (in `.env`):
+- `HF_TOKEN` — Hula0401 read+write (for cad-sft data + ckpt push)
+- `BenchCAD_HF_TOKEN` — only if pushing back to `BenchCAD/*` upstream
+- `WANDB_API_KEY`
+- `DISCORD_WEBHOOK_URL` (optional) — for live eval-result posting
 
 ```bash
 # 1. Clone
-git clone https://github.com/miachen0401/cadrille.git && cd cadrille
+git clone https://github.com/miachen0401/cadrille.git
+cd cadrille
 
 # 2. Credentials
 cp .env.example .env && $EDITOR .env
 
 # 3. Install everything (apt deps, uv venv, torch+cu124, pytorch3d, cadquery,
-#    flash-attn, Open3D source build with headless rendering, all training
-#    + eval data). ~30-50 min wall-clock; idempotent on re-run.
-bash scripts/setup.sh --data
+#    flash-attn, Open3D source build w/ headless rendering, all training data)
+bash scripts/setup.sh --data            # ~30-50 min wall-clock; idempotent
 
-# 4. Reload PATH so 'uv' resolves
+# 4. Reload PATH
 source ~/.local/bin/env 2>/dev/null || source ~/.bashrc
 
-# 5. Train
-set -a; source .env; set +a
-uv run python -m train.sft --config configs/sft/mix_bc4_r20k_t2c.yaml
+# 5. Pre-flight check (catches bad pkl / missing PNGs / stale filter caches
+#    BEFORE the GPU boots up — has saved several launches)
+set -a && source .env && set +a
+uv run python -m scripts.preflight_check \
+    --config configs/sft/big_bench_shell_50k_v3.yaml
+
+# 6. Train v3 (50 k steps, ~25 h on A100)
+nohup uv run python -u -m train.sft \
+    --config configs/sft/big_bench_shell_50k_v3.yaml \
+    > logs/v3_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# 7. (optional) Live Discord posting — fires on every eval landing
+nohup bash scripts/watch_eval_post_discord.sh \
+    "$(ls -t logs/v3_*.log | head -1)" \
+    /ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-<timestamp> \
+    > logs/watch.log 2>&1 &
 ```
 
-For RL training, swap step 3 for `bash scripts/setup.sh --full` (extra
-~4 GB of mined data + reference SFT ckpt), then run
-`uv run python -m train.rl.train --config configs/rl/a100.yaml`.
-
-**Resume / restart**: training configs default to
-`resume_from_checkpoint: latest`, so re-running step 5 picks up the newest
-`checkpoint-<N>/` in the run output dir.
+For RL: `bash scripts/setup.sh --full` then `uv run python -m train.rl.train
+--config configs/rl/a100.yaml`. RL is BLOCKED on SFT IoU ≥ 0.8 on
+DeepCAD/Fusion360 (greedy) — current ckpt is at ~0.6 greedy / 0.68 max@8.
 
 ---
 
 ## Repository layout
 
 ```
-common/              # cross-cutting helpers (model, datasets, mesh I/O, metrics)
-  model.py           # Cadrille (Qwen2-VL-2B + FourierPointEncoder) + collate
+common/              # cross-cutting helpers
+  model.py           # Cadrille mixin (FourierPointEncoder + custom forward)
+                     # works on any *VLForConditionalGeneration backbone
   datasets.py        # CadRecode / Text2CAD / BenchCad / CadRecode20k loaders
   meshio.py          # render_img + MeshDataset
-  metrics.py         # compute_metrics / compute_reward / worker pools
+  metrics.py         # compute_metrics / compute_reward / cq_reward_workers
 
 train/
-  sft/               # SFT training
-    train.py           # entry  →  python -m train.sft
-    online_eval.py     # IoU + Failures callback (mirrors RL eval wandb schema)
-    hf_uploader.py     # background ckpt push to HF model repo
-  rl/                # RL training (CPPO + DPO)
-    train.py           # entry  →  python -m train.rl.train
-    algorithms/{cppo,dpo}.py
-    eval.py eval_passk.py mine.py filter_scores.py config.py dataset.py
+  sft/
+    train.py         # entry  →  python -m train.sft --config <yaml>
+    online_eval.py   # IoU + Failures + max@8 callback
+    hf_uploader.py   # background ckpt push (non-blocking)
+  rl/
+    train.py algorithms/{cppo,dpo}.py  eval.py  mine.py  …
 
-eval/                # offline evaluation
+eval/
   bench_sweep.py     # multi-dataset × multi-temp × max@N IoU sweep
-  bench.py           # legacy single-temp BenchCAD eval
-  passk.py           # pass@k estimator + CLI
-  features.py        # BenchCAD feature_tags preservation
+  passk.py           # pass@k estimator
   pipeline.py runner.py render.py report.py
-  others/            # cadrille paper-original evaluate.py + test.py
 
-data_prep/           # one-time data materializers
-  fetch_benchcad.py      # BenchCAD/cad_bench → STL + composite_png + pkl
-  fetch_cad_sft.py       # Hula0401/cad-sft → cad-recode-20k + text2cad
-  prerender_dataset.py   # mesh → 4-view _render.png
-  rewrite_recode_to_bench.py + verify_recode_rewrite.py + push_bench_to_hf.py
-  …
+data_prep/           # one-time data materializers (HF → local pkl + PNGs)
+  fetch_cad_sft.py             # all 5 v3 SFT sources
+  fetch_benchcad.py            # eval split
+  prerender_dataset.py         # mesh → 4-view _render.png
+  render_benchcad_easy.py      # cadquery → 4-view PNG, parallel + shard-aware
+  merge_benchcad_easy_renders.py + upload_shards_to_hula0401.py
 
 scripts/
-  setup.sh                     one-click installer (--data / --full)
-  mine_and_train.sh            RL data prep + train pipeline
-  pack_datasets.sh             zip + HF-upload mesh datasets
-  run_passk.sh                 pass@k eval with batched ckpt iteration
-  check_env/                   post-install env smoke (torch, open3d, cadquery, …)
-  analysis/                    one-off diagnostics
-    diversity_analysis.py        op-distribution GT vs pred
-    diversity_benchcad_compare.py
-    dataset_op_dist.py           cross-corpus op frequency
-    plot_kl_quadrants.py mining_analysis.py training_dynamics.py …
+  setup.sh                     # one-click installer (--data / --full)
+  preflight_check.py           # MUST run before launching SFT
+  watch_eval_post_discord.sh   # tail log → post IoU + collage to Discord
+  analysis/                    # one-off diagnostics
+    op_distribution_plot.py      # per-source op stats + plots
+    source_grid_render.py        # 100-render grid per training source
+    eval_to_discord.py           # full per-eval Discord post (history table,
+                                 # comparison table, max@8, run lineage, etc)
+    parse_cq.py                  # regex-based op extractor
 
-bench/               # training-throughput bench (not model eval)
-  bench_config.py bench_workers.py
+bench/               # training-throughput benchmarks
+experiments/         # off-main investigations (cadevolve, repair_lora, …)
 
-experiments/         # off-main investigations
-  cadevolve/  repair_lora/  data_prep_cadlib/
-
-configs/sft/         # YAML — bench cad-only / mixes / from-warm-start
+configs/sft/         # YAML configs (one per recipe; v3 is current)
 configs/rl/
-configs/eval/
 
 tests/test_refactor_safety.py   # 81 import + math tests, ~5 s
-docs/                Dockerfile.official, sft_diagnostics_*.md, …
+docs/                # session reports, diagnostics, learnings_<date>.md
 ```
 
 ---
 
 ## Data sources
 
-### Training
+All training data lives under **`Hula0401/cad-sft/<name>/`** on HF and
+mirrors to `data/<name>/`. Use `data_prep/fetch_cad_sft.py` to pull.
 
-| corpus | source | local | size |
-|---|---|---|---|
-| BenchCAD | `BenchCAD/cad_bench` (HF, public) → `data_prep/fetch_benchcad.py` | `data/benchcad/{train,val}/` | 18,167 + 1,973 (`.py`+`.stl`+`_render.png`+metadata) |
-| cad-recode-20k | `Hula0401/cad-sft/cad-recode-20k/*.parquet` → `data_prep/fetch_cad_sft.py` | `data/cad-recode-20k/{train,val}/` | 18,987 + 1,013 (`.py`+`_render.png`) |
-| text2cad | `Hula0401/cad-sft/text2cad/*.{pkl,tar.gz}` → `data_prep/fetch_cad_sft.py` | `data/text2cad/{cadquery/,*.pkl}` | 76,238 train + 6,464 val + 8,035 test (`.py`+description, no images) |
+### v3 training mix (789k items, 60% HQ / 40% bench-stack)
 
-### Evaluation
+| source | items | mode | step % | what it adds | watch out |
+|---|---:|---|---:|---|---|
+| `benchcad` | 11k | img | 2% | BC val anchor — the smallest source but highest BC val leverage (v2 saw +0.16 BC at 50× weight) | tiny op vocab, over-fits if cranked too high |
+| `cad_iso_106` | 122k | img | 23% | only source with non-trivial **fillet** (19% of items) — drives rare-op recall on real parts | family-clustered → must shuffle before render |
+| `benchcad_simple` | 77k | img | 15% | base-plane/workplane diversity, fast clean codes | lowest op-count (median 4) — collapses if too heavy |
+| `text2cad_bench (img)` | 53k | img | 5.5% | extra image variants of t2c codes | overlaps with text variant — pick one mode per sample |
+| `text2cad_bench (text)` | 53k | text | 5.5% | only **text-conditioned** path | descriptions vary in quality |
+| `cad_recode_bench` | 472k | img | **49%** | the workhorse — wide op vocab, primary long-tail signal | 1.65 epochs/item; rare ops still mode-collapse at eval |
 
-| corpus | source | local | size |
-|---|---|---|---|
-| BenchCAD val | local 90/10 hash split of `BenchCAD/cad_bench` | `data/benchcad/val/` | 1,973 |
-| DeepCAD test | `Hula0401/deepCAD_test` | `data/deepcad_test_mesh/` | 8,046 (`.stl`+`_render.png`) |
-| Fusion360 test | `Hula0401/fusion360_test_mesh` | `data/fusion360_test_mesh/` | 1,725 (`.stl`+`_render.png`) |
+Per-source op stats (n=500, seed=42): median ops/code is 4-5 across
+all sources except `cad_recode_20k` (7, NOT in v3). See
+`docs/op_distribution_2026-04-29/` for plots.
+
+**v3 cleaning**: 80% drop on trivial families + code-hash dedup removed
+37% of benchcad / 24% of iso / 29% of t2c — pure compute saved.
+
+### Available but not in v3
+
+- **`benchcad-easy`** — 109k items, 55 shards, render_img 100% on
+  `Hula0401/cad-sft/benchcad-easy/`. Same `simple_*` family as benchcad,
+  10× larger. Likely v4 candidate (+0.03-0.05 BC val expected).
+- **`cad_recode_20k`** — 19k legacy. Has the highest ops/case (median 7)
+  but small; superseded by the 472k `cad_recode_bench` variant.
+
+### Evaluation buckets (held-out)
+
+| bucket | source | size | n_per_eval |
+|---|---|---:|---:|
+| BenchCAD val | local 90/10 split of `BenchCAD/cad_bench` | 1,973 | 50 |
+| **DeepCAD test** | `Hula0401/deepCAD_test` | 8,046 | 50 |
+| **Fusion360 test** | `Hula0401/fusion360_test_mesh` | 1,725 | 50 |
+| recode20k train (probe) | sampled from training corpus | – | 50 |
+
+**The RL gate is greedy IoU ≥ 0.8 on DeepCAD/Fusion360.** Greedy + max@8
+(8 candidates at t=1.0) report every `eval_steps` per bucket.
 
 ---
 
 ## Configs
 
-| config | mix | bs × acc | max_steps | notes |
-|---|---|---|---:|---|
-| `configs/sft/mix_bc_r20k_t2c.yaml` | benchcad : recode20k : text2cad = 2 : 1 : 1 | 6 × 5 = 30 | 10,000 | Default SFT on the 3-source mix. |
-| `configs/sft/mix_bc4_r20k_t2c.yaml` | 4 : 1 : 1 (benchcad-heavy) | 8 × 4 = 32 | 20,000 | Warm-starts from a prior checkpoint via `base_model:` to push op-level vocabulary (`hole/cut/chamfer/...`). |
-| `configs/sft/mix_bc_r20k.yaml` | benchcad + recode20k 1 : 1 (no text2cad) | 4 × 2 | 4,000 | Faster, no long descriptions. |
-| `configs/sft/benchcad_full.yaml` | benchcad only | 4 × 2 | 5,000 | Smoke on a single corpus. |
-| `configs/rl/a100.yaml` | DeepCAD/Fusion360 hard-mined | per paper | 12k+ | RL post-train. |
+| config | mix / weights | total weight | bs × acc | max_steps | notes |
+|---|---|---:|---|---:|---|
+| **`configs/sft/big_bench_shell_50k_v3.yaml`** ← active | bench 11 / iso 122 / simple 77 / t2c-img 29 / t2c-text 29 / recode-bench 257 | 525 | 8 × 4 = 32 | 50,000 | **Current production recipe.** Qwen3-VL-2B from scratch, 60% HQ / 40% bench-stack, equal-per-item within group, n=50 eval, max@8 every 2nd eval. ETA ~25 h on A100. |
+| `configs/sft/big_bench_shell_50k_phase2.yaml` | v2: bench 18 / iso 162 / simple 86 / t2c-bench 94 / recode-bench 175 | 535 | same | 50,000 | Predecessor (no dedup, no 80% drop). Best max@8 0.644/0.650/0.666 @ 27-29k. |
+| `configs/sft/curriculum_qwen3vl_2b.yaml` | 3-phase curriculum | varies | 8 × 4 | 20,000 | Plateaued early; phase-3 (8:1:1) hurt DC. |
+| `configs/sft/qwen3vl_2b_recode_30k_clean.yaml` | recode-only (single source) | – | 8 × 4 | 30,000 | Smoke / single-source baseline. |
+| `configs/sft/smoke.yaml` | minimal | – | 1 × 1 | 100 | CI-style end-to-end check. |
+| `configs/rl/a100.yaml` | DeepCAD/Fusion360 hard-mined | per paper | – | 12k+ | RL post-train (BLOCKED on SFT ≥ 0.8 greedy). |
+
+> All historical configs are kept for reference. See
+> `docs/learnings_2026-04-29.md` for the rationale of each version's mix
+> change.
 
 ---
 
 ## Eval
 
 ```bash
-# Multi-temp, multi-sample sweep on a checkpoint:
+# Multi-temp, multi-sample sweep on a checkpoint
 uv run python -m eval.bench_sweep \
-    --ckpt checkpoints/<run-name>/checkpoint-final \
+    --ckpt /ephemeral/checkpoints/<run>/checkpoint-final \
+    --base-model Qwen/Qwen3-VL-2B-Instruct \
+    --backbone qwen3_vl \
     --datasets benchcad,deepcad,fusion360 \
-    --temps 0,0.4,0.5,0.75,1.0,1.25 \
-    --n-samples 16 --limit 50 --seed 42 \
+    --temps 0,0.4,0.75,1.0 \
+    --n-samples 8 --limit 50 --seed 42 \
     --modality img --batch-size 8 --score-workers 16 \
     --out eval_outputs/sweep_<tag>
 
-# Pass@k:
+# Pass@k
 uv run python -m eval.passk \
-    --checkpoint checkpoints/<run-name>/checkpoint-final \
+    --checkpoint <ckpt> \
     --val-dir data/deepcad_test_mesh \
     --n-samples 5 --k-values 1,5
 
-# Op-distribution diagnostic (no exec, regex-only):
-uv run python -m scripts.analysis.diversity_analysis \
-    --ckpt <ckpt> --n-items 30 --n-samples 8 --temps 0,0.5,1.0 \
-    --out eval_outputs/diversity_<tag>
+# Per-source op-distribution diagnostic (no GPU)
+uv run python -m scripts.analysis.op_distribution_plot
 ```
 
-`scripts/analysis/diversity_benchcad_compare.py` and
-`scripts/analysis/dataset_op_dist.py` widen op-distribution comparisons
-to the full BenchCAD val (20k items) and across all three SFT corpora
-respectively. See `docs/sft_diagnostics_*.md` for what they tend to show
-on under-trained checkpoints.
+Online (during training) eval is automatic; results post to W&B and (if
+configured) Discord. Each eval emits per-bucket greedy IoU + exec rate +
+op_loss + rare_op_recall; every 2nd eval also runs max@8.
 
 ---
 
 ## Tests
 
-```
-uv run pytest tests/test_refactor_safety.py
+```bash
+uv run pytest tests/test_refactor_safety.py    # 81 fast tests, ~5 s
 ```
 
-81 fast tests (~5 s): every package imports + passk math boundary cases.
 `tests/test_iou.py / test_pipeline.py / test_cppo_step.py` cover
-GPU+ckpt-bound paths and run after substantial training-loop changes.
+GPU+ckpt-bound paths and should run after substantial training-loop changes.
 
 ---
 
 ## Acknowledgments
 
-Built on [cadrille (ICLR 2026)](https://arxiv.org/abs/2505.22914) — Qwen2-VL-2B
-backbone + point-cloud encoder + CPPO algorithm. Our additions are the data
-pipeline (BenchCAD + cad-sft materializers, CadRecode20k loader, weighted +
-length-grouped sampler), the eval tooling (multi-temp sweep, feature_recall,
-op-distribution diagnostics), and the training infra (online IoU eval
-callback, non-blocking HF ckpt uploader, auto-resume).
+Built on [cadrille (ICLR 2026)](https://arxiv.org/abs/2505.22914) — base
+VL backbone + FourierPointEncoder + CPPO algorithm. Our additions:
+
+- 5-source SFT data pipeline with cleaning (dedup + family-drop)
+- Backbone-agnostic Cadrille mixin (Qwen2 / Qwen3 / Qwen2.5)
+- `online_eval.py` IoU + max@8 callback
+- Non-blocking HF ckpt uploader
+- Discord live-eval poster with comparison + history tables
+- BenchCAD/benchcad-easy renderer (cadquery → 4-view 268×268)
+- Multi-VM render orchestration (shard-aware, family-shuffle, looser
+  tessellation tolerance)
+
+License: see upstream cadrille.
