@@ -298,6 +298,14 @@ def fetch_cad_iso_106(out_root: Path, val_frac: float = 0.05) -> None:
                                      'cad-iso-106', val_frac)
 
 
+def fetch_benchcad_easy(out_root: Path, val_frac: float = 0.05) -> None:
+    """BenchCAD/benchcad-easy (~109k items, 55 shards). Same `simple_*`
+    family taxonomy as benchcad/benchcad-simple but ~10× the size of
+    benchcad. Materialised this session via cadquery → 4-view 268×268 PNG."""
+    return _fetch_bench_shell_subset(out_root, 'benchcad-easy',
+                                     'benchcad-easy', val_frac)
+
+
 def fetch_text2cad_bench(out_root: Path) -> None:
     """Download text2cad-bench {train,val,test}.pkl.
 
@@ -339,7 +347,7 @@ def main() -> None:
     ap.add_argument('--what', default='all',
                     choices=['recode20k', 'text2cad', 'recode-bench',
                              'text2cad-bench', 'benchcad-simple',
-                             'cad-iso-106',
+                             'cad-iso-106', 'benchcad-easy',
                              'bench-all', 'all'])
     ap.add_argument('--out', default='data')
     ap.add_argument('--val-frac', type=float, default=0.05)
@@ -358,6 +366,8 @@ def main() -> None:
         fetch_benchcad_simple(out_root / 'benchcad-simple', args.val_frac)
     if args.what in ('cad-iso-106', 'bench-all'):
         fetch_cad_iso_106(out_root / 'cad-iso-106', args.val_frac)
+    if args.what in ('benchcad-easy', 'bench-all'):
+        fetch_benchcad_easy(out_root / 'benchcad-easy', args.val_frac)
 
     print('DONE', flush=True)
 
