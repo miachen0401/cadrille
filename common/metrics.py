@@ -43,56 +43,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ---------------------------------------------------------------------------
-# Training worker (subprocess-per-call, unchanged)
+# Training worker (subprocess-per-call)
 # ---------------------------------------------------------------------------
 
-# Worker script embedded as a string; written to a temp file on first use.
-# Runs in a fresh Python interpreter — no CUDA context, no memory leaks.
-_WORKER_SCRIPT = textwrap.dedent('''\
-    """CadQuery mesh executor — spawned by rl/reward.py as a subprocess."""
+# `_WORKER_SCRIPT` runs in a fresh Python interpreter — no CUDA context, no
+# memory leaks. It is intentionally thin: the *metrics* live as top-level
+# functions in this same module (compute_iou / compute_cd / compute_iou_24)
+# and the worker imports them so there is a single source of truth.
+#
+# Build the script as `header_with_repo_path + body` so the body can be a
+# plain triple-string (no f-string {} escaping needed for the algo code).
+_REPO_ROOT_FOR_WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_WORKER_HEADER = textwrap.dedent(f'''\
+    """CadQuery mesh executor — spawned by rl/reward.py as a subprocess.
+
+    Metrics (compute_iou, compute_cd, compute_iou_24) are imported from the
+    parent project's common.metrics module — DO NOT redefine them here.
+    """
     import sys
     import json
+    sys.path.insert(0, {_REPO_ROOT_FOR_WORKER!r})
     import numpy as np
+    from common.metrics import compute_iou, compute_cd, compute_iou_24
 
+''')
 
-    def compute_iou(gt_mesh, pred_mesh):
-        try:
-            intersection_volume = 0
-            for gt_mesh_i in gt_mesh.split():
-                for pred_mesh_i in pred_mesh.split():
-                    intersection = gt_mesh_i.intersection(pred_mesh_i)
-                    volume = intersection.volume if intersection is not None else 0
-                    intersection_volume += volume
-            gt_volume = sum(m.volume for m in gt_mesh.split())
-            pred_volume = sum(m.volume for m in pred_mesh.split())
-            union_volume = gt_volume + pred_volume - intersection_volume
-            assert union_volume > 0
-            return float(intersection_volume / union_volume)
-        except Exception:
-            return None
-
-
-    def compute_cd(gt_mesh, pred_mesh, n_points=8192):
-        """Chamfer Distance via surface point sampling.
-
-        Matches evaluate.py:compute_chamfer_distance() exactly:
-          - 8192 surface samples on each mesh
-          - Bidirectional: mean(d²(pred→gt)) + mean(d²(gt→pred))  ← L2 Chamfer
-        """
-        try:
-            from scipy.spatial import cKDTree
-            pred_pts = pred_mesh.sample(n_points).astype(np.float32)
-            gt_pts   = gt_mesh.sample(n_points).astype(np.float32)
-            tree_gt   = cKDTree(gt_pts)
-            tree_pred = cKDTree(pred_pts)
-            d_pg, _ = tree_gt.query(pred_pts, k=1)
-            d_gp, _ = tree_pred.query(gt_pts, k=1)
-            return float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
-        except Exception:
-            return None
-
-
-    def run_worker(code_str, gt_mesh_path, compute_chamfer=False):
+_WORKER_BODY = textwrap.dedent('''\
+    def run_worker(code_str, gt_mesh_path, compute_chamfer=False, iou_24=False,
+                   iou_24_early_stop=None):
         import io
         import trimesh
         import cadquery as cq  # noqa: F401 (used implicitly via exec)
@@ -133,21 +112,36 @@ _WORKER_SCRIPT = textwrap.dedent('''\
         gt_mesh = transform_real_mesh(trimesh.load_mesh(gt_mesh_path))
         iou = compute_iou(gt_mesh, pred_mesh)
         cd  = compute_cd(gt_mesh, pred_mesh) if compute_chamfer else None
-        return iou, cd
+        iou24, rot_idx = (None, -1)
+        if iou_24:
+            iou24, rot_idx = compute_iou_24(
+                gt_mesh, pred_mesh, early_stop_threshold=iou_24_early_stop)
+        return iou, cd, iou24, rot_idx
 
 
     if __name__ == '__main__':
         payload = json.loads(sys.stdin.read())
         try:
-            iou, cd = run_worker(
+            iou, cd, iou24, rot_idx = run_worker(
                 payload['code_str'],
                 payload['gt_mesh_path'],
-                compute_chamfer=payload.get('compute_chamfer', False))
-            print(json.dumps({'iou': iou, 'cd': cd, 'error': None}))
+                compute_chamfer=payload.get('compute_chamfer', False),
+                iou_24=payload.get('iou_24', False),
+                iou_24_early_stop=payload.get('iou_24_early_stop', None))
+            print(json.dumps({'iou': iou, 'cd': cd,
+                              'iou_24': iou24, 'rot_idx': rot_idx,
+                              'error': None}))
         except Exception as e:
-            print(json.dumps({'iou': None, 'cd': None, 'error': str(e)}))
+            print(json.dumps({'iou': None, 'cd': None,
+                              'iou_24': None, 'rot_idx': -1,
+                              'error': str(e)}))
         sys.stdout.flush()
 ''')
+
+# Final script written to the temp file = header (with sys.path + imports)
+# followed by the body (run_worker + main entry).
+_WORKER_SCRIPT = _WORKER_HEADER + _WORKER_BODY
+
 
 # Module-level cache: written once per process lifetime
 _worker_path: Optional[str] = None
@@ -166,6 +160,45 @@ def _get_worker_path() -> str:
         f.write(_WORKER_SCRIPT)
     _worker_path = path
     return path
+
+
+def _execute_code_in_subprocess_24(
+    code_str: str,
+    gt_mesh_path: str,
+    timeout: float = 300.0,
+    iou_24_early_stop: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
+    """Like `_execute_code_in_subprocess` but also returns rotation-invariant IoU.
+
+    Returns (iou, cd, iou_24, rot_idx). iou_24 is the max volumetric IoU over
+    the 24 cube rotations of pred_mesh; rot_idx ∈ [0, 23] is the winning
+    rotation (0 ≡ identity). Use this for offline rescoring of saved
+    generations where wall-clock matters less than score quality.
+
+    Default timeout is 300s because 24 boolean intersections at ~1-3s each.
+    """
+    payload = json.dumps({
+        'code_str': code_str,
+        'gt_mesh_path': gt_mesh_path,
+        'compute_chamfer': True,
+        'iou_24': True,
+        'iou_24_early_stop': iou_24_early_stop,
+    })
+    global _error_log_count
+    try:
+        proc = subprocess.run(
+            [sys.executable, _get_worker_path()],
+            input=payload, capture_output=True, text=True, timeout=timeout,
+        )
+        if not proc.stdout.strip():
+            return None, None, None, -1
+        data = json.loads(proc.stdout.strip())
+        return (data.get('iou'), data.get('cd'),
+                data.get('iou_24'), data.get('rot_idx', -1))
+    except subprocess.TimeoutExpired:
+        return None, None, None, -1
+    except Exception:
+        return None, None, None, -1
 
 
 def _execute_code_in_subprocess(
@@ -474,34 +507,10 @@ def _eval_worker_run(
         pred_mesh = _transform(pred_mesh)
         gt_mesh   = _transform(trimesh.load_mesh(gt_mesh_path))
 
-        # IoU
-        iou = None
-        try:
-            intersection_volume = 0.0
-            for gt_i in gt_mesh.split():
-                for pred_i in pred_mesh.split():
-                    sect = gt_i.intersection(pred_i)
-                    intersection_volume += sect.volume if sect is not None else 0.0
-            gt_vol   = sum(m.volume for m in gt_mesh.split())
-            pred_vol = sum(m.volume for m in pred_mesh.split())
-            union_vol = gt_vol + pred_vol - intersection_volume
-            if union_vol > 0:
-                iou = float(intersection_volume / union_vol)
-        except Exception:
-            pass
-
-        # Chamfer Distance
-        cd = None
-        if compute_chamfer and iou is not None:
-            try:
-                from scipy.spatial import cKDTree
-                pred_pts = pred_mesh.sample(8192).astype(np.float32)
-                gt_pts   = gt_mesh.sample(8192).astype(np.float32)
-                d_pg, _  = cKDTree(gt_pts).query(pred_pts, k=1)
-                d_gp, _  = cKDTree(pred_pts).query(gt_pts, k=1)
-                cd = float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
-            except Exception:
-                pass
+        # Single source of truth: call the module-level metric implementations
+        # rather than re-inlining the formulas (used to be a third silent copy).
+        iou = compute_iou(gt_mesh, pred_mesh)
+        cd  = compute_cd(gt_mesh, pred_mesh) if (compute_chamfer and iou is not None) else None
 
         signal.alarm(0)
         return iou, cd
@@ -571,8 +580,9 @@ def _execute_in_eval_pool(
 def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
     """Volumetric IoU between two trimesh objects.
 
-    Copied from evaluate.py for use when both meshes are already loaded in
-    the main process (e.g. during evaluation without CUDA).
+    Single source of truth for the IoU formula. The subprocess worker
+    (`_WORKER_SCRIPT`) and the warm-pool worker (`_eval_worker_run`) both
+    call back into this function instead of re-implementing it.
     """
     try:
         intersection_volume = 0
@@ -590,6 +600,111 @@ def compute_iou(gt_mesh, pred_mesh) -> Optional[float]:
         return None
 
 
+def compute_cd(gt_mesh, pred_mesh, n_points: int = 8192) -> Optional[float]:
+    """Bidirectional L2 Chamfer Distance via 8192 surface samples per mesh.
+
+    Single source of truth — both subprocess and warm-pool workers import this
+    rather than re-implementing it. Matches evaluate.py:compute_chamfer_distance.
+    """
+    try:
+        from scipy.spatial import cKDTree
+        pred_pts = pred_mesh.sample(n_points).astype(np.float32)
+        gt_pts   = gt_mesh.sample(n_points).astype(np.float32)
+        tree_gt   = cKDTree(gt_pts)
+        tree_pred = cKDTree(pred_pts)
+        d_pg, _ = tree_gt.query(pred_pts, k=1)
+        d_gp, _ = tree_pred.query(gt_pts, k=1)
+        return float(np.mean(np.square(d_pg)) + np.mean(np.square(d_gp)))
+    except Exception:
+        return None
+
+
+def _rotation_matrices_24() -> List[np.ndarray]:
+    """The 24 rotational symmetries of an axis-aligned cube as 3x3 matrices.
+
+    Equivalent to all signed axis-permutation matrices with determinant +1.
+    Index 0 is always the identity. Cached on first call.
+    """
+    cache = getattr(_rotation_matrices_24, '_cache', None)
+    if cache is not None:
+        return cache
+    from itertools import permutations, product
+    mats: List[np.ndarray] = [np.eye(3)]  # identity first so idx 0 ≡ no rotation
+    seen = {tuple(np.eye(3).flatten())}
+    for perm in permutations(range(3)):
+        for signs in product((1, -1), repeat=3):
+            R = np.zeros((3, 3))
+            for i, p in enumerate(perm):
+                R[i, p] = signs[i]
+            if abs(np.linalg.det(R) - 1.0) >= 1e-6:
+                continue
+            key = tuple(R.flatten())
+            if key in seen:
+                continue
+            seen.add(key)
+            mats.append(R)
+    assert len(mats) == 24, f'expected 24 rotations, got {len(mats)}'
+    _rotation_matrices_24._cache = mats  # type: ignore[attr-defined]
+    return mats
+
+
+def compute_iou_24(
+    gt_mesh,
+    pred_mesh,
+    early_stop_threshold: Optional[float] = None,
+) -> Tuple[Optional[float], int]:
+    """Rotation-invariant IoU under the 24 cube symmetries.
+
+    Tries each of the 24 axis-aligned rotations on pred_mesh and returns the
+    maximum volumetric IoU vs gt_mesh, plus the index of the winning rotation
+    (0 = identity, 1..23 = the 90°/180°/270° axis-permutations + sign flips).
+
+    Use this when the prediction may be a correct shape but rotated by a
+    multiple of 90° on some axis — common for CAD generations whose output
+    base_plane / orientation drifts from GT.
+
+    Both meshes should already be centred at the origin and scaled to a
+    common cube (the existing `transform_real_mesh` normalisation to
+    [-1, 1]^3 satisfies this); rotating around the origin then keeps the
+    mesh inside the same cube.
+
+    Args:
+        early_stop_threshold: optional. If set, abandons the rotation search
+            as soon as some rotation reaches this IoU. THIS IS LOSSY — the
+            returned value is the *first* IoU above the threshold, not the
+            true maximum, and `best_rotation_idx` may be wrong if a later
+            rotation would have scored higher. Default `None` = full search,
+            so the function honours its "max over 24" contract by default;
+            opt in only when you genuinely value wall-clock over correctness
+            (e.g. training reward where the gradient signal of "good enough"
+            is what matters).
+
+    Returns:
+        (best_iou, best_rotation_idx). best_iou is None if every rotation's
+        boolean intersection failed (non-manifold mesh, etc.); idx is -1 in
+        that case.
+    """
+    best_iou: Optional[float] = None
+    best_idx = -1
+    for i, R in enumerate(_rotation_matrices_24()):
+        if i == 0:
+            pred_rot = pred_mesh
+        else:
+            pred_rot = pred_mesh.copy()
+            T = np.eye(4)
+            T[:3, :3] = R
+            pred_rot.apply_transform(T)
+        iou = compute_iou(gt_mesh, pred_rot)
+        if iou is None:
+            continue
+        if best_iou is None or iou > best_iou:
+            best_iou = iou
+            best_idx = i
+            if early_stop_threshold is not None and best_iou >= early_stop_threshold:
+                break
+    return best_iou, best_idx
+
+
 def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> float:
     """Compute IoU-based reward for a single generated code string.
 
@@ -601,6 +716,31 @@ def compute_reward(code_str: str, gt_mesh_path: str, timeout: float = 10.0) -> f
     if float(iou) < 0:
         return 0.0
     return float(iou)
+
+
+def compute_metrics_24(
+    code_str: str,
+    gt_mesh_path: str,
+    timeout: float = 300.0,
+    iou_24_early_stop: Optional[float] = None,
+) -> Tuple[float, Optional[float], Optional[float], int]:
+    """Compute (iou_naive, cd, iou_24, rot_idx) for one sample.
+
+    iou_naive matches `compute_metrics` exactly (no rotation). iou_24 is the
+    max IoU over the 24 axis-aligned rotations of pred_mesh; rot_idx is the
+    winning rotation index (0 ≡ identity). Returned IoU values follow the
+    same convention as compute_metrics: -1.0 on subprocess/exec failure,
+    0.0 on zero-overlap, otherwise the float in [0, 1].
+
+    iou_24_early_stop defaults to None (full search) — see compute_iou_24
+    for the lossy-but-faster opt-in semantics.
+    """
+    iou, cd, iou_24, rot_idx = _execute_code_in_subprocess_24(
+        code_str, gt_mesh_path,
+        timeout=timeout, iou_24_early_stop=iou_24_early_stop)
+    iou_out    = -1.0 if iou    is None else max(0.0, float(iou))
+    iou24_out  = None if iou_24 is None else max(0.0, float(iou_24))
+    return iou_out, cd, iou24_out, rot_idx
 
 
 def compute_metrics(
