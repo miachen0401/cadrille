@@ -79,44 +79,97 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
-def _pred_columns(table) -> list[str]:
-    """Return column names that hold model predictions (heuristic: `cq_*`).
+def _extract_predictions_per_row(table) -> tuple[list[str], list[dict[str, dict[str, str]]]]:
+    """Pull (model_set, [{stem: row_id, model_codes: {model: code}}, ...])
+    from a predictions table.
 
-    Excludes the GT (`gt_code`). The user-supplied schema uses one cq_<model>
-    column per LLM, so this covers the public layout. If a future repo adds
-    predictions under a different naming convention, extend here.
+    Schema v2 (current qixiaoqi/cad_bench_200): one column `cadquery_code`
+    holding a JSON-encoded dict `{model_name: code_str}` per row. We discover
+    model names by scanning the dicts (defensive against rows that omit a
+    model — that's normal, model_set is the union).
+
+    Schema v1 (older): one column per model named `cq_<model_name>`. Kept
+    as fallback so the service works against both layouts.
     """
-    return [c for c in table.column_names
-            if c.startswith('cq_') and c != 'gt_code']
+    cols = table.column_names
+    if 'cadquery_code' in cols:
+        # v2: parse JSON dict from `cadquery_code` per row
+        rows = table.to_pylist()
+        per_row: list[dict] = []
+        model_set: set[str] = set()
+        for r in rows:
+            raw = r.get('cadquery_code')
+            d: dict[str, str] = {}
+            if isinstance(raw, dict):
+                d = {k: str(v) for k, v in raw.items() if v}
+            elif isinstance(raw, str) and raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        d = {k: str(v) for k, v in parsed.items() if v}
+                except Exception:
+                    pass  # malformed row → empty dict, scored as exec failure
+            per_row.append({'stem': r['stem'], 'model_codes': d})
+            model_set.update(d.keys())
+        return sorted(model_set), per_row
+
+    # v1: per-column layout
+    pred_cols = [c for c in cols if c.startswith('cq_') and c != 'gt_code']
+    rows = table.to_pylist()
+    per_row = []
+    model_set = set()
+    for r in rows:
+        d: dict[str, str] = {}
+        for col in pred_cols:
+            v = r.get(col)
+            if v:
+                m = col[3:] if col.startswith('cq_') else col
+                d[m] = str(v)
+                model_set.add(m)
+        per_row.append({'stem': r['stem'], 'model_codes': d})
+    return sorted(model_set), per_row
 
 
-def _gt_template(gt_code: str) -> str:
-    """Wrap GT code into a self-contained subprocess script that writes STL."""
-    return (
-        'import cadquery as cq, sys, trimesh\n'
-        + gt_code
-        + '\n'
-        + ('try: r = result\n'
-           'except NameError: r = show_object_arg if "show_object_arg" in dir() else None\n'
-           'compound = r.val(); v, f = compound.tessellate(0.001, 0.1)\n'
-           'mesh = trimesh.Trimesh([(p.x, p.y, p.z) for p in v], f)\n'
-           'mesh.apply_translation(-(mesh.bounds[0]+mesh.bounds[1])/2.0)\n'
-           'ext = float(max(mesh.extents))\n'
-           'if ext > 1e-7: mesh.apply_scale(2.0/ext)\n'
-           'mesh.export(sys.argv[1])\n')
-    )
+# Use the GT-exec snippet that already works in scripts/analysis/rescore_iou_24.py
+# (same one eval/bench.py uses — produces normalized STL).
+import textwrap as _textwrap
+_GT_TMPL = _textwrap.dedent('''\
+    import sys, io
+    import cadquery as cq
+    import trimesh, numpy as np
+    show_object = lambda *a, **kw: None
+
+    {code}
+
+    _r = locals().get('result') or locals().get('r')
+    if _r is None:
+        raise ValueError('no result/r variable')
+    compound = _r.val()
+    verts, faces = compound.tessellate(0.001, 0.1)
+    mesh = trimesh.Trimesh([(v.x,v.y,v.z) for v in verts], faces)
+    buf = trimesh.exchange.stl.export_stl(mesh)
+    mesh2 = trimesh.load(io.BytesIO(buf), file_type='stl', force='mesh')
+    mesh2.apply_translation(-(mesh2.bounds[0]+mesh2.bounds[1])/2.0)
+    ext = float(np.max(mesh2.extents))
+    if ext > 1e-7:
+        mesh2.apply_scale(2.0/ext)
+    mesh2.export(sys.argv[1])
+''')
+
+_LD = os.environ.get('LD_LIBRARY_PATH', '/workspace/.local/lib')
 
 
 def _exec_gt_to_stl(gt_code: str, out_stl: Path, timeout: float = 60.0) -> bool:
     """Subprocess-exec gt_code, normalize mesh, write STL. True on success."""
-    import subprocess, tempfile
+    import subprocess
     if out_stl.exists() and out_stl.stat().st_size > 100:
         return True
-    script = _gt_template(gt_code)
+    script = _GT_TMPL.format(code=gt_code)
     out_stl.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, 'LD_LIBRARY_PATH': _LD}
     try:
         r = subprocess.run([sys.executable, '-c', script, str(out_stl)],
-                           capture_output=True, timeout=timeout)
+                           capture_output=True, timeout=timeout, env=env)
         return r.returncode == 0 and out_stl.exists() and out_stl.stat().st_size > 100
     except Exception:
         return False
@@ -148,6 +201,21 @@ def _download_parquet(api, repo: str, path_in_repo: str) -> Path:
 
 # ─── Scoring (one prediction at a time, parallel-safe) ────────────────────────
 
+def _normalize_pred_code(code: str) -> str:
+    """Prepend `import cadquery as cq` (and `import math`) if the model omitted them.
+
+    Commercial-LLM predictions frequently emit bare `cq.Workplane(...)` without
+    an import block (the reward worker exec's into a globals dict that has only
+    `show_object`, so missing imports → NameError → counted as exec_fail).
+    Our own SFT models emit codes WITH an import line, so this only adds it
+    when missing — no change for already-correct codes.
+    """
+    if 'import cadquery' in code:
+        return code
+    prefix = 'import cadquery as cq\nimport math\n\n'
+    return prefix + code
+
+
 def _score_one(args: tuple) -> dict:
     """Worker: run compute_metrics_24 for one (model, stem, code) vs cached STL.
 
@@ -155,6 +223,8 @@ def _score_one(args: tuple) -> dict:
     """
     (model, stem, gen_code, gt_stl_path, code_hash,
      timeout, early_stop, sha_short, scored_at) = args
+    # Be lenient about missing imports — see _normalize_pred_code docstring.
+    gen_code = _normalize_pred_code(gen_code) if gen_code else gen_code
     if not gen_code or not gen_code.strip():
         return {
             'sha_short': sha_short, 'model': model, 'stem': stem,
@@ -333,27 +403,25 @@ def score_pass(args, state: dict) -> bool:
     print(f'  GT meshes: {len(gt_stl_paths)} ready, {n_built} newly built, '
           f'{n_failed} failed', flush=True)
 
-    # (4) For each cq_<model> column × each row, score if not already scored
-    pred_cols = _pred_columns(pred_t)
-    print(f'  prediction columns: {pred_cols}', flush=True)
+    # (4) For each (row, model) pair score if not already scored
+    models, per_row = _extract_predictions_per_row(pred_t)
+    print(f'  prediction models discovered: {models}  (rows={len(per_row)})',
+          flush=True)
 
-    pred_rows = pred_t.to_pylist()
     tasks: list[tuple] = []
     scored_at = _now_iso()
     early_stop = args.early_stop
     timeout = args.eval_timeout
-    for col in pred_cols:
-        model = col[3:] if col.startswith('cq_') else col  # cq_gpt4o → gpt4o
-        for row in pred_rows:
-            stem = row['stem']
-            if stem not in gt_stl_paths:
-                continue
-            gen_code = row.get(col)
+    for entry in per_row:
+        stem = entry['stem']
+        if stem not in gt_stl_paths:
+            continue
+        for model, gen_code in entry['model_codes'].items():
             ch = _code_hash(gen_code)
             key = _scored_key(model, stem, ch)
             if key in state['scored'] and not args.force:
                 continue
-            tasks.append((model, stem, gen_code or '', str(gt_stl_paths[stem]),
+            tasks.append((model, stem, gen_code, str(gt_stl_paths[stem]),
                           ch, timeout, early_stop, sha_short, scored_at))
 
     if not tasks:
