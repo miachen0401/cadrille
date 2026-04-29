@@ -385,26 +385,47 @@ _SOURCE_LOADERS = {
 
 
 def _list_train_pyfiles(source: str) -> list[Path]:
-    """Resolve the full list of training-corpus .py files for a source."""
-    if source == 'benchcad':
-        root = Path('data/benchcad')
-        pkl = root / 'train.pkl'
-        if not pkl.exists(): return []
+    """Resolve the full list of training-corpus .py files for a source.
+
+    Supports all v3-era source names. Returns [] for unknown sources or
+    when the local data tree isn't materialized — `_compute_global_op_freqs`
+    handles empty sources gracefully (just shrinks the quota).
+    """
+    # Source → (root_dir, filename_template). Three layouts:
+    #   1. py_path-in-pkl: rows have r['py_path'] joined to root_dir
+    #   2. uid + cadquery/<uid>.py: legacy text2cad-style
+    #   3. uid + base.py inline: ignored here (we count regex hits in code so
+    #      either inline or .py file works; we read whichever is present)
+    layouts = {
+        'benchcad':           ('data/benchcad',           'py_path'),
+        'recode20k':          ('data/cad-recode-20k',     'py_path'),
+        'text2cad':           ('data/text2cad',           'uid'),  # legacy
+        'cad_iso_106':        ('data/cad-iso-106',        'py_path'),
+        'benchcad_simple':    ('data/benchcad-simple',    'py_path'),
+        'text2cad_bench_img': ('data/text2cad-bench',     'uid'),
+        'text2cad_bench_text':('data/text2cad-bench',     'uid'),
+        'text2cad_bench':     ('data/text2cad-bench',     'uid'),  # legacy alias
+        'recode_bench':       ('data/cad-recode-bench',   'py_path'),
+        'recode':             ('data/cad-recode-v1.5',    'py_path'),  # legacy 1M
+    }
+    if source not in layouts:
+        return []
+    root_str, mode = layouts[source]
+    root = Path(root_str)
+    pkl = root / 'train.pkl'
+    if not pkl.exists():
+        return []
+    try:
         rows = pickle.load(pkl.open('rb'))
-        return [root / r['py_path'] for r in rows]
-    if source == 'recode20k':
-        root = Path('data/cad-recode-20k')
-        pkl = root / 'train.pkl'
-        if not pkl.exists(): return []
-        rows = pickle.load(pkl.open('rb'))
-        return [root / r['py_path'] for r in rows]
-    if source == 'text2cad':
-        root = Path('data/text2cad/cadquery')
-        pkl = Path('data/text2cad/train.pkl')
-        if not pkl.exists() or not root.is_dir(): return []
-        rows = pickle.load(pkl.open('rb'))
-        return [root / f'{r["uid"]}.py' for r in rows]
-    return []
+    except Exception:
+        return []
+    if mode == 'py_path':
+        return [root / r['py_path'] for r in rows if r.get('py_path')]
+    # mode == 'uid' → cadquery/{uid}.py layout
+    cq_dir = root / 'cadquery'
+    if not cq_dir.is_dir():
+        return []
+    return [cq_dir / f'{r["uid"]}.py' for r in rows]
 
 
 def _compute_global_op_freqs(mix_weights: dict, n_total: int = 200,
@@ -418,9 +439,17 @@ def _compute_global_op_freqs(mix_weights: dict, n_total: int = 200,
     Returns shape (K,) bound in [0, 1]. Cached to disk keyed on
     (mix_weights, n_total, seed) so re-runs of the same SFT config are instant.
     """
-    # Active sources only (weight > 0); ignore 'recode' alias for legacy keys.
+    # All positive-weight sources contribute. The previous allowlist was
+    # frozen at the v1 era (benchcad/recode20k/text2cad), so v3's expanded
+    # mix (cad_iso_106, benchcad_simple, text2cad_bench_*, recode_bench)
+    # was silently dropped → freqs computed against benchcad-only, which
+    # mis-calibrated -log(P_k) weights and made rare_op_idx benchcad-flavored
+    # (recode20k_train rare_recall was always 1.0 because v3's actual
+    # commonest ops looked rare in benchcad's tiny vocabulary).
+    # _list_train_pyfiles returns [] for sources whose local data is missing
+    # so unknown / not-materialized keys self-skip.
     active = {k: float(v) for k, v in (mix_weights or {}).items()
-              if k in {'benchcad', 'recode20k', 'text2cad'} and float(v) > 0}
+              if float(v) > 0 and _list_train_pyfiles(k)}
     if not active:
         return np.zeros(len(_OPS))
 
