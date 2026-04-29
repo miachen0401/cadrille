@@ -197,7 +197,7 @@ def _render_one(args: tuple) -> tuple[int, int, str]:
     except TimeoutError:
         return case_idx, step, 'timeout'
     except Exception as e:
-        return case_idx, step, f'err'
+        return case_idx, step, f'err: {type(e).__name__}: {str(e)[:60]}'
     finally:
         signal.alarm(0)
 
@@ -225,7 +225,7 @@ def _render_gt(args: tuple) -> tuple[int, str]:
         img.save(png_out)
         return case_idx, 'ok'
     except Exception as e:
-        return case_idx, f'err'
+        return case_idx, f'err: {type(e).__name__}: {str(e)[:60]}'
 
 
 def _iou_one(args: tuple) -> tuple[int, int, float | None]:

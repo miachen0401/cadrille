@@ -160,7 +160,12 @@ def _ensure_upload_pool():
 
 def _do_upload(fname_local_str, fname_remote, repo_id, commit_message):
     """Upload single file to HF in background. File stays on disk after upload
-    (local-first, no unlink) for backup + resumability."""
+    (local-first, no unlink) for backup + resumability.
+
+    Returns the remote path on success, raises on failure so the run's exit
+    status reflects upload health (silent failures had hidden a missing-shard
+    bug for hours in the past).
+    """
     from huggingface_hub import HfApi
     api = HfApi()
     t0 = time.time()
@@ -174,9 +179,11 @@ def _do_upload(fname_local_str, fname_remote, repo_id, commit_message):
             commit_message=commit_message,
         )
         print(f'  [bg-upload] {fname_remote} in {time.time()-t0:.1f}s', flush=True)
+        return fname_remote
     except Exception as e:
         print(f'  [bg-upload] FAILED {fname_remote}: {type(e).__name__}: {str(e)[:120]}',
               flush=True)
+        raise
 
 
 def _push_shard(rows, shard_idx, total_shards, repo_id, dst_prefix, out_dir, dry_run):
@@ -318,9 +325,14 @@ def main():
             if rows_processed_before >= n_stop_at:
                 break
 
-            # Whole src shard already covered by previous run → skip download
+            # Whole src shard already covered by previous run → skip download.
+            # Clamp `advance` against the actual remaining row count: the final
+            # upstream parquet shard is often shorter than rows_per_src_shard,
+            # and assuming full size here corrupts resume bookkeeping (resume
+            # state would skip past rows that don't exist).
             if rows_processed_before + args.rows_per_src_shard <= n_skip_for_resume:
-                advance = args.rows_per_src_shard
+                advance = min(args.rows_per_src_shard,
+                              total_src_rows - rows_processed_before)
                 n_success += advance
                 n_dispatched += advance
                 skip_remaining = max(0, skip_remaining - advance)
@@ -439,17 +451,30 @@ def main():
     print(f'  render elapsed:  {elapsed:.1f}s ({elapsed/60:.1f} min)', flush=True)
     print(f'  render rate:     {n_success/max(elapsed,1):.2f}/s', flush=True)
 
-    # Wait for all background uploads to finish before exiting
+    # Wait for all background uploads to finish before exiting. Collect every
+    # failure so we surface aggregate count (one transient HF error shouldn't
+    # tank a 50k-step run, but `=== ALL DONE ===` lying about it is worse).
+    upload_failures: list[tuple[int, str]] = []
     if _UPLOAD_FUTURES and not args.no_upload:
         n_pending = sum(1 for f in _UPLOAD_FUTURES if not f.done())
         print(f'  bg uploads:      {n_pending}/{len(_UPLOAD_FUTURES)} still in flight, waiting ...',
               flush=True)
         t_up = time.time()
-        for f in _UPLOAD_FUTURES:
-            f.result()
+        for i, f in enumerate(_UPLOAD_FUTURES):
+            try:
+                f.result()
+            except Exception as e:
+                upload_failures.append((i, f'{type(e).__name__}: {str(e)[:120]}'))
         if _UPLOAD_POOL is not None:
             _UPLOAD_POOL.shutdown(wait=True)
         print(f'  bg uploads done in {time.time() - t_up:.1f}s', flush=True)
+        if upload_failures:
+            print(f'\n=== UPLOAD FAILURES: {len(upload_failures)}/{len(_UPLOAD_FUTURES)} ===')
+            for idx, msg in upload_failures[:20]:
+                print(f'  shard #{idx}: {msg}')
+            print(f'\n=== ALL DONE in {time.time() - t_start:.1f}s '
+                  f'(WITH {len(upload_failures)} UPLOAD FAILURES) ===', flush=True)
+            sys.exit(2)
     print(f'\n=== ALL DONE in {time.time() - t_start:.1f}s total ===', flush=True)
 
 

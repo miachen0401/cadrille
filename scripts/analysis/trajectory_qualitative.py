@@ -86,8 +86,12 @@ def load_anchors(seed: int = 4242, n_per_dataset: int = 2) -> list[dict]:
                               ('fusion360_test', 'data/fusion360_test_mesh')]:
         rootp = Path(root_str)
         stls = sorted(rootp.glob('*.stl'))
-        # Deterministic sampled subset
-        idx = rng.integers(0, len(stls), n_per_dataset).tolist()
+        # Deterministic sampled subset, no replacement (matches sister script
+        # trajectory_100case.py — `rng.integers` was sampling with replacement
+        # so two anchors could collide and the report would silently have
+        # fewer distinct cases than n_per_dataset advertised).
+        idx = rng.choice(len(stls), size=min(n_per_dataset, len(stls)),
+                         replace=False).tolist()
         for i in idx:
             stl = stls[i]
             png = stl.with_name(stl.stem + '_render.png')
