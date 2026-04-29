@@ -588,7 +588,9 @@ def _run_max_iou_at_temp(model, processor, examples: list[dict],
                          k: int, temperature: float,
                          eval_batch_size: int, reward_workers: int,
                          max_new_tokens: int, eval_timeout: float,
-                         seed: int = 42) -> dict:
+                         seed: int = 42,
+                         predictions_dir: str | None = None,
+                         global_step: int | None = None) -> dict:
     """Sample K codes per item at `temperature`, return per-bucket max-IoU metrics.
 
     Only runs on examples with `gt_mesh_path` (BenchCAD val + DeepCAD test +
@@ -619,13 +621,22 @@ def _run_max_iou_at_temp(model, processor, examples: list[dict],
             model, processor, examples, k, temperature,
             eval_batch_size, reward_workers, max_new_tokens, eval_timeout,
             iou_items, device,
+            predictions_dir=predictions_dir, global_step=global_step,
         )
 
 
 def _run_max_iou_at_temp_inner(model, processor, examples, k, temperature,
                                eval_batch_size, reward_workers, max_new_tokens,
-                               eval_timeout, iou_items, device):
-    """Sampling+scoring body — split out so the outer can wrap fork_rng."""
+                               eval_timeout, iou_items, device,
+                               predictions_dir: str | None = None,
+                               global_step: int | None = None):
+    """Sampling+scoring body — split out so the outer can wrap fork_rng.
+
+    When `predictions_dir` and `global_step` are passed, also dumps per-case
+    candidate codes + IoUs to `{predictions_dir}/step-{N:06d}.max@K.jsonl`
+    so trajectory collages can later show best-of-K predicted meshes
+    alongside the existing greedy collage.
+    """
     # Build a flat list of (orig_idx, sample_idx, ex) for batched generation.
     work = [(orig, s, ex) for orig, ex in iou_items for s in range(k)]
     codes_by_pair: dict[tuple[int, int], str] = {}
@@ -697,6 +708,45 @@ def _run_max_iou_at_temp_inner(model, processor, examples, k, temperature,
         if max_iou > 0.5: b['pass_05'] += 1
         if max_iou > 0.7: b['pass_07'] += 1
         if not valid:    b['all_fail'] += 1
+
+    # Dump per-case best-of-K + all-K codes/IoUs to JSONL so a downstream
+    # collage builder can render best-of-K predicted meshes per step.
+    # Mirrors the greedy `step-NNNNNN.jsonl` schema, with extra fields:
+    #   {step, modality, bucket, uid, all_codes: [..K], all_ious: [..K],
+    #    best_code, best_iou, best_sample_idx, has_iou, gt_mesh_path?}
+    if predictions_dir is not None and global_step is not None:
+        import json
+        from pathlib import Path
+        Path(predictions_dir).mkdir(parents=True, exist_ok=True)
+        out_path = Path(predictions_dir) / f'step-{global_step:06d}.max@{k}.jsonl'
+        rows = []
+        for orig_idx, ex in iou_items:
+            ious = [pair_iou.get((orig_idx, s), -2.0) for s in range(k)]
+            codes = [codes_by_pair.get((orig_idx, s), '') for s in range(k)]
+            valid_pairs = [(i, iou) for i, iou in enumerate(ious) if iou > -1.0]
+            if valid_pairs:
+                best_idx, best_iou = max(valid_pairs, key=lambda x: x[1])
+                best_code = codes[best_idx]
+            else:
+                best_idx, best_iou, best_code = -1, 0.0, ''
+            rows.append({
+                'step': global_step,
+                'modality': ex.get('_modality', 'img'),
+                'bucket': ex.get('_dataset_label', '?'),
+                'uid': ex.get('file_name', f'idx_{orig_idx}'),
+                'k': k,
+                'temperature': float(temperature),
+                'all_ious': [float(x) if x > -1.0 else None for x in ious],
+                'all_codes': codes,
+                'best_sample_idx': int(best_idx),
+                'best_iou': float(best_iou),
+                'best_code': best_code,
+            })
+        with out_path.open('w') as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + '\n')
+        print(f'[online-eval] wrote {len(rows)} max@{k} predictions to {out_path}',
+              flush=True)
 
     tag = f'@{k} (t={temperature})'
     out = {}
@@ -887,6 +937,8 @@ def run_online_eval(model, processor, examples: list[dict],
                 max_new_tokens=max_new_tokens,
                 eval_timeout=eval_timeout,
                 seed=max_iou_seed,
+                predictions_dir=predictions_dir,
+                global_step=global_step,
             )
             out.update(mi)
             tag = f'@{max_iou_k} (t={max_iou_temperature})'
