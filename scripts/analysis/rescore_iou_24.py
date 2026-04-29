@@ -65,6 +65,14 @@ _LD = os.environ.get('LD_LIBRARY_PATH', '/workspace/.local/lib')
 
 
 def _exec_gt(gt_code: str, timeout: float = 60.0):
+    """Exec GT cadquery code → normalised STL path; returns None on failure.
+
+    On the success path the caller owns the file (and is responsible for
+    deleting it after use). On any failure path (subprocess returncode != 0,
+    too-small output, timeout, exception) we MUST delete the temp file
+    before returning None — otherwise large rescore runs leak a /tmp STL
+    per GT failure and eventually fill the disk.
+    """
     script = _GT_TMPL.format(code=gt_code)
     with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as f:
         stl = f.name
@@ -74,8 +82,11 @@ def _exec_gt(gt_code: str, timeout: float = 60.0):
                            capture_output=True, timeout=timeout, env=env)
         if r.returncode == 0 and Path(stl).stat().st_size > 100:
             return stl
+        # Failure path — clean up the empty / partial temp file
+        Path(stl).unlink(missing_ok=True)
         return None
     except Exception:
+        Path(stl).unlink(missing_ok=True)
         return None
 
 
