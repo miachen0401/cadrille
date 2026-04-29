@@ -558,6 +558,20 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 max_code_len=max_code_len,
                 mode='img')
 
+    # v4 source: BenchCAD/benchcad-easy (~109k items, 55 shards). Same
+    # `simple_*` family taxonomy as benchcad/benchcad-simple but ~10× the
+    # size of benchcad. Re-rendered this session via cadquery → 4-view
+    # 268×268 PNG (looser tessellation tolerance for thumbnails).
+    benchcad_easy_path = os.path.join(data_path, 'benchcad-easy')
+    if os.path.isdir(benchcad_easy_path) and os.path.exists(os.path.join(benchcad_easy_path, 'train.pkl')):
+        if mode != 'pc':
+            sources['benchcad_easy'] = CadRecode20kDataset(
+                root_dir=benchcad_easy_path,
+                split='train',
+                img_size=268,
+                max_code_len=max_code_len,
+                mode='img')
+
     # text2cad-bench available in TWO modes (separate sources, separate weights):
     #   * text2cad_bench_img: image-conditioned (uses png_path, code) via CadRecode20kDataset
     #   * text2cad_bench_text: text-conditioned (uses description, code) via Text2CADDataset
