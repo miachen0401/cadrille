@@ -94,10 +94,44 @@ def _exec_to_stl(code: str, normalize: bool, timeout: float = 60.0):
         Path(stl).unlink(missing_ok=True); return None
 
 
+_PLOTTER_SINGLETON = None
+
+
+def _get_official_plotter():
+    """Lazy-init the official CADEvolve `Plotter` (vendored verbatim from
+    upstream). Reusing one Plotter across calls is required — the official
+    Plotter holds long-lived pyvista plotters that persist between renders."""
+    global _PLOTTER_SINGLETON
+    if _PLOTTER_SINGLETON is None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from cadevolve_visualization_norm import Plotter
+        _PLOTTER_SINGLETON = Plotter()
+    return _PLOTTER_SINGLETON
+
+
 def _render_8view(stl_path: str):
-    """Render an STL file as CADEvolve's 8-view 476×952 collage (PIL Image)."""
-    from experiments.cadevolve.render import render_stl
-    return render_stl(stl_path)
+    """Render an STL file as CADEvolve's 8-view 476×952 collage (PIL Image),
+    using the OFFICIAL Plotter from `cadevolve_visualization_norm.py`.
+
+    The official Plotter expects mesh coords in [0,1]^3 (camera bounds and
+    coordinate→color mapping both rely on that). Our test STLs (DeepCAD,
+    Fusion360, and cad_bench's gt_code-exec output) live in raw cadquery
+    coords. Normalize to a tmp STL first, then render."""
+    import pyvista as pv
+    mesh = pv.read(stl_path)
+    b = mesh.bounds
+    cx, cy, cz = (b[0]+b[1])/2, (b[2]+b[3])/2, (b[4]+b[5])/2
+    ext = max(b[1]-b[0], b[3]-b[2], b[5]-b[4])
+    if ext < 1e-7:
+        ext = 1.0
+    mesh = mesh.translate([-cx, -cy, -cz]).scale(1.0 / ext).translate([0.5, 0.5, 0.5])
+    with tempfile.NamedTemporaryFile(suffix='.stl', delete=False) as f:
+        tmp = f.name
+    try:
+        mesh.save(tmp)
+        return _get_official_plotter().get_img(tmp, None)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _score(gen_code: str, gt_stl_path: str, timeout: float = 32.0) -> dict:
@@ -115,11 +149,14 @@ def main() -> None:
     ap.add_argument('--dataset',  required=True,
                     choices=['deepcad', 'fusion360', 'cad_bench'])
     ap.add_argument('--ckpt',     default='checkpoints/cadevolve-rl1')
-    ap.add_argument('--base-model', default='Qwen/Qwen2-VL-2B-Instruct')
+    ap.add_argument('--base-model', default='Qwen/Qwen2-VL-2B-Instruct',
+                    help='kept for back-compat; processor now loaded from --ckpt to match official')
     ap.add_argument('--n-samples', type=int, default=300)
     ap.add_argument('--seed',      type=int, default=42)
     ap.add_argument('--batch-size', type=int, default=2)
-    ap.add_argument('--max-new-tokens', type=int, default=768)
+    # Official default is 4000 (CADEvolve `inference.py`). Truncating at
+    # 768 silently cuts long programs and was a key cause of our IoU drift.
+    ap.add_argument('--max-new-tokens', type=int, default=4000)
     ap.add_argument('--score-workers',  type=int, default=4)
     ap.add_argument('--out',      default=None,
                     help='Default: eval_outputs/repro_official/<dataset>_n<N>/cadevolve')
@@ -173,11 +210,16 @@ def main() -> None:
         print('  lm_head tied to embed_tokens', flush=True)
     model.eval()
 
+    # Official inference loads processor from THE CHECKPOINT with explicit
+    # resized_width/resized_height (no min_pixels/max_pixels). Loading from
+    # the base model with different size hints was producing a different
+    # vision token grid than the model was trained on → IoU drift.
     processor = AutoProcessor.from_pretrained(
-        args.base_model,
-        min_pixels=200704, max_pixels=1003520 * 4, padding_side='left')
-
-    PROMPT = 'Generate CadQuery Python code for this 3D CAD model shown in multiple views.'
+        args.ckpt,
+        trust_remote_code=True,
+        resized_width=14 * 17 * 2,    # 476
+        resized_height=14 * 17 * 4,   # 952
+        padding_side='left')
 
     # ── Inference loop ──────────────────────────────────────────────────────
     pool = ThreadPoolExecutor(max_workers=args.score_workers)
@@ -225,9 +267,11 @@ def main() -> None:
         if not msgs:
             return
 
-        chat = [[{'role':'user','content':[
-            {'type':'image','image': r['_img']},
-            {'type':'text','text': PROMPT}]}] for r in msgs]
+        # Official message format: image-only, no text prompt.
+        # Adding a text prompt is OOD for the SFT/RL checkpoint and was
+        # the main cause of our IoU drift on this baseline.
+        chat = [[{'role': 'user', 'content': [
+            {'type': 'image', 'image': r['_img']}]}] for r in msgs]
         texts = [processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
                  for m in chat]
         vis, _ = process_vision_info(chat)

@@ -22,7 +22,7 @@ import numpy as np
 
 warnings.filterwarnings("ignore")
 
-from visualization_norm import Plotter # noqa: E402
+from cadevolve_visualization_norm import Plotter # noqa: E402
 
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -122,13 +122,26 @@ def main():
         padding_side="left",
     )
     dtype = torch.bfloat16 if (device.startswith("cuda") and torch.cuda.is_bf16_supported()) else torch.float16 if device.startswith("cuda") else torch.float32
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        args.model_path,
-        torch_dtype=dtype,
-        attn_implementation="flash_attention_2" if device.startswith("cuda") else "eager",
-        trust_remote_code=True,
-    )
+    # transformers 4.50.3 bug workaround: get_text_config returns dict
+    from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig
+    _orig_gtc = Qwen2VLConfig.get_text_config
+    Qwen2VLConfig.get_text_config = lambda self, **kw: self
+    try:
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            args.model_path,
+            torch_dtype=dtype,
+            attn_implementation="sdpa" if device.startswith("cuda") else "eager",
+            trust_remote_code=True,
+        )
+    finally:
+        Qwen2VLConfig.get_text_config = _orig_gtc
     model.eval().to(device)
+
+    # cadevolve-rl1 saves lm_head as tied with embed_tokens (tie_word_embeddings=True),
+    # but transformers 4.50.3 reports lm_head as "newly initialized" — manually tie.
+    if model.lm_head.weight.data_ptr() != model.model.embed_tokens.weight.data_ptr():
+        model.lm_head.weight = model.model.embed_tokens.weight
+        print("  manually tied lm_head <- embed_tokens", flush=True)
 
     eos_token_id = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
     pad_token_id = processor.tokenizer.eos_token_id

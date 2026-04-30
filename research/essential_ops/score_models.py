@@ -44,17 +44,26 @@ from canonical_ops import (
 EVAL_ROOT = REPO / 'eval_outputs' / 'cad_bench_722'
 
 MODELS = [
-    ('cadrille_rl',          'Cadrille-rl (broken 5.x)'),
     ('cadrille_rl_repro',    'Cadrille-rl (paper repro 4.50.3)'),
     ('cadevolve_rl1',        'CADEvolve-rl1'),
     ('qwen25vl_3b_zs',       'Qwen2.5-VL-3B-zs'),
     ('cadrille_qwen3vl_v3',  'Cadrille-Q3VL-v3'),
 ]
-# Override pred dir for the special "_repro" entry (it's stored under
-# eval_outputs/repro_official/cad_bench_722_full/py/, not the standard layout).
+# For each model, where to find pred .py files AND where the matching
+# metadata.jsonl with error_type lives. We use the IoU-highest run per
+# model (paper repro for cadrille_rl, the standard 5.x run for the
+# others which doesn't suffer from the Cadrille-mixin bug).
 MODEL_PRED_DIR = {
     'cadrille_rl_repro': REPO / 'eval_outputs' / 'repro_official' /
                          'cad_bench_722_full' / 'py',
+}
+MODEL_META = {
+    # slug → metadata.jsonl path with `stem` and `error_type` fields
+    'cadrille_rl_repro':   REPO / 'eval_outputs' / 'repro_official' /
+                           'cad_bench_722_full' / 'metadata.jsonl',
+    'cadevolve_rl1':       EVAL_ROOT / 'cadevolve_rl1' / 'metadata.jsonl',
+    'qwen25vl_3b_zs':      EVAL_ROOT / 'qwen25vl_3b_zs' / 'metadata.jsonl',
+    'cadrille_qwen3vl_v3': EVAL_ROOT / 'cadrille_qwen3vl_v3' / 'metadata.jsonl',
 }
 
 
@@ -126,52 +135,135 @@ def main() -> None:
         if not pred_dir.exists():
             print(f'  {label}: dir not found at {pred_dir}, skipping')
             continue
+
+        # Load exec status from metadata.jsonl — only score cases the model
+        # actually produced runnable code for. Without this filter, a model
+        # that hallucinates the text ".revolve(...)" inside a syntactically
+        # broken script trivially passes the regex check; that distorts the
+        # comparison.
+        exec_ok = set()
+        meta_path = MODEL_META.get(slug)
+        if meta_path and meta_path.exists():
+            with open(meta_path) as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                        if r.get('error_type') == 'success':
+                            exec_ok.add(r['stem'])
+                    except Exception:
+                        pass
+        else:
+            print(f'  {label}: no metadata.jsonl at {meta_path}, treating ALL preds as exec_ok')
+            exec_ok = None  # sentinel: don't filter
+
+        # Load per-case IoU from the model's metadata.jsonl so we can apply
+        # an IoU-rescue rule: if a pred reproduces the geometry (IoU ≥
+        # IOU_RESCUE_THR), credit it as essential-passing regardless of op
+        # vocabulary. This catches CADEvolve-style "geometry-right, ops-
+        # different" preds that the strict regex check would otherwise mark
+        # as fails despite being functionally equivalent.
+        IOU_RESCUE_THR = 0.9
+        iou_by_stem = {}
+        if meta_path and meta_path.exists():
+            with open(meta_path) as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                        if r.get('iou') is not None:
+                            iou_by_stem[r['stem']] = r['iou']
+                    except Exception:
+                        pass
+
         n_pass = 0; n_fail = 0; n_na = 0
-        n_no_pred = 0
+        n_pass_strict = 0; n_pass_rescued = 0
+        n_no_pred = 0; n_filtered = 0
         feat_f1s = []
         per_family: dict[str, list[bool]] = defaultdict(list)
-        per_case = []   # for output
+        per_case = []
         for stem, row in by_stem.items():
             py = pred_dir / f'{stem}.py'
             if not py.exists():
                 n_no_pred += 1
                 continue
+            if exec_ok is not None and stem not in exec_ok:
+                n_filtered += 1
+                continue
             gen_code = py.read_text()
             gen_ops = find_ops(gen_code)
             gt_ops  = gt_ops_from_row(row)
-            ep = essential_pass(row['family'], gen_ops)
+            ep_strict = essential_pass(row['family'], gen_ops)
+            iou = iou_by_stem.get(stem)
+            # IoU-rescue: only fires when there IS a family spec (ep_strict
+            # is bool, not None) and the pred is geometrically near-perfect.
+            ep_rescued = (ep_strict is False
+                          and iou is not None
+                          and iou >= IOU_RESCUE_THR)
+            ep = True if ep_rescued else ep_strict
             ff1 = feature_f1(gen_ops, gt_ops)
-            if ep is True:  n_pass += 1; per_family[row['family']].append(True)
-            elif ep is False: n_fail += 1; per_family[row['family']].append(False)
-            else: n_na += 1
+            if ep is True:
+                n_pass += 1
+                per_family[row['family']].append(True)
+                if ep_strict is True: n_pass_strict += 1
+                elif ep_rescued: n_pass_rescued += 1
+            elif ep is False:
+                n_fail += 1; per_family[row['family']].append(False)
+            else:
+                n_na += 1
             feat_f1s.append(ff1)
             per_case.append({'stem': stem, 'family': row['family'],
                              'difficulty': row.get('difficulty'),
                              'gen_ops': sorted(gen_ops),
                              'gt_ops':  sorted(gt_ops),
+                             'iou': iou,
                              'essential_pass': ep,
+                             'essential_pass_strict': ep_strict,
+                             'iou_rescued': ep_rescued,
                              'feature_f1': round(ff1, 4)})
 
         n_app = n_pass + n_fail
+        # Coverage-weighted feature-F1: missing/non-exec cases count as F1=0,
+        # so the score reflects the model's whole-corpus performance, not
+        # just the subset where it happens to exec.
+        feat_f1_cw_sum = sum(feat_f1s)  # exec_ok-only sum; missing cases = 0
         out['models'][slug] = {
             'label':          label,
-            'n_with_pred':    len(per_case),
+            'n_with_pred':    len(per_case),    # = number of exec_ok cases
             'n_no_pred':      n_no_pred,
+            'n_filtered_not_exec': n_filtered,
             'n_pass':         n_pass,
             'n_fail':         n_fail,
             'n_na':           n_na,
-            'pct_essential_pass': (n_pass / n_app) if n_app else None,
-            'mean_feature_f1':    (sum(feat_f1s) / len(feat_f1s)) if feat_f1s else None,
+            # Two views of essential-pass:
+            # pct_essential_pass     — over n_app (apples-to-apples on the
+            #                           subset where the model produced exec
+            #                           code AND family has spec). Suffers
+            #                           from sample-size bias when exec is low.
+            # pct_essential_pass_cw  — n_pass / n_total (coverage-weighted).
+            #                           Models that don't exec get 0 credit.
+            'pct_essential_pass':    (n_pass / n_app) if n_app else None,
+            'pct_essential_pass_cw': n_pass / len(by_stem),
+            'iou_rescue_thr':        IOU_RESCUE_THR,
+            'n_pass_strict':         n_pass_strict,
+            'n_pass_rescued':        n_pass_rescued,
+            'pct_essential_strict':  (n_pass_strict / n_app) if n_app else None,
+            'pct_essential_strict_cw': n_pass_strict / len(by_stem),
+            'mean_feature_f1':       (sum(feat_f1s) / len(feat_f1s)) if feat_f1s else None,
+            'mean_feature_f1_cw':    feat_f1_cw_sum / len(by_stem),
             'per_family_pass_rate': {
                 f: round(sum(b for b in v) / len(v), 4)
                 for f, v in per_family.items() if len(v) >= 4
             },
             'per_case': per_case,
         }
-        print(f'  {label:<22}  n_pred={len(per_case):4}  '
-              f'pass={n_pass:4} fail={n_fail:4} na={n_na:4}  '
-              f'essential_pass={n_pass/n_app*100 if n_app else 0:5.1f}%  '
-              f'mean_F1={sum(feat_f1s)/len(feat_f1s):.3f}',
+        print(f'  {label:<35}  exec_ok={len(per_case):3}  '
+              f'pass={n_pass:3} (strict={n_pass_strict:3}, '
+              f'iou≥{IOU_RESCUE_THR:.2f}-rescued={n_pass_rescued:3})  '
+              f'fail={n_fail:3} na={n_na:3}  '
+              f'ess={n_pass/n_app*100 if n_app else 0:5.1f}% '
+              f'ess_cw={n_pass/len(by_stem)*100:5.2f}% '
+              f'(strict_cw={n_pass_strict/len(by_stem)*100:5.2f}%)  '
+              f'F1={sum(feat_f1s)/len(feat_f1s) if feat_f1s else 0:.3f} '
+              f'F1_cw={feat_f1_cw_sum/len(by_stem):.3f}',
               flush=True)
 
     Path(args.out).write_text(json.dumps(out, indent=2))
@@ -194,19 +286,39 @@ def main() -> None:
              '',
              '## Per-model summary',
              '',
-             f'| {"model":<24} | {"n_pred":>6} | {"essential_pass":>15} | '
-             f'{"feature_f1":>11} |',
-             f'|{"-"*26}|{"-"*8}|{"-"*17}|{"-"*13}|']
+             '`ess` = essential pass over `n_app` (apples-to-apples on '
+             'predictions that exec\'d AND have a family spec). `ess_cw` = '
+             'coverage-weighted: `n_pass / 720` (missing/non-exec count as 0). '
+             '`F1` is exec-only mean; `F1_cw` is coverage-weighted '
+             '(missing → 0).',
+             '',
+             '**IoU-rescue**: a strict pure-regex op-vocabulary check '
+             'fails preds that reproduce GT geometry via primitives '
+             '(`cylinder().cut()` instead of `.hole()`). To avoid penalising '
+             'geometrically-correct preds, `essential_pass` here counts a '
+             'case as passing if EITHER the strict op-vocabulary check '
+             'passes **OR** IoU ≥ 0.9 (geometry essentially matches GT). '
+             'The `(strict)` columns show the pre-rescue numbers for '
+             'reference.',
+             '',
+             f'| {"model":<24} | {"n_pred":>6} | {"ess (rescued)":>20} | '
+             f'{"ess_cw":>8} | {"strict":>10} | {"F1":>6} | {"F1_cw":>6} |',
+             f'|{"-"*26}|{"-"*8}|{"-"*22}|{"-"*10}|{"-"*12}|{"-"*8}|{"-"*8}|']
     for slug, label in MODELS:
         d = out['models'].get(slug)
         if not d: continue
         ep = (f'{d["pct_essential_pass"]*100:.1f}%' if d['pct_essential_pass'] is not None
               else '—')
+        ep_cw = f'{d["pct_essential_pass_cw"]*100:.2f}%'
+        st = (f'{d.get("pct_essential_strict", 0)*100:.1f}%'
+              if d.get('pct_essential_strict') is not None else '—')
         ff = (f'{d["mean_feature_f1"]:.4f}' if d['mean_feature_f1'] is not None
               else '—')
+        ff_cw = f'{d["mean_feature_f1_cw"]:.4f}'
         n_app = d['n_pass'] + d['n_fail']
         lines.append(f'| {label:<24} | {d["n_with_pred"]:>6} | '
-                     f'{ep:>9} ({d["n_pass"]:>3}/{n_app:>3}) | {ff:>11} |')
+                     f'{ep:>9} ({d["n_pass"]:>3}/{n_app:>3}) | '
+                     f'{ep_cw:>8} | {st:>10} | {ff:>6} | {ff_cw:>6} |')
 
     # Per-difficulty breakdown
     lines.extend(['', '## Per-difficulty (essential_pass × feature_f1)', ''])
@@ -261,24 +373,29 @@ def main() -> None:
 
     if args.discord:
         # short Discord summary
-        msg = ['📐 **cad_bench_722 — essential-ops + feature-F1**',
+        msg = ['📐 **cad_bench_722 — essential-ops + feature-F1 (coverage-weighted)**',
                '',
                '```',
-               f'{"model":<24} {"n_pred":>6} {"essential":>10} {"feat_F1":>9}',
-               '-' * 56]
+               f'{"model":<24} {"n_pred":>6} {"ess%":>8} {"ess_cw":>8} '
+               f'{"F1":>6} {"F1_cw":>6}',
+               '-' * 64]
         for slug, label in MODELS:
             d = out['models'].get(slug)
             if not d: continue
             ep = (f'{d["pct_essential_pass"]*100:.1f}%'
                   if d['pct_essential_pass'] is not None else '—')
-            ff = (f'{d["mean_feature_f1"]:.4f}'
+            ep_cw = f'{d["pct_essential_pass_cw"]*100:.2f}%'
+            ff = (f'{d["mean_feature_f1"]:.3f}'
                   if d['mean_feature_f1'] is not None else '—')
-            msg.append(f'{label:<24} {d["n_with_pred"]:>6} {ep:>10} {ff:>9}')
+            ff_cw = f'{d["mean_feature_f1_cw"]:.3f}'
+            msg.append(f'{label:<24} {d["n_with_pred"]:>6} {ep:>8} {ep_cw:>8} '
+                       f'{ff:>6} {ff_cw:>6}')
         msg.append('```')
         msg.append('')
-        msg.append('**essential**: % of cases (with applicable family spec) where '
-                   'the predicted code uses the canonical AND-of-OR-tuples ops. '
-                   '**feat_F1**: F1 over {chamfer, fillet, hole} indicators.')
+        msg.append('**ess**: pass / (pass+fail) — exec-only subset.  '
+                   '**ess_cw**: pass / 720 — coverage-weighted, missing & '
+                   'non-exec count as 0. The latter is fairer for cross-model '
+                   'comparison when exec rates differ.')
         msg.append(f'Full table at `{args.report}`.')
         post_to_discord('\n'.join(msg), attachment=Path(args.report))
 

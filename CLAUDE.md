@@ -29,6 +29,44 @@
 4. Never restart a killed job without user confirmation.
 5. Monitor running jobs every few minutes and report status proactively rather than waiting for the user to ask.
 
+## Mesh rendering — single canonical tool (do not re-invent)
+
+- The canonical renderer for any visualization or grid involving CadQuery
+  output meshes is **`common.meshio.render_img(stl_path)`**. It returns a
+  268×268 4-view RGB PIL image (yellow mesh, dark background). Always use
+  this — never write a pyvista / matplotlib / trimesh substitute.
+- Backed by the headless **open3d** wheel. Two ways to install in the venv:
+  - **Easy**: `uv pip install open3d-cpu==0.18.0` (PyPI, headless on this box).
+    ⚠️ **PyPI `open3d-cpu` segfaults on certain CadQuery-generated meshes**
+    (most often CADEvolve-style sketch+segment+finalize+extrude STLs).
+    When using PyPI open3d-cpu in batch jobs, **always wrap `render_img`
+    in a subprocess** so the parent survives — and fall back to pyvista
+    if the subprocess crashes. Pattern lives in
+    `research/repro_official/build_cadevolve_weak_families.py` (`_render_one`).
+  - **Canonical**: source-build from `scripts/setup.sh` step [4] — pinned to
+    Open3D commit `8e434558a` with `ENABLE_HEADLESS_RENDERING=ON`. Does NOT
+    segfault. Required for production batch rendering. Build takes ~20 min.
+- After every `uv sync`, **verify open3d AND pyvista AND cadquery are still
+  installed** (`uv run python -c "import open3d, pyvista, cadquery"`).
+  `uv sync` rebuilds from `pyproject.toml` and **drops all three** because
+  none of them is pinned there (open3d is source-built; pyvista is a render
+  fallback; cadquery is git-installed). Recovery commands:
+  - **Required** — re-source-build open3d:
+    `bash scripts/setup.sh` (it's idempotent; will skip steps that already pass).
+  - Or pin `open3d-cpu==0.18.0` from PyPI as a stopgap, but **expect SIGSEGV
+    on ~5–10% of CADEvolve-style preds** — see "PyPI segfault" warning below.
+  - `uv pip install pyvista`
+  - `uv pip install 'git+https://github.com/CadQuery/cadquery@e99a15d'` (or whatever
+    commit the project pins; check `pyproject.toml` for the canonical hash).
+- Renders for the canonical eval baselines on cad_bench_722 are cached at
+  `/tmp/cad_bench_722_renders/{slug}__{stem}.png` (or `repro_{slug}__...`
+  for cadrille-rl repro). Reuse by default; wipe + rebuild only when the
+  underlying preds change (e.g. when promoting a v3 run to canonical).
+- For the **eval-time renderer** the *model* uses (CADEvolve's 8-view
+  476×952 colored Plotter), use the official vendored
+  `research/repro_official/cadevolve_visualization_norm.py::Plotter` —
+  do not re-implement. Pre-normalize STL to [0,1]³ before passing in.
+
 ## RL Training Modality — Non-Negotiable Rules
 
 - **`train_modality` must always be `img`** in all RL configs (4080, a100, h100, smoke). Never switch to `pc` mode to work around rendering issues — fix the rendering instead.

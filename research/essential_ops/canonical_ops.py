@@ -40,11 +40,20 @@ OP_PATTERNS: dict[str, str] = {
     "rarray":        r"\.rarray\s*\(",
     "makeTorus":     r"makeTorus\s*\(",
     "sphere":        r"\.(sphere|makeSphere)\s*\(",
-    "cut":           r"\.(cut|cutBlind)\s*\(",
-    "polyline":      r"\.polyline\s*\(",
+    # `cut` also covers BenchCAD-style sketch-subtract: `circle(r, mode='s')`
+    # is the in-sketch carve op, semantically equivalent to a cut.
+    "cut":           r"\.(cut|cutBlind)\s*\(|mode\s*=\s*['\"][s][\"']",
+    # `polyline` also matches a chain of `.segment(...)` calls — the
+    # BenchCAD shell-style sketch primitive. CADEvolve uses this 595x in
+    # 200 sample preds; without this the metric never sees its polyline
+    # equivalent.
+    "polyline":      r"\.polyline\s*\(|\.segment\s*\(",
     "spline":        r"\.spline\s*\(",
     "threePointArc": r"\.threePointArc\s*\(",
-    "Sketch":        r"cq\.Sketch\s*\(|\.placeSketch\s*\(",
+    # `Sketch` covers the class form `cq.Sketch(...)` AND the instance
+    # method form `.sketch()` used in BenchCAD shell style. CADEvolve uses
+    # the lowercase form 185x in 200 sample preds.
+    "Sketch":        r"cq\.Sketch\s*\(|\.placeSketch\s*\(|\.sketch\s*\(",
     "polygon":       r"\.polygon\s*\(",
     "lineTo":        r"\.lineTo\s*\(",
     # feature class (independent — for has_* score, NOT for essentials)
@@ -111,6 +120,13 @@ def find_ops(code: str) -> set[str]:
     if "sweep" in found and has_helix:
         found.add("sweep+helix")
         found.discard("sweep")
+    # Semantic equivalent: `cut(cylinder)` or `cylinder + cut` carves a
+    # through-hole, which is what `.hole()` does. Models like CADEvolve
+    # never use `.hole()` directly — they construct a cylinder and cut it
+    # away. Without this alias the strict op-vocab metric mis-fails them.
+    has_cylinder = bool(re.search(r"\.cylinder\s*\(", code))
+    if has_cylinder and "cut" in found:
+        found.add("hole")
     return found
 
 
