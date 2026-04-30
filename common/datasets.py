@@ -113,7 +113,7 @@ def _compute_lengths(annotations, root_dir, py_path_fn, desc_getter=lambda a: ''
 class CadRecodeDataset(Dataset):
     def __init__(self, root_dir, split, n_points, normalize_std_pc, noise_scale_pc, img_size,
                 normalize_std_img, noise_scale_img, num_imgs, mode, n_samples=None, ext='stl',
-                max_code_len=None):
+                max_code_len=None, pkl_filename=None):
         super().__init__()
         self.root_dir = root_dir
         self.split = split
@@ -127,7 +127,7 @@ class CadRecodeDataset(Dataset):
         self.num_imgs = num_imgs
         self.mode = mode
         if self.split in ['train', 'val']:
-            pkl_path = os.path.join(self.root_dir, f'{self.split}.pkl')
+            pkl_path = os.path.join(self.root_dir, pkl_filename or f'{self.split}.pkl')
             with open(pkl_path, 'rb') as f:
                 self.annotations = pickle.load(f)
             if max_code_len is not None:
@@ -300,7 +300,7 @@ class BenchCadDataset(Dataset):
     def __init__(self, root_dir, split, n_points=256, normalize_std_pc=100,
                  noise_scale_pc=None, img_size=128, normalize_std_img=200,
                  noise_scale_img=None, num_imgs=4, mode='pc_img',
-                 n_samples=None, max_code_len=None):
+                 n_samples=None, max_code_len=None, pkl_filename=None):
         super().__init__()
         self.root_dir = root_dir
         self.split = split
@@ -314,12 +314,15 @@ class BenchCadDataset(Dataset):
         self.mode = mode
         self.n_samples = n_samples
 
-        pkl_path = os.path.join(root_dir, f'{split}.pkl')
+        pkl_path = os.path.join(root_dir, pkl_filename or f'{split}.pkl')
         with open(pkl_path, 'rb') as f:
             self.annotations = pickle.load(f)
         if max_code_len is not None:
+            cache_key = f'benchcad_{split}'
+            if pkl_filename and pkl_filename != f'{split}.pkl':
+                cache_key = f'benchcad_{split}_{pkl_filename.replace(".pkl", "")}'
             self.annotations = _filter_by_code_len(
-                root_dir, f'benchcad_{split}', self.annotations, max_code_len,
+                root_dir, cache_key, self.annotations, max_code_len,
                 lambda item: os.path.join(root_dir, item['py_path']),
             )
         self.lengths = _compute_lengths(
@@ -395,7 +398,7 @@ class CadRecode20kDataset(Dataset):
     """
 
     def __init__(self, root_dir, split, img_size=128, n_samples=None,
-                 max_code_len=None, mode='img', **_unused):
+                 max_code_len=None, mode='img', pkl_filename=None, **_unused):
         super().__init__()
         if mode != 'img':
             raise ValueError(
@@ -406,12 +409,15 @@ class CadRecode20kDataset(Dataset):
         self.img_size = img_size
         self.n_samples = n_samples
 
-        pkl_path = os.path.join(root_dir, f'{split}.pkl')
+        pkl_path = os.path.join(root_dir, pkl_filename or f'{split}.pkl')
         with open(pkl_path, 'rb') as f:
             self.annotations = pickle.load(f)
         if max_code_len is not None:
+            cache_key = f'recode20k_{split}'
+            if pkl_filename and pkl_filename != f'{split}.pkl':
+                cache_key = f'recode20k_{split}_{pkl_filename.replace(".pkl", "")}'
             self.annotations = _filter_by_code_len(
-                root_dir, f'recode20k_{split}', self.annotations, max_code_len,
+                root_dir, cache_key, self.annotations, max_code_len,
                 lambda item: os.path.join(root_dir, item['py_path']),
             )
         self.lengths = _compute_lengths(

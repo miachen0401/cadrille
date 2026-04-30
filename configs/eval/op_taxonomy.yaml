@@ -1,0 +1,111 @@
+# Single source of truth for op taxonomy used in training-time + offline eval.
+#
+# Loaded by:
+#   - train/sft/online_eval._OPS / _RARE_OPS (replaces module-level hardcode)
+#   - scripts/analysis/op_trajectory_metrics.py (offline)
+#   - eval/cadance_score.py (essential_pass + feature_f1)
+#
+# Three categories:
+#   patterns: regex per op-name; gen_code → presence
+#   rare: explicit subset of pattern keys to treat as "rare"
+#   feature: subset for has_feature_f1 (Cadance feature_f1 score)
+#
+# Add new ops here without touching code.
+
+# ─── Recognized op patterns ──────────────────────────────────────────────────
+# Each entry: op_name → regex. Order-independent, applied to gen_code as
+# `re.search(pattern, code)`. ESSENTIAL = recognized by Cadance essentials.
+patterns:
+  # primitives
+  box:           '\.box\b'
+  cylinder:      '\.cylinder\b'
+  sphere:        '\.(sphere|makeSphere)\s*\('
+  makeTorus:     'makeTorus\s*\('
+
+  # 2D sketch
+  circle:        '\.circle\b'
+  rect:          '\.rect\b'
+  polygon:       '\.polygon\b'
+  polyline:      '\.polyline\b'
+  segment:       '\.segment\b'
+  spline:        '\.spline\b'
+  threePointArc: '\.threePointArc\b'
+  arc:           '\.(radiusArc|tangentArc)\b'
+  lineTo:        '\.lineTo\b'
+  moveTo:        '\.moveTo\b'
+  Sketch:        'cq\.Sketch\s*\(|\.placeSketch\s*\('
+
+  # primary CAD ops
+  extrude:       '\.extrude\b'
+  revolve:       '\.revolve\b'
+  loft:          '\.loft\b'
+  shell:         '\.shell\b'
+  taper:         'taper\s*='
+
+  # sweep variants — sweep+helix is order-agnostic detection (sweep AND
+  # makeHelix anywhere). Detected in find_ops() as a special case.
+  sweep:         '\.sweep\b'
+  twistExtrude:  '\.twistExtrude\s*\('
+  helix:         'makeHelix\s*\(|\.helix\s*\('
+
+  # boolean
+  cut:           '\.(cut|cutBlind|cutThruAll)\s*\('
+  union:         '\.union\b'
+  intersect:     '\.intersect\b'
+
+  # holes
+  hole:          '\.hole\b'
+  cbore:         '\.cboreHole\b'
+  csk:           '\.cskHole\b'
+
+  # finishing features
+  fillet:        '\.fillet\b'
+  chamfer:       '\.chamfer\b'
+
+  # arrays / patterns
+  polarArray:    '\.polarArray\s*\('
+  rarray:        '\.rarray\s*\('
+  mirror:        '\.mirror\b'
+
+  # transforms
+  workplane:     '\.workplane\b'
+  transformed:   '\.transformed\b'
+  translate:     '\.translate\b'
+  rotate:        '\.rotate\b'
+
+# ─── Rare-op set ─────────────────────────────────────────────────────────────
+# Explicit list — NOT computed from corpus frequency.
+# Rationale: must be reproducible across training versions (a v4 corpus
+# with more `loft` shouldn't suddenly remove `loft` from "rare").
+#
+# Selection criteria (paper-ready):
+#   1. Distinguishes industrial CAD from toy primitives
+#   2. Appears in <5% of v3 training corpus per spot-check
+#   3. Aligned with Cadance essentials so essential_pass and rare_recall
+#      are consistent
+rare:
+  - sweep         # general curved sweep (pipe_elbow, duct_elbow)
+  - revolve       # axisymmetric (pulley, ball_knob, ...)
+  - loft          # cross-section interp (gears, propeller, knob)
+  - shell         # hollow (enclosure, tray)
+  - twistExtrude  # twisted parts
+  - helix         # springs, threads
+  - taper         # tapered profile
+  - polarArray    # rotational arrays (motor_end_cap)
+  - rarray        # linear arrays (heat_sink, mesh_panel)
+  - mirror        # symmetric construction
+  - fillet        # edge rounding
+  - chamfer       # edge break
+
+# ─── Feature class (Cadance feature_f1) ──────────────────────────────────────
+# Independent of essential check. F1 over presence indicators in gen vs gt.
+feature:
+  - chamfer
+  - fillet
+  - hole
+
+# ─── Essential ops by family ─────────────────────────────────────────────────
+# Empty (= delete this block) means "load from canonical_ops.yaml" once we
+# vendor Cadance's spec. Keep here as forward-compat slot. For now reuse
+# Cadance's spec via `eval/cadance_score.py` directly.
+essential_by_family: {}
