@@ -127,6 +127,17 @@ def find_ops(code: str) -> set[str]:
     has_cylinder = bool(re.search(r"\.cylinder\s*\(", code))
     if has_cylinder and "cut" in found:
         found.add("hole")
+    # Polyline subsumes lineTo: a `.polyline([...])` is literally a chain of
+    # `.lineTo(...)` calls; equivalently, repeated `.segment(p, q)` calls
+    # form a polyline. Either way, the model has expressed line-by-line
+    # path construction, which is what `lineTo` measures.
+    if "polyline" in found:
+        found.add("lineTo")
+    # A closed polyline is a polygon: `.polyline([...]).close()` (or
+    # `.segment(...).segment(...)...close()`) bounds a polygonal region.
+    # When both signals are present, count the result as `polygon`.
+    if "polyline" in found and re.search(r"\.close\s*\(", code):
+        found.add("polygon")
     return found
 
 
