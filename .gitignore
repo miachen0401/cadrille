@@ -50,3 +50,6 @@ notes/
 
 # experiments_log: keep PNGs (analysis plots, sample collages)
 !experiments_log/**/*.png
+# paper figures + docs: keep PNGs
+!paper/figures/*.png
+!docs/paper_figures/*.png
