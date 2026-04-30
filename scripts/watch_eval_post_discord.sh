@@ -32,6 +32,9 @@ while true; do
         for f in "$PRED_DIR"/step-*.jsonl; do
             [ -e "$f" ] || continue
             base=$(basename "$f" .jsonl)             # step-001000
+            # Skip max@8 sample dump files (step-001000.max@8.jsonl) — only
+            # the greedy step-NNNNNN.jsonl drives Discord posts.
+            [[ "$base" == *.max@*  ]] && continue
             step_str="${base#step-}"                  # 001000
             step=$((10#$step_str))                    # 1000
             [ "$step" -eq 0 ] && continue             # skip eval_on_start
