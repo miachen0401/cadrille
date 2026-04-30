@@ -1,10 +1,41 @@
 # Paper §7 + §8 Plan — "Recall ≠ Composition" narrative
 
-**Date**: 2026-04-30
+**Date**: 2026-04-30 (updated)
 **Branch**: `feat/v4-holdout-sft`
 **Run reference**:
 - v3 baseline: `sft-s50k-lr2e-4-b8a4-img-0428-1320` (50k complete)
-- v4-holdout: `sft-s50k-lr2e-4-b8a4-img-0430-0828` (currently 14k/50k)
+- v4-holdout: `sft-s50k-lr2e-4-b8a4-img-0430-0828` (currently 17k/50k)
+
+---
+
+## Section 7 STORY ARCHITECTURE — Three subsections
+
+The training-analysis section is structured around three figures, each a multi-line trajectory plot covering distinct training recipes:
+
+### §7.a — rare_recall vs training step (4 lines)
+### §7.b — IoU vs training step (4 lines)
+### §7.c — RL post-training: essential reward vs pure IoU reward
+
+The 4-line spec for §7.a/§7.b:
+
+| Line | Recipe label | Training data | Eval target |
+|---|---|---|---|
+| **(1) IID ceiling** | v3 (full data) | All 106 families | Same families seen |
+| **(2) OOD plain** | v4-holdout-noeasy | 96 families (10 held-out), no benchcad-easy | Held-out 10 families |
+| **(3) OOD + bench-easy** | v4-holdout (current) | 96 families (10 held-out) + 80k benchcad-easy | Held-out 10 families |
+| **(4) no-bench HQ-only** | v4-hq-only | text2cad + recode_bench only (no benchcad-stack) | Held-out 10 families |
+
+For §7.c — RL ablation (2 lines):
+
+| Line | Reward | Started from |
+|---|---|---|
+| **RL-iou** | pure IoU | v4-holdout ckpt-50k |
+| **RL-ess** | IoU + λ × essential_pass | v4-holdout ckpt-50k |
+
+**Story arc:**
+- §7.a: rare_recall climbs across all four lines on OOD families, even line (4) which has zero bench-stack data — *op recall is transferable*
+- §7.b: IoU shows much wider spread across lines — the "+bench-easy" supplement (line 3) lifts IoU but does not close the IID gap; (4) is far below
+- §7.c: limitation revealed by §7.a/7.b is *op composition* (essential_pass plateaus). RL with essential reward closes the gap further than RL with pure IoU. Two complementary remedies emerge: (i) more compositional data + (ii) composition-aware reward.
 
 ---
 
@@ -175,5 +206,162 @@ After Tier 1: paper can be submitted to NeurIPS main.
 
 1. **Adopt this narrative as §7 + §8?** (alternative was rare-op-recall-as-headline, but data does not support it as cleanly)
 2. **Approve Tier 0 launch sequence?** (v4-baseline launch after v4-holdout 50k)
-3. **Run T1-3 retrospective analysis now?** (10 min, low-risk preview)
+3. **Run T1-3 retrospective analysis now?** (10 min, low-risk preview) — DONE 2026-04-30; confirmed v3 scores 0.87-0.99 on random subsets, our 10 holdout fams score 1.00 → v4's 0.44 is real signal
+
+---
+
+## Section 9. Reviewer-self-critique (writing as if reviewing this paper)
+
+### What's strong
+- 3-figure architecture (§7.a/§7.b/§7.c) is a complete training story end-to-end
+- Two complementary findings: (i) op recall vs op composition decoupling, (ii) RL with composition reward as remediation
+- Clean comparison framework: 4 lines on §7.a/b correspond to 4 distinct dataset-recipe variants
+- Paper's contribution is *both* the dataset (rare-op-combination data) *and* the diagnostic methodology (essential_pass + ablation)
+
+### What I would attack as a reviewer
+
+**A. Comparability of the 4 lines.** The 4 lines mix two factors:
+- (factor 1) holdout vs no-holdout
+- (factor 2) what supplemental data is added
+We need a clean 2×2 grid:
+
+|              | no benchcad-easy | + benchcad-easy |
+|--------------|------------------|-----------------|
+| no holdout   | v3 (line 1)      | v4-baseline ★   |
+| holdout 10   | v4-holdout-noeasy (line 2) | v4-holdout (line 3) |
+
+★ = currently MISSING. Without it, line (3) vs line (1) confounds two changes.
+
+**Recommendation**: Add **v4-baseline** training (24h GPU). Then 5-line plot:
+1. v3 IID (full data, eval IID) — ceiling
+2. v3 OOD (full data, eval OOD families) — same model, OOD eval — *ceiling on those families*
+3. v4-baseline OOD — recipe matched to v4 but no holdout
+4. v4-holdout-noeasy OOD — recipe + holdout, no easy supplement
+5. v4-holdout OOD — recipe + holdout + easy supplement
+6. v4-hq-only OOD — no bench-stack at all (floor)
+
+This 6-line plot disentangles:
+- Recipe effect (60/40 mix change): line 1 vs line 3
+- Holdout effect: line 3 vs line 4
+- Easy supplement effect: line 4 vs line 5
+- Bench-stack overall effect: line 4 vs line 6
+
+**B. Reward design for §7.c**
+
+Pure IoU and "IoU + λ × essential_pass" are too few baselines. A reviewer expects:
+- (R1) Pure IoU (current proposal)
+- (R2) IoU + 0.3 × essential_pass (additive shaping)
+- (R3) Multiplicative: IoU × (1 + α × essential_pass)
+- (R4) Curriculum: essential_pass first 1k steps, IoU after
+
+**Recommendation**: Run R1 + R2 (+R3 if budget). Show essential_pass trajectory under each, not just final IoU.
+
+**C. Mix ratio not ablated**
+
+Why specifically 60/40 HQ/bench? No mix-ratio sweep. Reviewer asks: "What if 50/50 or 70/30?"
+
+**Recommendation**: At minimum run mix=50/50 and mix=70/30 at 25k step (truncated, 12h each). Add 2-line sub-plot showing mix is approximately optimal.
+
+**D. Single seed**
+
+All §7.a/b/c lines are single-seed. Reviewer requires 2+ seeds for headline numbers.
+
+**Recommendation**: Run v3 + v4-holdout 2nd seed (25k each, 24h total). Report mean ± std on §7.a/b end values.
+
+**E. n=9 OOD per eval is too small**
+
+Current online_eval samples 50 BC val randomly → ~9 OOD samples per eval. σ ≈ 0.10 on essential_pass.
+
+**Recommendation**: Phase B refactor — stratified n=50 OOD bucket per eval. Or: run offline stratified eval at ckpt-25k and ckpt-50k for all 6 lines (~30 min × 12 = 6h GPU spread across the runs).
+
+**F. Why these 10 families specifically?**
+
+Defense: T1-3 retrospective analysis showed v3 scores 1.00 on these specific families and 0.87-0.99 on random 10-family subsets — so we did NOT cherry-pick "hard" families. Mention this in §7.
+
+**Recommendation**: Add a caveat box in §7.1: *"Holdout families were selected to ensure (a) every essential op appears with >5% frequency in remaining 96 families, and (b) v3 baseline reaches ess_pass ≥ 0.85 on each (verified via T1-3 retrospective analysis). The recall-vs-composition gap is therefore not a 'hard family' artifact."*
+
+### Reviewer-recommended execution order
+
+**Phase 1 — Core (3 GPU-day, mandatory)**:
+- Finish v4-holdout to 50k
+- Train v4-baseline 50k (control: same recipe, no holdout)
+- Train v4-hq-only 50k
+
+**Phase 2 — Robustness (3 GPU-day, mandatory for NeurIPS)**:
+- Train v4-holdout-noeasy 50k (line 4)
+- Train mix-ratio sweep at 25k step × 2 ratios (50/50, 70/30)
+- 2nd seed v4-holdout 25k
+
+**Phase 3 — RL (1 GPU-day)**:
+- RL-iou from v4-holdout ckpt-50k
+- RL-ess from v4-holdout ckpt-50k
+
+**Phase 4 — Eval & write (parallel to Phase 3)**:
+- Offline stratified eval n=50 at all key ckpts (3h GPU)
+- Cross-LLM IoU-24 eval (4h API)
+- 6-line plot generation
+- Paper draft
+
+Total: ~7 GPU-day plus 1 day API/CPU. Achievable in 7 calendar days on single A100.
+
+### Reviewer scoring (self-estimate)
+
+Without Phase 1+2: **borderline reject** — single seed, missing controls
+With Phase 1+2 done: **borderline accept** — clean ablation, robust signals
+With Phase 1+2+3+4 done: **clear accept** — complete story, multiple ablations, RL extension
+
+### Reviewer-style summary statement
+
+> The paper claims SFT learns op recall but not op composition on held-out CAD families. With proposed Phase 1+2 ablations (v3 + v4-baseline + v4-holdout × {±benchcad-easy} + v4-hq-only) plus RL ablation, the paper makes a substantive contribution to compositional generalization in symbolic graphics generation. The 6-line plot architecture cleanly disentangles recipe / holdout / supplement / bench-stack effects — a stronger experimental design than typical CAD-generation papers.
+
+---
+
+## Updated experiment queue (post reviewer self-critique)
+
+### Phase 1 — Core SFT runs (24h × 3 = 72h on single A100, sequential)
+
+| # | Run | Config | Status |
+|---|---|---|---|
+| 1 | v4-holdout 50k | `big_bench_shell_50k_v4_holdout.yaml` | 🟡 17k/50k in progress |
+| 2 | v4-baseline 50k | `big_bench_shell_50k_v4_baseline.yaml` | ❌ pending launch |
+| 3 | v4-hq-only 50k | `big_bench_shell_50k_v4_hq_only.yaml` | ❌ pending launch |
+| 4 | v4-holdout-noeasy 50k | `big_bench_shell_50k_v4_holdout_noeasy.yaml` (NEW) | ❌ pending launch |
+
+### Phase 2 — Robustness
+
+| # | Run | Time |
+|---|---|---|
+| 5 | mix-ratio 50/50 at 25k | 12h |
+| 6 | mix-ratio 70/30 at 25k | 12h |
+| 7 | 2nd seed v4-holdout 25k | 12h |
+
+### Phase 3 — RL
+
+| # | Run | Time |
+|---|---|---|
+| 8 | RL-iou from v4-holdout ckpt-50k | 12h |
+| 9 | RL-ess (IoU + 0.3×ess) from v4-holdout ckpt-50k | 12h |
+| 10 | RL-ess-mult (IoU × (1+α·ess)) from v4-holdout ckpt-50k | 12h (optional) |
+
+### Phase 4 — Offline eval & analysis
+
+| # | Action | Time |
+|---|---|---|
+| 11 | Stratified n=50 OOD eval at ckpt-25k/50k for runs 1-4 | 4h GPU |
+| 12 | Cross-LLM IoU-24 eval (gpt-4o + Claude on 50 OOD) | 4h API |
+| 13 | 6-line plot for §7.a + §7.b | 30 min |
+| 14 | RL ablation plot for §7.c | 30 min |
+| 15 | Final paper figures | 1h |
+
+**Total compute**: 7-8 GPU-day on single A100, plus ~1 day API/CPU/writing.
+
+---
+
+## Action right now (what we can do today/tonight)
+
+1. **Launch v4-baseline NOW** in a separate process — it needs same GPU as v4-holdout but cadquery max@8 leaves 30% GPU idle; we may be able to overlap. Or wait until v4-holdout finishes (~16h).
+2. **Launch v4-hq-only NOW** with `eval_steps=2000` (less frequent) to reduce contention with v4-holdout.
+3. **Pre-write all the plotting + RL training scripts** so when ckpts arrive we just run them.
+
+
 
