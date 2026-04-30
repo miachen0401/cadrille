@@ -156,13 +156,9 @@ def main() -> None:
             print(f'  {label}: no metadata.jsonl at {meta_path}, treating ALL preds as exec_ok')
             exec_ok = None  # sentinel: don't filter
 
-        # Load per-case IoU from the model's metadata.jsonl so we can apply
-        # an IoU-rescue rule: if a pred reproduces the geometry (IoU ≥
-        # IOU_RESCUE_THR), credit it as essential-passing regardless of op
-        # vocabulary. This catches CADEvolve-style "geometry-right, ops-
-        # different" preds that the strict regex check would otherwise mark
-        # as fails despite being functionally equivalent.
-        IOU_RESCUE_THR = 0.9
+        # Load per-case IoU from the model's metadata.jsonl (purely for
+        # reporting in per_case JSON — no rescue logic; vocabulary check
+        # is strict).
         iou_by_stem = {}
         if meta_path and meta_path.exists():
             with open(meta_path) as f:
@@ -175,7 +171,6 @@ def main() -> None:
                         pass
 
         n_pass = 0; n_fail = 0; n_na = 0
-        n_pass_strict = 0; n_pass_rescued = 0
         n_no_pred = 0; n_filtered = 0
         feat_f1s = []
         per_family: dict[str, list[bool]] = defaultdict(list)
@@ -191,33 +186,18 @@ def main() -> None:
             gen_code = py.read_text()
             gen_ops = find_ops(gen_code)
             gt_ops  = gt_ops_from_row(row)
-            ep_strict = essential_pass(row['family'], gen_ops)
-            iou = iou_by_stem.get(stem)
-            # IoU-rescue: only fires when there IS a family spec (ep_strict
-            # is bool, not None) and the pred is geometrically near-perfect.
-            ep_rescued = (ep_strict is False
-                          and iou is not None
-                          and iou >= IOU_RESCUE_THR)
-            ep = True if ep_rescued else ep_strict
+            ep = essential_pass(row['family'], gen_ops)
             ff1 = feature_f1(gen_ops, gt_ops)
-            if ep is True:
-                n_pass += 1
-                per_family[row['family']].append(True)
-                if ep_strict is True: n_pass_strict += 1
-                elif ep_rescued: n_pass_rescued += 1
-            elif ep is False:
-                n_fail += 1; per_family[row['family']].append(False)
-            else:
-                n_na += 1
+            if ep is True:  n_pass += 1; per_family[row['family']].append(True)
+            elif ep is False: n_fail += 1; per_family[row['family']].append(False)
+            else: n_na += 1
             feat_f1s.append(ff1)
             per_case.append({'stem': stem, 'family': row['family'],
                              'difficulty': row.get('difficulty'),
                              'gen_ops': sorted(gen_ops),
                              'gt_ops':  sorted(gt_ops),
-                             'iou': iou,
+                             'iou': iou_by_stem.get(stem),
                              'essential_pass': ep,
-                             'essential_pass_strict': ep_strict,
-                             'iou_rescued': ep_rescued,
                              'feature_f1': round(ff1, 4)})
 
         n_app = n_pass + n_fail
@@ -242,11 +222,6 @@ def main() -> None:
             #                           Models that don't exec get 0 credit.
             'pct_essential_pass':    (n_pass / n_app) if n_app else None,
             'pct_essential_pass_cw': n_pass / len(by_stem),
-            'iou_rescue_thr':        IOU_RESCUE_THR,
-            'n_pass_strict':         n_pass_strict,
-            'n_pass_rescued':        n_pass_rescued,
-            'pct_essential_strict':  (n_pass_strict / n_app) if n_app else None,
-            'pct_essential_strict_cw': n_pass_strict / len(by_stem),
             'mean_feature_f1':       (sum(feat_f1s) / len(feat_f1s)) if feat_f1s else None,
             'mean_feature_f1_cw':    feat_f1_cw_sum / len(by_stem),
             'per_family_pass_rate': {
@@ -256,12 +231,9 @@ def main() -> None:
             'per_case': per_case,
         }
         print(f'  {label:<35}  exec_ok={len(per_case):3}  '
-              f'pass={n_pass:3} (strict={n_pass_strict:3}, '
-              f'iou≥{IOU_RESCUE_THR:.2f}-rescued={n_pass_rescued:3})  '
-              f'fail={n_fail:3} na={n_na:3}  '
+              f'pass={n_pass:3} fail={n_fail:3} na={n_na:3}  '
               f'ess={n_pass/n_app*100 if n_app else 0:5.1f}% '
-              f'ess_cw={n_pass/len(by_stem)*100:5.2f}% '
-              f'(strict_cw={n_pass_strict/len(by_stem)*100:5.2f}%)  '
+              f'ess_cw={n_pass/len(by_stem)*100:5.2f}%  '
               f'F1={sum(feat_f1s)/len(feat_f1s) if feat_f1s else 0:.3f} '
               f'F1_cw={feat_f1_cw_sum/len(by_stem):.3f}',
               flush=True)
@@ -292,33 +264,23 @@ def main() -> None:
              '`F1` is exec-only mean; `F1_cw` is coverage-weighted '
              '(missing → 0).',
              '',
-             '**IoU-rescue**: a strict pure-regex op-vocabulary check '
-             'fails preds that reproduce GT geometry via primitives '
-             '(`cylinder().cut()` instead of `.hole()`). To avoid penalising '
-             'geometrically-correct preds, `essential_pass` here counts a '
-             'case as passing if EITHER the strict op-vocabulary check '
-             'passes **OR** IoU ≥ 0.9 (geometry essentially matches GT). '
-             'The `(strict)` columns show the pre-rescue numbers for '
-             'reference.',
              '',
-             f'| {"model":<24} | {"n_pred":>6} | {"ess (rescued)":>20} | '
-             f'{"ess_cw":>8} | {"strict":>10} | {"F1":>6} | {"F1_cw":>6} |',
-             f'|{"-"*26}|{"-"*8}|{"-"*22}|{"-"*10}|{"-"*12}|{"-"*8}|{"-"*8}|']
+             f'| {"model":<24} | {"n_pred":>6} | {"ess":>20} | '
+             f'{"ess_cw":>8} | {"F1":>6} | {"F1_cw":>6} |',
+             f'|{"-"*26}|{"-"*8}|{"-"*22}|{"-"*10}|{"-"*8}|{"-"*8}|']
     for slug, label in MODELS:
         d = out['models'].get(slug)
         if not d: continue
         ep = (f'{d["pct_essential_pass"]*100:.1f}%' if d['pct_essential_pass'] is not None
               else '—')
         ep_cw = f'{d["pct_essential_pass_cw"]*100:.2f}%'
-        st = (f'{d.get("pct_essential_strict", 0)*100:.1f}%'
-              if d.get('pct_essential_strict') is not None else '—')
         ff = (f'{d["mean_feature_f1"]:.4f}' if d['mean_feature_f1'] is not None
               else '—')
         ff_cw = f'{d["mean_feature_f1_cw"]:.4f}'
         n_app = d['n_pass'] + d['n_fail']
         lines.append(f'| {label:<24} | {d["n_with_pred"]:>6} | '
                      f'{ep:>9} ({d["n_pass"]:>3}/{n_app:>3}) | '
-                     f'{ep_cw:>8} | {st:>10} | {ff:>6} | {ff_cw:>6} |')
+                     f'{ep_cw:>8} | {ff:>6} | {ff_cw:>6} |')
 
     # Per-difficulty breakdown
     lines.extend(['', '## Per-difficulty (essential_pass × feature_f1)', ''])
