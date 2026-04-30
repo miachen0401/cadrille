@@ -1,0 +1,107 @@
+# Cadrille SFT v4-holdout-noeasy — same holdout as v4-holdout BUT no benchcad-easy.
+#
+# Comparison line for §7a/7b paper figures: shows the OOD performance WITHOUT
+# the benchcad-easy supplement. Pairs with v4-holdout (which DOES have
+# benchcad-easy) to isolate the contribution of supplemental rare-op-combo data.
+#
+# vs v4-holdout:
+#   * benchcad_easy weight: 116 → 0 (data still loaded but never sampled)
+#   * Other weights rebalanced to keep 60% HQ / 40% bench-stack ratio
+#   * Same 10 holdout families
+#   * Same total step count (50k)
+#
+# Item counts (post-holdout):
+#   benchcad             10 101
+#   cad_iso_106         108 797
+#   benchcad_simple      76 671
+#   benchcad_easy        79 737  (loaded but weight=0, never sampled)
+#   text2cad_bench_img   53 315
+#   text2cad_bench_text  53 315
+#   recode_bench        472 244
+#
+# Bench-stack (without benchcad_easy): 195569 items
+# HQ-stack: 578874 items
+# To hit 40% bench / 60% HQ:
+#   bench scale = 0.40 * 1000 / 195.569 = 2.045
+#   HQ scale = 0.60 * 1000 / 578.874 = 1.037
+# Final weights:
+#   benchcad:           10.1 * 2.045 = 21
+#   cad_iso_106:       108.8 * 2.045 = 222
+#   benchcad_simple:    76.7 * 2.045 = 157
+#   text2cad_img:       53.3 * 1.037 = 55
+#   text2cad_text:      53.3 * 1.037 = 55
+#   recode_bench:      472.2 * 1.037 = 490
+# Total: 1000
+
+checkpoints_dir: /ephemeral/checkpoints
+data_path: ./data
+mode: img
+use_text: true
+
+backbone: qwen3_vl
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+max_steps: 50000
+batch_size: 8
+accumulation_steps: 4
+learning_rate: 2.0e-4
+warmup_steps: 2000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+
+bf16: true
+gradient_checkpointing: true
+dataloader_workers: 4
+group_by_length: true
+
+log_steps: 50
+save_steps: 2000
+eval_steps: 1000
+online_eval_n_per: 50
+max_iou_k: 8
+max_iou_temperature: 1.0
+max_iou_every_n_evals: 2
+
+eval_on_start: true
+resume_from_checkpoint: null
+run_name: null
+
+seed: 42
+max_code_len: 1000
+
+# v4-holdout-noeasy mix — 60% HQ / 40% bench-stack WITHOUT benchcad-easy
+sft_mix_weights:
+  benchcad:             21
+  cad_iso_106:         222
+  benchcad_simple:     157
+  benchcad_easy:         0       # loaded but never sampled
+  text2cad_bench_img:   55
+  text2cad_bench_text:  55
+  recode_bench:        490
+# total weight = 1000
+
+# Same holdout families as v4-holdout
+holdout_families:
+  - tapered_boss
+  - taper_pin
+  - venturi_tube
+  - bucket
+  - dome_cap
+  - nozzle
+  - enclosure
+  - waffle_plate
+  - bolt
+  - duct_elbow
+
+benchcad_train_pkl: train_v4_holdout.pkl
+cad_iso_106_train_pkl: train_v4_holdout.pkl
+
+curriculum_phases: null
+
+save_only_model: false
+save_total_limit: 4
+
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-v4-holdout-noeasy-50k
+hf_upload_private: false
+
+wandb_project: cadrille-sft
