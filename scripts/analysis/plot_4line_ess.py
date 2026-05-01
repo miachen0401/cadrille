@@ -30,6 +30,7 @@ import matplotlib.pyplot as plt
 
 V3_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions'
 V4_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/predictions'
+BASELINE_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-0629/predictions'  # baseline (no-bench)
 
 from common.holdout import HOLDOUT_FAMILIES as HOLDOUT
 
@@ -70,11 +71,13 @@ def metrics_per_step(pred_dir, uid2fam, patterns, ess_spec, target_holdout=True)
         step = int(f.stem.replace('step-', ''))
         if step % 1000 != 0 or step == 0: continue
         rows = [json.loads(l) for l in f.open() if l.strip()]
+        # Accept legacy single bucket 'BenchCAD val' AND post-refactor
+        # split forms 'BenchCAD val IID' / 'BenchCAD val OOD'.
         if target_holdout:
-            sub = [r for r in rows if r.get('bucket') == 'BenchCAD val'
+            sub = [r for r in rows if (r.get('bucket') or '').startswith('BenchCAD val')
                    and uid2fam.get(r['uid']) in HOLDOUT]
         else:
-            sub = [r for r in rows if r.get('bucket') == 'BenchCAD val'
+            sub = [r for r in rows if (r.get('bucket') or '').startswith('BenchCAD val')
                    and uid2fam.get(r['uid']) not in HOLDOUT]
         if not sub: continue
         ess = []
@@ -101,16 +104,20 @@ def main():
     v4_ood = metrics_per_step(V4_DIR, uid2fam, patterns, ess_spec, target_holdout=True)
     print('parsing v4-holdout IID ess_pass ...')
     v4_iid = metrics_per_step(V4_DIR, uid2fam, patterns, ess_spec, target_holdout=False)
+    print('parsing baseline (no-bench) OOD ess_pass ...')
+    base_ood = metrics_per_step(BASELINE_DIR, uid2fam, patterns, ess_spec, target_holdout=True)
+    print(f'  steps: {sorted(base_ood)}')
+    print('parsing baseline IID ess_pass ...')
+    base_iid = metrics_per_step(BASELINE_DIR, uid2fam, patterns, ess_spec, target_holdout=False)
 
     steps_v4 = sorted(v4_ood)
     steps_v3 = sorted(v3_ood)
-    steps_all = sorted(set(steps_v3) | set(steps_v4))
+    steps_base = sorted(base_ood)
+    steps_all = sorted(set(steps_v3) | set(steps_v4) | set(steps_base))
     max_step = max(steps_all) if steps_all else 50000
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
-
-    # Left: OOD ess_pass = 1 rate
-    ax = axes[0]
+    # Main §7.a: standalone OOD ess_pass
+    fig_main, ax = plt.subplots(figsize=(8.5, 5.5))
     # (1) IID ceiling = v3 IID (model saw ALL families, eval on IID)
     iid_steps = sorted(v3_iid)
     ax.plot(iid_steps, [v3_iid[s] for s in iid_steps], '-', color='C2', lw=2,
@@ -122,42 +129,54 @@ def main():
     # (3) OOD + bench-easy — v4-holdout (real data)
     ax.plot(steps_v4, [v4_ood[s] for s in steps_v4], '-s', color='C0', lw=2, markersize=5,
             label='(3) OOD + bench-easy — v4-holdout (current)', alpha=0.9)
-    # (4) no-bench — v4-hq-only (NOT YET TRAINED, placeholder zeros)
-    ax.plot(placeholder_x, [0]*len(placeholder_x), '--', color='C4', lw=1.5,
-            label='(4) no-bench — v4-hq-only [PLACEHOLDER, not yet trained]', alpha=0.6)
+    # (4) no-bench — baseline (HQ-only, real data; will accumulate as it trains)
+    if steps_base:
+        ax.plot(steps_base, [base_ood[s] for s in steps_base], '-^', color='C4', lw=2, markersize=5,
+                label=f'(4) no-bench — baseline (current, n={len(steps_base)} steps)', alpha=0.9)
+    else:
+        ax.plot(placeholder_x, [0]*len(placeholder_x), '--', color='C4', lw=1.5,
+                label='(4) no-bench — baseline [PLACEHOLDER, not yet trained]', alpha=0.6)
     # Reference: v3 OOD (model saw those families, eval on them) — informative
     ax.plot(steps_v3, [v3_ood[s] for s in steps_v3], ':', color='C1', lw=1.5,
             label='ref — v3 evaluated on holdout families (saw them in train)', alpha=0.6)
 
-    ax.set_title('§7.c essential_pass = 1 rate (BC val, OOD families) vs training step',
-                 fontsize=11)
+    ax.set_title('§7.a essential_pass = 1 rate on held-out families (BC val, OOD)',
+                 fontsize=12)
     ax.set_xlabel('training step'); ax.set_ylabel('essential_pass rate (mean)')
     ax.set_ylim(-0.05, 1.05); ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc='lower right')
     ax.axhline(1.0, color='gray', lw=0.5, linestyle=':')
 
-    # Right: IID ess_pass = 1 rate (sanity check)
-    ax = axes[1]
+    fig_main.tight_layout()
+    out_main = REPO_ROOT / 'paper/figures/fig_7_4line_ess_pass.png'
+    fig_main.savefig(out_main, dpi=120, bbox_inches='tight')
+    print(f'wrote {out_main} ({out_main.stat().st_size//1024} KB)')
+
+    # Appendix: IID ess_pass = 1 rate (sanity check — recipe doesn't hurt IID)
+    fig_app, ax = plt.subplots(figsize=(8.5, 5.5))
     ax.plot(sorted(v3_iid), [v3_iid[s] for s in sorted(v3_iid)], '-', color='C2', lw=2,
             label='v3 IID', alpha=0.85)
     ax.plot(sorted(v4_iid), [v4_iid[s] for s in sorted(v4_iid)], '-s', color='C0', lw=2, markersize=4,
             label='v4-holdout IID (current)', alpha=0.85)
     ax.plot(placeholder_x, [0]*len(placeholder_x), '--', color='C3', lw=1.5,
-            label='v4-holdout-noeasy IID [TBD]', alpha=0.6)
-    ax.plot(placeholder_x, [0]*len(placeholder_x), '--', color='C4', lw=1.5,
-            label='v4-hq-only IID [TBD]', alpha=0.6)
-    ax.set_title('§7.b essential_pass = 1 rate (BC val, IID families)', fontsize=11)
+            label='ood IID [TBD — chain run 2]', alpha=0.6)
+    if steps_base:
+        ax.plot(sorted(base_iid), [base_iid[s] for s in sorted(base_iid)], '-^', color='C4', lw=2, markersize=4,
+                label=f'baseline IID (current, n={len(steps_base)} steps)', alpha=0.85)
+    else:
+        ax.plot(placeholder_x, [0]*len(placeholder_x), '--', color='C4', lw=1.5,
+                label='baseline IID [TBD]', alpha=0.6)
+    ax.set_title('Appendix — IID essential_pass control (recipe sanity check)',
+                 fontsize=12)
     ax.set_xlabel('training step'); ax.set_ylabel('essential_pass rate (mean)')
     ax.set_ylim(-0.05, 1.05); ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc='lower right')
     ax.axhline(1.0, color='gray', lw=0.5, linestyle=':')
 
-    fig.suptitle('Paper §7 4-line plot — essential_pass rate vs training step\n'
-                 '(placeholder zeros = configs not yet trained)', fontsize=12)
-    fig.tight_layout()
-    out = REPO_ROOT / 'paper/figures/fig_7_4line_ess_pass.png'
-    fig.savefig(out, dpi=120, bbox_inches='tight')
-    print(f'wrote {out} ({out.stat().st_size//1024} KB)')
+    fig_app.tight_layout()
+    out_app = REPO_ROOT / 'paper/figures/fig_app_iid_ess_pass.png'
+    fig_app.savefig(out_app, dpi=120, bbox_inches='tight')
+    print(f'wrote {out_app} ({out_app.stat().st_size//1024} KB)')
 
 
 if __name__ == '__main__':

@@ -88,6 +88,26 @@ while true; do
             else
                 echo "[watch] step=$step FAILED, will retry next poll"
             fi
+
+            # Every 5000 steps, refresh the §7 main+appendix figure suite
+            # and post — keeps trajectory plots up-to-date across all 4 runs
+            # without manual intervention.
+            if [ $((step % 5000)) -eq 0 ] && [ "$step" -ge 5000 ]; then
+                echo "[watch] step=$step refreshing §7 figure suite ..."
+                if uv run python -m scripts.analysis.plot_main_appendix > /dev/null; then
+                    uv run python -m scripts.analysis.eval_to_discord --send \
+                        --message "§7 figure suite refresh @ step ${step}" \
+                        --file paper/figures/fig_7_4line_ess_pass.png \
+                        --file paper/figures/fig_7_ood_iou_4line.png \
+                        --file paper/figures/fig_app_ood_exec.png \
+                        --file paper/figures/fig_app_iid_ess_pass.png \
+                        --file paper/figures/fig_app_iid_iou.png \
+                        --file paper/figures/fig_app_iid_exec.png \
+                        --file paper/figures/fig_app_deepcad_iou.png \
+                        --file paper/figures/fig_app_fusion360_iou.png \
+                        || echo "[watch] §7 figure post failed (non-fatal)"
+                fi
+            fi
         done
     fi
     sleep "$POLL"
