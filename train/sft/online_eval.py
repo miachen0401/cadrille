@@ -34,6 +34,81 @@ from common.model import collate
 from common.metrics import compute_metrics
 
 
+def _load_canonical_essentials() -> dict:
+    """Load Cadance per-family essential ops spec from configs/eval/canonical_ops.yaml.
+    Returns family -> AND-of-OR spec; empty dict if file missing."""
+    try:
+        import yaml
+        path = Path(__file__).resolve().parent.parent.parent / 'configs/eval/canonical_ops.yaml'
+        if path.exists():
+            return yaml.safe_load(path.read_text()) or {}
+    except Exception as e:
+        print(f'[online-eval] failed to load canonical_ops.yaml: {e}', flush=True)
+    return {}
+
+
+_ESSENTIALS = _load_canonical_essentials()
+# Feature ops for feature_F1 metric (independent of essential_pass)
+_FEATURE_OPS = {'chamfer', 'fillet', 'hole'}
+
+
+def _essential_pass(family: str, pred_ops: set[str]) -> bool | None:
+    """Cadance essential_pass: outer AND of inner OR-tuples.
+    Returns True/False if family has spec, else None (N/A)."""
+    spec = _ESSENTIALS.get(family)
+    if not spec:
+        return None
+    for elem in spec:
+        if isinstance(elem, str):
+            if elem not in pred_ops:
+                return False
+        elif isinstance(elem, list):
+            if not any(o in pred_ops for o in elem):
+                return False
+    return True
+
+
+def _feature_f1(pred_ops: set[str], gt_ops: set[str]) -> float:
+    """F1 over {chamfer, fillet, hole} presence indicators."""
+    pf = pred_ops & _FEATURE_OPS
+    gf = gt_ops & _FEATURE_OPS
+    if not gf and not pf:
+        return 1.0
+    if not gf or not pf:
+        return 0.0
+    tp = len(pf & gf); fp = len(pf - gf); fn = len(gf - pf)
+    pr = tp / (tp + fp) if tp + fp else 0.0
+    rc = tp / (tp + fn) if tp + fn else 0.0
+    return 2 * pr * rc / (pr + rc) if pr + rc else 0.0
+
+
+def _op_presence_entropy(codes: list[str]) -> float:
+    """Shannon entropy (nats) of op presence distribution across n samples."""
+    if not codes:
+        return 0.0
+    op_pats = list(_OPS.values())
+    counts = np.zeros(len(op_pats))
+    for c in codes:
+        for i, p in enumerate(op_pats):
+            if p.search(c or ''):
+                counts[i] += 1
+    if counts.sum() == 0:
+        return 0.0
+    p = counts / counts.sum()
+    p = p[p > 0]
+    return float(-(p * np.log(p)).sum())
+
+
+def _find_ops(code: str) -> set[str]:
+    """Helper: return set of op names that appear in code."""
+    if not code:
+        return set()
+    out = {n for n, pat in _OPS.items() if pat.search(code)}
+    if 'sweep' in out and 'helix' in out:
+        out.add('sweep+helix')
+    return out
+
+
 # Op regex — kept in lockstep with scripts/analysis/diversity_analysis.py::_OPS.
 # Inlined here so callback imports stay light (no model code).
 _OPS: dict[str, re.Pattern] = {
@@ -262,6 +337,19 @@ def _multilabel_op_metrics(pred_codes: list[str], gt_codes: list[str],
 _SUBSETS_DEFAULT = ('benchcad_val', 'recode20k_train', 'text2cad_train',
                     'deepcad_test', 'fusion360_test')
 
+# Module-level state set from train.py via set_holdout_families(); when set,
+# benchcad_val items are tagged with `_dataset_label = 'BenchCAD val IID'` /
+# `'BenchCAD val OOD'` based on family. Eval logs split metrics per-bucket
+# (e.g. eval/img/BenchCAD val IID/IoU mean) so wandb shows IID/OOD curves.
+_HOLDOUT_FAMILIES: set[str] = set()
+
+
+def set_holdout_families(families: list[str] | set[str] | None) -> None:
+    """Configure which families are OOD for BC val bucket split.
+    Called from train.py once cfg is loaded."""
+    global _HOLDOUT_FAMILIES
+    _HOLDOUT_FAMILIES = set(families) if families else set()
+
 
 def _seeded_sample(items, n, seed=42):
     rng = random.Random(seed)
@@ -270,8 +358,41 @@ def _seeded_sample(items, n, seed=42):
     return shuffled[:n]
 
 
+def _stratified_sample_by_family(rows: list[dict], holdout: set[str],
+                                 n_iid: int, n_ood_per_family: int,
+                                 seed: int) -> list[tuple[dict, str]]:
+    """Stratified sample yielding (row, label) tuples where label is
+    'BenchCAD val IID' or 'BenchCAD val OOD'.
+    - IID: n_iid random samples from non-holdout families.
+    - OOD: n_ood_per_family per holdout family (cap by available rows).
+    """
+    rng = random.Random(seed)
+    iid_pool = [r for r in rows if r.get('family') not in holdout]
+    rng.shuffle(iid_pool)
+    iid_pick = [(r, 'BenchCAD val IID') for r in iid_pool[:n_iid]]
+
+    ood_pick = []
+    fams = sorted(holdout)
+    for fam in fams:
+        fam_rows = [r for r in rows if r.get('family') == fam]
+        rng.shuffle(fam_rows)
+        for r in fam_rows[:n_ood_per_family]:
+            ood_pick.append((r, 'BenchCAD val OOD'))
+    return iid_pick + ood_pick
+
+
 def _load_benchcad_val(n: int, seed: int) -> list[dict]:
-    """BenchCAD val — img modality, has STL + GT .py. Used for both ops and IoU."""
+    """BenchCAD val — img modality, has STL + GT .py. Used for both ops and IoU.
+
+    When _HOLDOUT_FAMILIES is set, items are STRATIFIED into IID + OOD buckets:
+      - IID: ~n samples from non-holdout families (random)
+      - OOD: 5 per holdout family (10 fams × 5 = 50)
+    Each item is tagged with _dataset_label = 'BenchCAD val IID' or
+    'BenchCAD val OOD' so the eval logs split metrics per-bucket.
+
+    When _HOLDOUT_FAMILIES is empty, falls back to legacy random n-sample
+    with single 'BenchCAD val' bucket.
+    """
     from PIL import Image
     root_p = Path('data/benchcad')
     pkl = root_p / 'val.pkl'
@@ -279,9 +400,22 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
         return []
     with pkl.open('rb') as f:
         rows = pickle.load(f)
-    rows = _seeded_sample(rows, n, seed)
+
+    if _HOLDOUT_FAMILIES:
+        # Stratified IID/OOD split. n is interpreted as desired IID size;
+        # OOD bucket gets 5 per holdout family.
+        picks = _stratified_sample_by_family(
+            rows, _HOLDOUT_FAMILIES,
+            n_iid=n,
+            n_ood_per_family=5,
+            seed=seed,
+        )
+    else:
+        sampled = _seeded_sample(rows, n, seed)
+        picks = [(r, 'BenchCAD val') for r in sampled]
+
     out = []
-    for r in rows:
+    for r, label in picks:
         png = root_p / r['png_path']
         stl = root_p / r['mesh_path']
         py  = root_p / r['py_path']
@@ -289,8 +423,9 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
             continue
         out.append({
             '_modality': 'img',
-            '_dataset_label': 'BenchCAD val',
+            '_dataset_label': label,
             '_gt_code': py.read_text(),
+            '_family': r.get('family'),
             'file_name': r['uid'],
             'gt_mesh_path': str(stl),
             'video': [Image.open(png).convert('RGB')],
@@ -828,7 +963,7 @@ def run_online_eval(model, processor, examples: list[dict],
 
         buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0,
                                        'total': 0, 'codes': [], 'gt_codes': [],
-                                       'has_iou': False})
+                                       'families': [], 'has_iou': False})
 
         def _score(idx):
             ex = examples[idx]
@@ -849,6 +984,7 @@ def run_online_eval(model, processor, examples: list[dict],
             buckets[key]['total'] += 1
             buckets[key]['codes'].append(all_codes[idx])
             buckets[key]['gt_codes'].append(ex.get('_gt_code'))
+            buckets[key]['families'].append(ex.get('_family'))
 
         with ThreadPoolExecutor(max_workers=reward_workers) as pool:
             futures = [pool.submit(_score, i) for i in range(n)
@@ -903,12 +1039,47 @@ def run_online_eval(model, processor, examples: list[dict],
                 ml_loss_w = ml.get('op_loss_cos_weighted')
                 ml_recall = ml.get('op_macro_recall')
                 ml_rare_recall = ml.get('rare_op_macro_recall')
+
+            # essential_pass + feature_F1 (per-family ops composition).
+            # Computed only when we have GT codes AND family labels (BC val).
+            ess_rate = None
+            ess_n = 0
+            feat_f1_mean = None
+            if gt_codes and any(f is not None for f in b['families']):
+                ess_pass_list = []
+                feat_f1_list = []
+                for code, gt, fam in zip(b['codes'], gt_codes, b['families']):
+                    pred_ops = _find_ops(code or '')
+                    gt_ops = _find_ops(gt or '')
+                    if fam:
+                        e = _essential_pass(fam, pred_ops)
+                        if e is not None:
+                            ess_pass_list.append(1 if e else 0)
+                    feat_f1_list.append(_feature_f1(pred_ops, gt_ops))
+                if ess_pass_list:
+                    ess_rate = float(np.mean(ess_pass_list))
+                    ess_n = len(ess_pass_list)
+                    out[f'{prefix}/essential_pass_rate'] = ess_rate
+                    out[f'{prefix}/essential_n_applicable'] = ess_n
+                if feat_f1_list:
+                    feat_f1_mean = float(np.mean(feat_f1_list))
+                    out[f'{prefix}/feature_F1'] = feat_f1_mean
+
+            # op_entropy (Shannon, nats) of pred codes — diversity of op presence.
+            op_ent = _op_presence_entropy(b['codes'])
+            out[f'{prefix}/op_entropy'] = op_ent
+
             iou_part = (f'IoU={mean_iou:.3f}  exec={exec_rate*100:.1f}%  '
                         if mean_iou is not None else '')
             ml_part = (f'op_loss_w={ml_loss_w:.3f}  recall={ml_recall:.3f}  '
                        f'rare_recall={ml_rare_recall:.3f}  '
                        if ml_loss_w is not None else '')
-            print(f'  [{mod}/{label}] {ml_part}{iou_part}'
+            ess_part = (f'ess_pass={ess_rate:.3f}(n={ess_n})  '
+                        if ess_rate is not None else '')
+            feat_part = (f'feat_F1={feat_f1_mean:.3f}  '
+                         if feat_f1_mean is not None else '')
+            print(f'  [{mod}/{label}] {ml_part}{iou_part}{ess_part}{feat_part}'
+                  f'op_ent={op_ent:.3f}  '
                   f'distinct_ops={div.get("distinct_ops", 0)}  '
                   f'distinct_codes={div.get("distinct_codes_frac", 0):.2f}  '
                   f'(n={b["total"]})', flush=True)

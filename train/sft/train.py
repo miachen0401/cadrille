@@ -806,6 +806,15 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             max_iou_temperature=max_iou_temperature,
             max_iou_every_n_evals=max_iou_every_n_evals,
         ))
+
+    # Wire holdout_families into online_eval so BC val splits IID/OOD per
+    # eval (separate buckets in wandb: eval/img/BenchCAD val IID/* and
+    # eval/img/BenchCAD val OOD/*).
+    if holdout_families:
+        from train.sft import online_eval as _oe
+        _oe.set_holdout_families(holdout_families)
+        print(f'[online-eval] BC val IID/OOD split enabled, holdout_families='
+              f'{sorted(holdout_families)}', flush=True)
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
