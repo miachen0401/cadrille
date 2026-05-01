@@ -5,7 +5,7 @@ Usage:
     from common.holdout import HOLDOUT_FAMILIES, uid2fam, is_ood, split_label
 
 The constants/maps are loaded once at import time. To change the holdout list,
-edit configs/eval/holdout_families.yaml.
+edit configs/sft/holdout_families.yaml.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-_CFG = REPO_ROOT / 'configs/eval/holdout_families.yaml'
+_CFG = REPO_ROOT / 'configs/sft/holdout_families.yaml'
 _BC_VAL_PKL = REPO_ROOT / 'data/benchcad/val.pkl'
 
 
