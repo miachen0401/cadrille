@@ -52,8 +52,11 @@ from common.essential_ops import ESSENTIAL_BY_FAMILY as ESS_SPEC
 # ------------------------------------------------------------------
 RUNS = [
     {
-        'key':   'v3',
-        'label': '(ref) v3 — IID ceiling (saw all families)',
+        # v3 trained on all 106 BenchCAD families, so on the held-out families
+        # it IS the IID line (those families are in-distribution for v3).
+        # No separate matched-recipe iid run is needed — saves a 24h chain step.
+        'key':   'iid_v3',
+        'label': '(1) iid — v3 baseline (trained on all 106 families)',
         'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions',
         'plot':  dict(color='C2', linewidth=2.0, marker='', linestyle='-', alpha=0.85),
     },
@@ -72,14 +75,8 @@ RUNS = [
     {
         'key':   'ood',
         'label': '(2) ood — holdout, no benchcad-easy',
-        'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-1753/predictions',  # populated when chain reaches it
+        'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-1753/predictions',
         'plot':  dict(color='C3', linewidth=2.0, marker='D', markersize=5, linestyle='-', alpha=0.9),
-    },
-    {
-        'key':   'iid',
-        'label': '(1) iid — no holdout, full data',
-        'dir':   '/ephemeral/checkpoints/_NOT_LAUNCHED_yet_iid',
-        'plot':  dict(color='C1', linewidth=2.0, marker='o', markersize=5, linestyle='-', alpha=0.9),
     },
 ]
 

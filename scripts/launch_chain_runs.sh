@@ -86,6 +86,9 @@ fi
 
 launch_run configs/sft/baseline.yaml baseline
 launch_run configs/sft/ood.yaml ood
-launch_run configs/sft/iid.yaml iid
+# iid step intentionally dropped — v3 (saw all 106 families) already
+# serves as the IID upper-bound when evaluated on the held-out families.
+# Re-add `launch_run configs/sft/iid.yaml iid` here only if a recipe-matched
+# iid is needed (e.g. to control for v3's 36/64 mix vs v4's 60/40).
 
 log "=== chain complete ==="

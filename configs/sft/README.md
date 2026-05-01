@@ -1,14 +1,15 @@
 # SFT Configs — Paper §7 v4-holdout study
 
-Four runs cover the §7.a/§7.b 4-line plots. Naming scheme is **role-based**:
-the config name tells you what role the run plays in the §7 figure.
+Four roles in the §7 figures, but only **three** trained runs needed —
+v3 already plays the iid role (it saw all 106 families during training).
 
-| Config | Role | Holdout | benchcad-easy | bench-stack | Mix (HQ/bench) |
-|---|---|---|---|---|---|
-| `baseline.yaml`     | Floor — no BenchCAD data       | n/a (no bench) | ✗ | ✗ | 100/0  |
-| `ood.yaml`          | Held-out fams, plain bench     | 10 fams        | ✗ | ✓ | 60/40  |
-| `ood_enhance.yaml`  | Held-out fams + easy supplement| 10 fams        | ✓ (80k) | ✓ | 60/40  |
-| `iid.yaml`          | Full bench, no holdout (upper) | none           | ✓ | ✓ | 60/40  |
+| Config | Role in §7 figures | Holdout | benchcad-easy | bench-stack | Mix (HQ/bench) | Status |
+|---|---|---|---|---|---|---|
+| _legacy v3 ckpt_    | (1) **iid** ceiling — v3 saw all families | n/a | ✗ | ✓ | 36/64 | ✅ done (50k) |
+| `ood.yaml`          | (2) ood — held-out fams, plain bench       | 10 fams | ✗ | ✓ | 60/40 | 🟡 chain run 2 |
+| `ood_enhance.yaml`  | (3) ood_enhance — holdout + easy supplement| 10 fams | ✓ (80k) | ✓ | 60/40 | ✅ stopped @ 24k |
+| `baseline.yaml`     | (4) baseline — HQ only (floor)             | n/a (no bench) | ✗ | ✗ | 100/0 | ✅ stopped @ 11k |
+| ~~`iid.yaml`~~      | (skipped — v3 covers this role)            | none | ✓ | ✓ | 60/40 | ⛔ not run |
 
 `holdout_families.yaml` is the canonical list of held-out families
 (loaded by `common/holdout.py` for offline scripts and by `train/sft/online_eval.py`
@@ -19,16 +20,18 @@ with this file.
 
 | Config | Run name (wandb / ckpt dir) | Ckpt path | HF repo | Status |
 |---|---|---|---|---|
-| `ood_enhance.yaml`  | sft-s50k-lr2e-4-b8a4-img-0430-0828 | `/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/` | `Hula0401/cadrille-qwen3vl-2b-v4-holdout-50k` | 🟡 in progress (will stop at next save) |
-| `baseline.yaml`     | (TBD)                              | (TBD)                                                       | `Hula0401/cadrille-qwen3vl-2b-baseline-50k`        | ❌ pending — chain run #1 |
-| `ood.yaml`          | (TBD)                              | (TBD)                                                       | `Hula0401/cadrille-qwen3vl-2b-ood-50k`             | ❌ pending — chain run #2 |
-| `iid.yaml`          | (TBD)                              | (TBD)                                                       | `Hula0401/cadrille-qwen3vl-2b-iid-50k`             | ❌ pending — chain run #3 |
+| _legacy v3_         | sft-s50k-lr2e-4-b8a4-img-0428-1320 | `/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/` | (local only, 50k done) | ✅ iid line in §7 figs |
+| `ood_enhance.yaml`  | sft-s50k-lr2e-4-b8a4-img-0430-0828 | `/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/` | `Hula0401/cadrille-qwen3vl-2b-v4-holdout-50k` | ✅ stopped @ 24k |
+| `baseline.yaml`     | sft-s50k-lr2e-4-b8a4-img-0501-0629 | `/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-0629/` | `Hula0401/cadrille-qwen3vl-2b-baseline-50k`   | ✅ stopped @ 11k (OOD ess_pass=0 plateau established) |
+| `ood.yaml`          | sft-s50k-lr2e-4-b8a4-img-0501-1753 | `/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-1753/` | `Hula0401/cadrille-qwen3vl-2b-ood-50k`        | 🟡 in progress |
+| ~~`iid.yaml`~~      | —                                  | —                                                            | —                                              | ⛔ not run (v3 plays this role) |
 
-Legacy v3 (50k done, no HF upload, ckpt at
-`/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/`) is kept on disk as
-the IID upper-bound for offline cad_bench_722 eval. The v3 yaml itself was
-removed from `configs/sft/`; reference it through the saved
-`run_config.yaml` inside that ckpt dir if you need to re-launch.
+`iid.yaml` is kept on disk as a documented option but the §7 chain skips it:
+v3 trained on all 106 BenchCAD families, so on the held-out families it IS
+the iid line (those families are in-distribution for v3). Re-launch via
+`launch_run configs/sft/iid.yaml iid` in `scripts/launch_chain_runs.sh`
+only if a recipe-matched iid is needed (controls v3's 36/64 mix vs v4's
+60/40 mix).
 
 ## Holdout family list
 
