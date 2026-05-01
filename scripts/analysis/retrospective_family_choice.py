@@ -49,7 +49,7 @@ def load_setup():
     uid2fam = {r['uid']: r['family'] for r in bc_val}
     tax = yaml.safe_load(open(REPO_ROOT / 'configs/eval/op_taxonomy.yaml'))
     patterns = {n: re.compile(p) for n, p in tax['patterns'].items()}
-    ess_spec = yaml.safe_load(open(REPO_ROOT / 'configs/eval/canonical_ops.yaml'))
+    from common.essential_ops import ESSENTIAL_BY_FAMILY as ess_spec
     return uid2fam, patterns, ess_spec
 
 

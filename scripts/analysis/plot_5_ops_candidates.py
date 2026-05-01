@@ -43,7 +43,7 @@ def setup():
     patterns = {n: re.compile(p) for n, p in tax['patterns'].items()}
     rare = set(tax['rare'])
     feat = set(tax['feature'])
-    ess_spec = yaml.safe_load(open(REPO_ROOT / 'configs/eval/canonical_ops.yaml'))
+    from common.essential_ops import ESSENTIAL_BY_FAMILY as ess_spec
     return uid2fam, patterns, rare, feat, ess_spec
 
 

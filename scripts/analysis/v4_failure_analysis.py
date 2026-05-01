@@ -46,10 +46,7 @@ def _load_taxonomy():
     }
 
 
-def _load_essentials():
-    return yaml.safe_load(open(REPO_ROOT / 'configs/eval/canonical_ops.yaml'))
-
-
+from common.essential_ops import ESSENTIAL_BY_FAMILY
 def find_ops(code, patterns):
     if not code: return set()
     out = {n for n, p in patterns.items() if p.search(code)}
@@ -247,7 +244,7 @@ def main():
     bc_val = pickle.load(open(REPO_ROOT / 'data/benchcad/val.pkl', 'rb'))
     uid2fam = {r['uid']: r['family'] for r in bc_val}
     tax = _load_taxonomy()
-    ess_spec = _load_essentials()
+    ess_spec = ESSENTIAL_BY_FAMILY
 
     print('parsing v4 ...')
     v4 = parse_run(V4_DIR, uid2fam, tax, ess_spec)

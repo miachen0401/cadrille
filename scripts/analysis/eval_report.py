@@ -43,10 +43,7 @@ def _load_taxonomy():
     }
 
 
-def _load_essentials():
-    return yaml.safe_load(open(REPO_ROOT / 'configs/eval/canonical_ops.yaml'))
-
-
+from common.essential_ops import ESSENTIAL_BY_FAMILY
 def find_ops(code: str, patterns: dict) -> set[str]:
     if not code:
         return set()
@@ -168,7 +165,7 @@ def build_report(step: int) -> str:
     bc_val = pickle.load(open(REPO_ROOT / 'data/benchcad/val.pkl', 'rb'))
     uid2fam = {r['uid']: r['family'] for r in bc_val}
     tax = _load_taxonomy()
-    ess_spec = _load_essentials()
+    ess_spec = ESSENTIAL_BY_FAMILY
 
     def parse(pred_dir: str):
         path = Path(pred_dir) / f'step-{step:06d}.jsonl'

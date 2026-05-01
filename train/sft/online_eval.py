@@ -34,79 +34,33 @@ from common.model import collate
 from common.metrics import compute_metrics
 
 
-def _load_canonical_essentials() -> dict:
-    """Load Cadance per-family essential ops spec from configs/eval/canonical_ops.yaml.
-    Returns family -> AND-of-OR spec; empty dict if file missing."""
-    try:
-        import yaml
-        path = Path(__file__).resolve().parent.parent.parent / 'configs/eval/canonical_ops.yaml'
-        if path.exists():
-            return yaml.safe_load(path.read_text()) or {}
-    except Exception as e:
-        print(f'[online-eval] failed to load canonical_ops.yaml: {e}', flush=True)
-    return {}
-
-
-_ESSENTIALS = _load_canonical_essentials()
-# Feature ops for feature_F1 metric (independent of essential_pass)
-_FEATURE_OPS = {'chamfer', 'fillet', 'hole'}
-
-
-def _essential_pass(family: str, pred_ops: set[str]) -> bool | None:
-    """Cadance essential_pass: outer AND of inner OR-tuples.
-    Returns True/False if family has spec, else None (N/A)."""
-    spec = _ESSENTIALS.get(family)
-    if not spec:
-        return None
-    for elem in spec:
-        if isinstance(elem, str):
-            if elem not in pred_ops:
-                return False
-        elif isinstance(elem, list):
-            if not any(o in pred_ops for o in elem):
-                return False
-    return True
-
-
-def _feature_f1(pred_ops: set[str], gt_ops: set[str]) -> float:
-    """F1 over {chamfer, fillet, hole} presence indicators."""
-    pf = pred_ops & _FEATURE_OPS
-    gf = gt_ops & _FEATURE_OPS
-    if not gf and not pf:
-        return 1.0
-    if not gf or not pf:
-        return 0.0
-    tp = len(pf & gf); fp = len(pf - gf); fn = len(gf - pf)
-    pr = tp / (tp + fp) if tp + fp else 0.0
-    rc = tp / (tp + fn) if tp + fn else 0.0
-    return 2 * pr * rc / (pr + rc) if pr + rc else 0.0
+# Use canonical essential-ops module (master): single source for per-family
+# AND-of-OR spec, find_ops(), essential_pass(), feature_f1().
+from common.essential_ops import (
+    find_ops as _find_ops,
+    essential_pass as _essential_pass,
+    feature_f1 as _feature_f1,
+    OP_PATTERNS as _ESS_OP_PATTERNS,
+)
 
 
 def _op_presence_entropy(codes: list[str]) -> float:
-    """Shannon entropy (nats) of op presence distribution across n samples."""
+    """Shannon entropy (nats) of op presence distribution across n samples.
+    Uses common.essential_ops.OP_PATTERNS (21-op vocab) for consistency."""
     if not codes:
         return 0.0
-    op_pats = list(_OPS.values())
-    counts = np.zeros(len(op_pats))
+    op_names = list(_ESS_OP_PATTERNS.keys())
+    counts = np.zeros(len(op_names))
     for c in codes:
-        for i, p in enumerate(op_pats):
-            if p.search(c or ''):
+        ops = _find_ops(c or '')
+        for i, n in enumerate(op_names):
+            if n in ops:
                 counts[i] += 1
     if counts.sum() == 0:
         return 0.0
     p = counts / counts.sum()
     p = p[p > 0]
     return float(-(p * np.log(p)).sum())
-
-
-def _find_ops(code: str) -> set[str]:
-    """Helper: return set of op names that appear in code."""
-    if not code:
-        return set()
-    out = {n for n, pat in _OPS.items() if pat.search(code)}
-    if 'sweep' in out and 'helix' in out:
-        out.add('sweep+helix')
-    return out
 
 
 # Op regex — kept in lockstep with scripts/analysis/diversity_analysis.py::_OPS.
