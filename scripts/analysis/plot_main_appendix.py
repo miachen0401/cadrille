@@ -72,7 +72,7 @@ RUNS = [
     {
         'key':   'ood',
         'label': '(2) ood — holdout, no benchcad-easy',
-        'dir':   '/ephemeral/checkpoints/_NOT_LAUNCHED_yet_ood',  # populated when chain reaches it
+        'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0501-1753/predictions',  # populated when chain reaches it
         'plot':  dict(color='C3', linewidth=2.0, marker='D', markersize=5, linestyle='-', alpha=0.9),
     },
     {
