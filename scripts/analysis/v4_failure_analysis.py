@@ -144,7 +144,7 @@ def fig1_per_family(v3_records, v4_records, out: Path):
 
 
 def fig2_op_confusion(v4_records, out: Path):
-    families_in_spec = HOLDOUT[:]
+    families_in_spec = sorted(HOLDOUT)
     family_req = {
         'tapered_boss': 'loft|taper=', 'taper_pin': 'revolve|sweep',
         'venturi_tube': 'revolve|sweep', 'bucket': 'revolve|sweep',
