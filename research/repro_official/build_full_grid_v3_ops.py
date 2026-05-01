@@ -388,59 +388,20 @@ def main():
 
     # ── Sorted stems (or per-family representatives) ───────────────────────
     if args.per_family > 0:
-        # For each family, pick `args.per_family` cases where BOTH
-        # cadrille_qwen3vl_v3 AND cadevolve_rl1 successfully exec.
-        # Tiebreak: case whose IoU(Q3VL) is closest to family's median IoU,
-        # so we get a "representative" sample (not the best or worst).
-        from collections import defaultdict
-        # group stems by family (using the first metadata that has family field)
-        fam_to_stems = defaultdict(list)
-        for stem in metas['cadrille_qwen3vl_v3']:
-            fam = (metas['cadrille_qwen3vl_v3'].get(stem) or {}).get('family')
-            if fam:
-                fam_to_stems[fam].append(stem)
-        # sort families by sample count desc
-        fams_sorted = sorted(fam_to_stems.items(), key=lambda kv: -len(kv[1]))
-        chosen = []
-        for fam, stems in fams_sorted:
-            # filter to both-exec-ok
-            cands = []
-            for s in stems:
-                q = metas['cadrille_qwen3vl_v3'].get(s) or {}
-                c = metas['cadevolve_rl1'].get(s) or {}
-                if (q.get('error_type') == 'success'
-                        and c.get('error_type') == 'success'
-                        and q.get('iou') is not None and c.get('iou') is not None):
-                    cands.append((s, q['iou']))
-            if not cands:
-                # fallback: any case where at least one of {Q3VL, CADEvolve} succeeded
-                for s in stems:
-                    q = metas['cadrille_qwen3vl_v3'].get(s) or {}
-                    c = metas['cadevolve_rl1'].get(s) or {}
-                    if (q.get('error_type') == 'success'
-                            or c.get('error_type') == 'success'):
-                        cands.append((s, q.get('iou') or c.get('iou') or 0))
-            if not cands:
-                continue
-            # median by Q3VL iou
-            cands.sort(key=lambda t: t[1])
-            mid = cands[len(cands) // 2]
-            picks = [mid[0]]
-            # if asked for more per family, add the next-distance ones
-            if args.per_family > 1:
-                # add highest + lowest for diversity
-                picks.append(cands[0][0])
-                if len(cands) > 1:
-                    picks.append(cands[-1][0])
-                picks = picks[:args.per_family]
-            for p in picks:
-                chosen.append(p)
+        # Single source of truth for "representative case per family".
+        # See research/repro_official/_per_family_canonical.py for the rule.
+        from _per_family_canonical import all_canonical
+        canonical = all_canonical()
+        chosen = list(canonical.values())
         all_stems = sorted(set(chosen),
                            key=lambda s: ((metas['cadrille_qwen3vl_v3'].get(s)
                                            or metas['cadevolve_rl1'].get(s)
                                            or {}).get('family', '~'), s))
-        print(f'  per-family selection: {len(all_stems)} stems '
-              f'across {len(fams_sorted)} families', flush=True)
+        print(f'  per-family canonical: {len(all_stems)} stems '
+              f'across {len(canonical)} families', flush=True)
+        if args.per_family > 1:
+            print(f'  (--per-family {args.per_family} requested but canonical '
+                  f'rule emits exactly 1 stem/family; ignoring count)', flush=True)
     else:
         all_stems = sorted(set().union(*[set(m.keys()) for m in metas.values()]))
     if args.limit:

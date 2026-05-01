@@ -379,28 +379,18 @@ def main():
         print(f'    {f["family"]:<26} n={f["n"]} ce={f["ce_iou"]:.3f} q={f["q_iou"]:.3f}',
               flush=True)
 
-    # Pick representative case per family: largest q − ce IoU delta
+    # Single source of truth for "representative case per family" — see
+    # _per_family_canonical.py. Same case will appear in every per-family
+    # analysis (overview grid, weak families, code deepdive).
+    from _per_family_canonical import pick_canonical_case
     chosen = []
     for fam_info in weak_fams:
-        fam = fam_info['family']
-        cands = []
-        for stem, c in ce_per_case.items():
-            if c['family'] != fam: continue
-            ce_rec = metas['cadevolve_rl1'].get(stem) or {}
-            q_rec  = metas['cadrille_qwen3vl_v3'].get(stem) or {}
-            if (ce_rec.get('error_type') == 'success'
-                    and q_rec.get('error_type') == 'success'
-                    and ce_rec.get('iou') is not None and q_rec.get('iou') is not None):
-                cands.append((stem, q_rec['iou'] - ce_rec['iou']))
-        if not cands:
-            for stem, c in ce_per_case.items():
-                if c['family'] != fam: continue
-                cands.append((stem, 0))
-        if not cands: continue
-        cands.sort(key=lambda t: -t[1])
-        chosen.append({'stem': cands[0][0], **fam_info})
-
-    print(f'  selected {len(chosen)} cases', flush=True)
+        stem = pick_canonical_case(fam_info['family'])
+        if stem is None:
+            print(f'  ! no canonical case for {fam_info["family"]}', flush=True)
+            continue
+        chosen.append({'stem': stem, **fam_info})
+    print(f'  selected {len(chosen)} cases (canonical per-family)', flush=True)
 
     # GT
     print('Fetching GT composite_png …', flush=True)
