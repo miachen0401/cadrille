@@ -432,7 +432,8 @@ def parse_eval_block(log_path: Path, step: int) -> dict:
     # Look ahead enough to capture both greedy eval AND max_iou@8 block
     block = text[idx:idx + 12000]
     out = {}
-    for bucket in ('BenchCAD val', 'recode20k train', 'text2cad train',
+    for bucket in ('BenchCAD val', 'BenchCAD val IID', 'BenchCAD val OOD',
+                   'recode20k train', 'text2cad train',
                    'DeepCAD test', 'Fusion360 test'):
         pat = re.compile(
             rf'\[(?:img|text)/{re.escape(bucket)}\]\s+'
@@ -462,6 +463,13 @@ def parse_eval_block(log_path: Path, step: int) -> dict:
             entry['pass_gt_0_5'] = float(m2.group('p'))
         if entry:
             out[bucket] = entry
+    # Backward-compat alias: downstream summary code keys 'BenchCAD val'.
+    # Prefer IID (the in-distribution number) when only the split form exists.
+    if 'BenchCAD val' not in out:
+        if 'BenchCAD val IID' in out:
+            out['BenchCAD val'] = out['BenchCAD val IID']
+        elif 'BenchCAD val OOD' in out:
+            out['BenchCAD val'] = out['BenchCAD val OOD']
     return out
 
 
@@ -605,8 +613,24 @@ def build_trajectory_collage(bucket: str,
 
 # ─── EVAL MODE ──────────────────────────────────────────────────────────────
 
+def _canonical_bucket(b: str | None) -> str | None:
+    """Map 'BenchCAD val IID' / 'BenchCAD val OOD' → 'BenchCAD val' so older
+    code paths that group by IOU_BUCKETS still see one BC val pool.
+    Per-row IID/OOD identity is recovered at render time via uid → family."""
+    if b in ('BenchCAD val IID', 'BenchCAD val OOD'):
+        return 'BenchCAD val'
+    return b
+
+
 def _read_jsonl(p: Path) -> list[dict]:
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    rows = []
+    for l in p.read_text().splitlines():
+        if not l.strip():
+            continue
+        r = json.loads(l)
+        r['bucket'] = _canonical_bucket(r.get('bucket'))
+        rows.append(r)
+    return rows
 
 
 def discover_steps(pred_dir: Path, max_step: int) -> list[int]:

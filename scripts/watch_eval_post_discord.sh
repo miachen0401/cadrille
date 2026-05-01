@@ -44,18 +44,25 @@ while true; do
             if ! grep -q "step=${step} running IoU eval" "$LOG_PATH" 2>/dev/null; then
                 continue
             fi
-            # Wait until all 5 buckets are logged for this step (otherwise IoU
-            # for the last bucket might be missing). Heuristic: count "[img/" +
-            # "[text/" lines after the marker.
+            # Wait until all expected buckets are logged for this step
+            # (otherwise IoU for the last bucket might be missing). Heuristic:
+            # count "[img/" + "[text/" lines after the marker.
             block=$(awk -v m="step=${step} running IoU eval" '
                 $0 ~ m {found=1}
                 found {print}
             ' "$LOG_PATH")
-            # Threshold: 4 buckets (text2cad legacy deleted; only BC val + recode20k train +
-            # DC test + FU test now reliably show. text2cad train counts but if 0 items it's skipped).
-            n_done=$(echo "$block" | grep -cE '\[(img|text)/(BenchCAD val|recode20k train|text2cad train|DeepCAD test|Fusion360 test)\]' || true)
-            if [ "$n_done" -lt 4 ]; then
-                echo "[watch] step=$step only $n_done/4 buckets logged, waiting"
+            # New online_eval splits BenchCAD val into IID + OOD when
+            # holdout_families is set, so the post-refactor world has 5
+            # buckets: BC val IID + BC val OOD + recode20k train + DC test +
+            # Fu test. Pre-refactor runs emit a single 'BenchCAD val' bucket
+            # → still hits 4. text2cad train is skipped at 0 items.
+            n_done=$(echo "$block" | grep -cE '\[(img|text)/(BenchCAD val( IID| OOD)?|recode20k train|text2cad train|DeepCAD test|Fusion360 test)\]' || true)
+            n_thresh=4
+            if echo "$block" | grep -qE '\[(img|text)/BenchCAD val (IID|OOD)\]'; then
+                n_thresh=5
+            fi
+            if [ "$n_done" -lt "$n_thresh" ]; then
+                echo "[watch] step=$step only $n_done/$n_thresh buckets logged, waiting"
                 continue
             fi
             # max_iou@8 cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
