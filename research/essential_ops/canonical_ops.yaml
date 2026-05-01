@@ -41,7 +41,7 @@ nozzle:            [[revolve, sweep]]
 piston:            [[revolve, sweep]]
 pulley:            [[revolve, sweep]]
 rivet:             [[revolve, sweep]]
-taper_pin:         [[revolve, sweep]]
+taper_pin:         [[revolve, sweep, loft]]   # truncated cone — loft(circle1, circle2) is geometrically equivalent
 venturi_tube:      [[revolve, sweep]]
 
 # ── ring / torus shapes ───────────────────────────────────────────────────

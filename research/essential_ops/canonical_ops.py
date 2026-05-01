@@ -138,25 +138,14 @@ def find_ops(code: str) -> set[str]:
     # When both signals are present, count the result as `polygon`.
     if "polyline" in found and re.search(r"\.close\s*\(", code):
         found.add("polygon")
-    # Loft is a sweep-class operation: `circle().workplane(offset).circle().
-    # loft()` produces the same body as revolving a tapered profile, and
-    # `loft` between profile pairs is mathematically a generalised sweep.
-    # Credit revolve / sweep when loft is used (the family specs that ask
-    # for revolve|sweep mean "any sweep-class op that builds a 3D form
-    # from a profile").
-    if "loft" in found:
-        found.add("revolve")
-        found.add("sweep")
-    # `pushPoints([[x,y], [x,y], ...])` followed by a hole/cut/circle is
-    # the lower-level primitive that `rarray` is built on top of — both
-    # place a pattern of points before applying a feature. Count
-    # pushPoints with ≥ 4 points as semantically equivalent to rarray.
-    pp_match = re.search(r"\.pushPoints\s*\(\s*\[(.*?)\]\s*\)", code, re.DOTALL)
-    if pp_match:
-        # Count tuples / lists inside the pushPoints arg.
-        n_pts = len(re.findall(r"[\(\[]\s*-?\d", pp_match.group(1)))
-        if n_pts >= 4:
-            found.add("rarray")
+    # Note: `loft` and `revolve`/`sweep` are NOT inclusion-related — they
+    # are different ops with overlapping use-cases on specific shapes
+    # (a truncated cone is loft-able AND revolve-able, but a 3-profile
+    # loft is not equivalent to a single-profile revolve). Per-family
+    # equivalence belongs in canonical_ops.yaml as alternatives in the
+    # OR-tuple, NOT as a global alias here.
+    # Same reasoning for `pushPoints`: not every pushPoints is rarray
+    # (irregular point clouds exist), so it's per-family in the spec.
     return found
 
 
