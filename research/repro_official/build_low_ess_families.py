@@ -31,7 +31,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / 'research/essential_ops'))
 sys.path.insert(0, str(REPO / 'research/repro_official'))
 
 EVAL_ROOT = REPO / 'eval_outputs/cad_bench_722'
@@ -273,7 +272,7 @@ def main():
     ess_pc = {slug: {c['stem']: c for c in m['per_case']}
               for slug, m in ess['models'].items()}
 
-    from canonical_ops import ESSENTIAL_BY_FAMILY
+    from common.essential_ops import ESSENTIAL_BY_FAMILY
 
     # Per-family canonical case = both-exec-ok, Q3VL IoU closest to
     # family median (alphabetical tiebreak).

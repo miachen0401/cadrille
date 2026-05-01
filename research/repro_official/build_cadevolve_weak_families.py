@@ -32,7 +32,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / 'research/essential_ops'))
 
 EVAL_ROOT = REPO / 'eval_outputs/cad_bench_722'
 RENDER_CACHE = Path('/tmp/cad_bench_722_renders')
@@ -331,7 +330,7 @@ def main():
     ess_per_case = {slug: {c['stem']: c for c in m['per_case']}
                     for slug, m in ess_raw['models'].items()}
 
-    from canonical_ops import ESSENTIAL_BY_FAMILY
+    from common.essential_ops import ESSENTIAL_BY_FAMILY
     def family_essential_set(fam):
         spec = ESSENTIAL_BY_FAMILY.get(fam) or []
         out = set()

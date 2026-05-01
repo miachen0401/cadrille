@@ -36,7 +36,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / 'research/essential_ops'))
 
 EVAL_ROOT = REPO / 'eval_outputs/cad_bench_722'
 REPRO_DIR = REPO / 'eval_outputs/repro_official/cad_bench_722_full' / 'py'
@@ -220,11 +219,11 @@ def _draw_wrapped_ops(d, x, y, max_w, ops_color_pairs, font):
     return line_y + line_h
 
 
-def _annot_cell(img, label, iou, ep, gen_ops, essential_set, family_n_a):
+def _annot_cell(img, label, iou, ep, gen_ops, essential_set, family_n_a, es=None):
     """One pred cell: thumbnail + 3-line annotation.
 
     Annotation:
-      line 1: label + IoU + ESS verdict
+      line 1: label + IoU + ESS verdict + fractional score (e.g. ESS 1/2)
       line 2-3: ops (green=matched essential, red=missing essential, gray=extra)
     """
     from PIL import Image, ImageDraw
@@ -247,9 +246,16 @@ def _annot_cell(img, label, iou, ep, gen_ops, essential_set, family_n_a):
         ep_str, ep_color = 'ESS✗', (240, 90, 90)
     else:
         ep_str, ep_color = 'ESS—', (160, 160, 160)
+    # Fractional ESS score in [0,1] — shown as ratio "k/N" of the
+    # k satisfied AND-elements out of N total. None = N/A family.
+    if es is not None:
+        es_str = f'{es:.2f}'
+    else:
+        es_str = '—'
     iou_str = f'IoU={iou:.2f}' if iou is not None else 'IoU=—'
     d.text((4, y0 + 2), iou_str, fill=(225, 225, 225), font=f_lab)
-    d.text((side - 36, y0 + 2), ep_str, fill=ep_color, font=f_lab)
+    d.text((side - 78, y0 + 2), ep_str, fill=ep_color, font=f_lab)
+    d.text((side - 38, y0 + 2), es_str, fill=ep_color, font=f_val)
 
     # ops list with color coding
     if gen_ops is None:
@@ -349,6 +355,12 @@ def main():
     ap.add_argument('--per-family', type=int, default=0,
                     help='If >0, pick this many representative cases per family '
                          '(sorted by family sample count desc) instead of all 720')
+    ap.add_argument('--split-by-iou', type=float, default=0,
+                    help='If >0, split cases into 2 groups by Q3VL IoU '
+                         '(threshold). Generates _high.png and _low.png suffixes.')
+    ap.add_argument('--no-render-preds', action='store_true',
+                    help='Skip rendering pred meshes; show only GT image + '
+                         'per-model text annotations (ops, IoU, ESS).')
     ap.add_argument('--out-dir',  default=str(OUT_DIR))
     ap.add_argument('--discord',  action='store_true')
     args = ap.parse_args()
@@ -373,7 +385,7 @@ def main():
                     for slug, m in ess_raw['models'].items()}
 
     # canonical_ops.ESSENTIAL_BY_FAMILY for the essential sets
-    from canonical_ops import ESSENTIAL_BY_FAMILY
+    from common.essential_ops import ESSENTIAL_BY_FAMILY
     def family_essential_set(fam):
         spec = ESSENTIAL_BY_FAMILY.get(fam)
         if not spec:
@@ -419,6 +431,24 @@ def main():
     n_cases = len(all_stems)
     print(f'  total cases: {n_cases}', flush=True)
 
+    # ── Optional split by Q3VL IoU into high / low groups ──────────────────
+    iou_split_groups = None  # None = single group; otherwise [(label, [stems])]
+    if args.split_by_iou > 0:
+        thr = args.split_by_iou
+        high, low = [], []
+        for stem in all_stems:
+            q = metas['cadrille_qwen3vl_v3'].get(stem) or {}
+            iou = q.get('iou')
+            # Sort failed-exec / no-iou into the LOW bucket so they're visible
+            if iou is not None and iou >= thr:
+                high.append(stem)
+            else:
+                low.append(stem)
+        iou_split_groups = [(f'high_iou_ge{thr:.2f}', high),
+                            (f'low_iou_lt{thr:.2f}',  low)]
+        print(f'  split @ Q3VL IoU={thr}: high={len(high)}, low={len(low)}',
+              flush=True)
+
     # ── GT composite_png ────────────────────────────────────────────────────
     print('Fetching GT composite_png …', flush=True)
     from datasets import load_dataset
@@ -429,18 +459,24 @@ def main():
     print(f'  loaded {len(gt_by_stem)} GT images', flush=True)
 
     # ── Render preds (with cache) ──────────────────────────────────────────
-    print('Rendering preds …', flush=True)
+    # `--no-render-preds`: skip rendering entirely, just show GT image + per-model
+    # text annotations. Much faster (no exec + no render); useful when the user
+    # only cares about ops + scores, not the visual reconstruction.
+    if args.no_render_preds:
+        print('--no-render-preds: skipping pred rendering', flush=True)
+    print('Rendering preds …' if not args.no_render_preds else '', flush=True)
     tasks = []
-    for slug, _ in MODELS:
-        for stem in all_stems:
-            rec = metas[slug].get(stem) or {}
-            if rec.get('error_type') != 'success':
-                continue
-            py_path = PRED_DIR[slug] / f'{stem}.py'
-            if not py_path.exists():
-                continue
-            tasks.append((slug, stem, str(py_path), args.task_timeout,
-                          str(RENDER_CACHE)))
+    if not args.no_render_preds:
+        for slug, _ in MODELS:
+            for stem in all_stems:
+                rec = metas[slug].get(stem) or {}
+                if rec.get('error_type') != 'success':
+                    continue
+                py_path = PRED_DIR[slug] / f'{stem}.py'
+                if not py_path.exists():
+                    continue
+                tasks.append((slug, stem, str(py_path), args.task_timeout,
+                              str(RENDER_CACHE)))
     pending = []
     for t in tasks:
         slug, stem = t[0], t[1]
@@ -469,88 +505,106 @@ def main():
 
     # ── Build pages ─────────────────────────────────────────────────────────
     from PIL import Image
-    print(f'\nBuilding {args.n_chunks} pages …', flush=True)
     cell_h = LABEL_H + SIDE + ANNOT_H
     page_w = NUM_W + (1 + len(MODELS)) * (SIDE + PAD)
-    chunk = (n_cases + args.n_chunks - 1) // args.n_chunks
     out_paths = []
-    for ci in range(args.n_chunks):
-        lo = ci * chunk
-        hi = min(lo + chunk, n_cases)
-        if lo >= hi: break
-        chunk_stems = all_stems[lo:hi]
-        page_h = HEADER_H + len(chunk_stems) * (cell_h + PAD)
-        page = Image.new('RGB', (page_w, page_h), color=(10, 10, 10))
-        page.paste(_page_header(page_w, HEADER_H,
-            f'cad_bench_722 — page {ci+1}/{args.n_chunks} (cases {lo+1}..{hi})  '
-            f'cols: # | GT | ' + ' | '.join(label for _, label in MODELS) +
-            '   ops: green=essential matched, !red=essential missing, gray=extra'),
-            (0, 0))
-        for ri, stem in enumerate(chunk_stems):
-            y = HEADER_H + ri * (cell_h + PAD)
-            mref = next((metas[s].get(stem, {}) for s, _ in MODELS
-                         if metas[s].get(stem) and metas[s][stem].get('family')), {})
-            family = mref.get('family')
-            diff = mref.get('difficulty')
-            page.paste(_number_cell(lo + ri + 1, family, diff, NUM_W, cell_h), (0, y))
-            x = NUM_W + PAD
-            # GT
-            gt = gt_by_stem.get(stem)
-            if gt is not None:
-                gt_img = gt.convert('RGB').resize((SIDE, SIDE), Image.LANCZOS)
-                ess_set = family_essential_set(family) if family else set()
-                page.paste(_annot_cell(gt_img, 'GT', None, None,
-                                       sorted(ess_set), ess_set, False),
-                           (x, y))
-            else:
-                page.paste(_annot_cell(_fail_tile(SIDE, 'NO GT'), 'GT',
-                                       None, None, [], set(), False), (x, y))
-            x += SIDE + PAD
 
-            # 4 model columns
-            ess_set = family_essential_set(family) if family else set()
-            family_n_a = (family is None or not ess_set)
-            for slug, label in MODELS:
-                rec = metas[slug].get(stem, {}) or {}
-                ec  = ess_per_case.get(slug, {}).get(stem, {}) or {}
-                iou = rec.get('iou')
-                ep  = ec.get('essential_pass')
-                gen_ops = ec.get('gen_ops')  # may be None if no per_case entry
-                ck = (f'repro_{slug}__{stem}.png' if slug == 'cadrille_rl_repro'
-                      else f'{slug}__{stem}.png')
-                cache_path = RENDER_CACHE / ck
-                if cache_path.exists() and cache_path.stat().st_size > 0:
-                    img = Image.open(cache_path).convert('RGB').resize(
-                        (SIDE, SIDE), Image.LANCZOS)
+    # If --split-by-iou, build separate page sets for each group.
+    # Otherwise treat the full all_stems as one group called 'all'.
+    groups = iou_split_groups if iou_split_groups else [('all', all_stems)]
+
+    for group_label, group_stems in groups:
+        n_g = len(group_stems)
+        if n_g == 0: continue
+        chunk = max(1, (n_g + args.n_chunks - 1) // args.n_chunks)
+        suffix = '' if group_label == 'all' else f'_{group_label}'
+        print(f'\nBuilding {args.n_chunks} pages for group "{group_label}" '
+              f'({n_g} cases) …', flush=True)
+        for ci in range(args.n_chunks):
+            lo = ci * chunk
+            hi = min(lo + chunk, n_g)
+            if lo >= hi: break
+            chunk_stems = group_stems[lo:hi]
+            page_h = HEADER_H + len(chunk_stems) * (cell_h + PAD)
+            page = Image.new('RGB', (page_w, page_h), color=(10, 10, 10))
+            page.paste(_page_header(page_w, HEADER_H,
+                f'cad_bench_722 — group "{group_label}" — page {ci+1}/{args.n_chunks} '
+                f'(cases {lo+1}..{hi} of {n_g})  '
+                f'cols: # | GT | ' + ' | '.join(label for _, label in MODELS) +
+                '   ops: green=essential matched, !red=essential missing, gray=extra'),
+                (0, 0))
+            for ri, stem in enumerate(chunk_stems):
+                y = HEADER_H + ri * (cell_h + PAD)
+                mref = next((metas[s].get(stem, {}) for s, _ in MODELS
+                             if metas[s].get(stem) and metas[s][stem].get('family')), {})
+                family = mref.get('family')
+                diff = mref.get('difficulty')
+                page.paste(_number_cell(lo + ri + 1, family, diff, NUM_W, cell_h), (0, y))
+                x = NUM_W + PAD
+                # GT
+                gt = gt_by_stem.get(stem)
+                if gt is not None:
+                    gt_img = gt.convert('RGB').resize((SIDE, SIDE), Image.LANCZOS)
+                    ess_set = family_essential_set(family) if family else set()
+                    page.paste(_annot_cell(gt_img, 'GT', None, None,
+                                           sorted(ess_set), ess_set, False),
+                               (x, y))
                 else:
-                    et = rec.get('error_type', 'no pred')
-                    img = _fail_tile(SIDE, et.upper())
-                page.paste(_annot_cell(img, label, iou, ep, gen_ops,
-                                       ess_set, family_n_a), (x, y))
+                    page.paste(_annot_cell(_fail_tile(SIDE, 'NO GT'), 'GT',
+                                           None, None, [], set(), False), (x, y))
                 x += SIDE + PAD
 
-        path = out_dir / f'cases_{lo+1:04d}-{hi:04d}.png'
-        page.save(path, optimize=True)
-        sz = path.stat().st_size / 1024 / 1024
-        print(f'  page {ci+1}/{args.n_chunks}: {hi-lo} cases  '
-              f'{page.size[0]}×{page.size[1]}  {sz:.1f}MB → {path.name}',
-              flush=True)
-        out_paths.append((path, lo + 1, hi))
+                # 4 model columns
+                ess_set = family_essential_set(family) if family else set()
+                family_n_a = (family is None or not ess_set)
+                for slug, label in MODELS:
+                    rec = metas[slug].get(stem, {}) or {}
+                    ec  = ess_per_case.get(slug, {}).get(stem, {}) or {}
+                    iou = rec.get('iou')
+                    ep  = ec.get('essential_pass')
+                    es  = ec.get('essential_score')
+                    gen_ops = ec.get('gen_ops')
+                    if args.no_render_preds:
+                        # Text-only cell — black thumbnail with model label, all
+                        # info goes into the annotation band. Saves ~2.5s per cell.
+                        img = Image.new('RGB', (SIDE, SIDE), color=(18, 18, 18))
+                    else:
+                        ck = (f'repro_{slug}__{stem}.png' if slug == 'cadrille_rl_repro'
+                              else f'{slug}__{stem}.png')
+                        cache_path = RENDER_CACHE / ck
+                        if cache_path.exists() and cache_path.stat().st_size > 0:
+                            img = Image.open(cache_path).convert('RGB').resize(
+                                (SIDE, SIDE), Image.LANCZOS)
+                        else:
+                            et = rec.get('error_type', 'no pred')
+                            img = _fail_tile(SIDE, et.upper())
+                    page.paste(_annot_cell(img, label, iou, ep, gen_ops,
+                                           ess_set, family_n_a, es=es), (x, y))
+                    x += SIDE + PAD
+
+            path = out_dir / f'cases{suffix}_{lo+1:04d}-{hi:04d}.png'
+            page.save(path, optimize=True)
+            sz = path.stat().st_size / 1024 / 1024
+            print(f'  page {ci+1}/{args.n_chunks}: {hi-lo} cases  '
+                  f'{page.size[0]}×{page.size[1]}  {sz:.1f}MB → {path.name}',
+                  flush=True)
+            out_paths.append((path, lo + 1, hi))
 
     # ── Discord ────────────────────────────────────────────────────────────
     if args.discord:
         print('\nPosting to Discord …', flush=True)
         for i, (p, lo, hi) in enumerate(out_paths):
             desc = (
-                f'📦 **cad_bench_722 (CADEvolve v3) — case grid w/ ops** '
-                f'page {i+1}/{len(out_paths)} (cases {lo}–{hi})\n'
+                f'📦 **cad_bench_722 (CADEvolve v3) — case grid w/ ops**\n'
+                f'`{p.name}` ({lo}–{hi})\n'
                 f'cols: case# | GT | Cadrille-rl | CADEvolve v3 | Q3VL (ours) | Qwen-zs\n'
-                f'each cell shows IoU + ESS verdict + ops used. Color: '
-                f'**green**=essential matched, **!red**=essential missing, **gray**=extra'
+                f'each cell: IoU + ESS verdict + ops used. '
+                f'**green**=essential matched, **!red**=missing, **gray**=extra'
             )
             ok = _post(desc, p)
-            print(f'  page {i+1}/{len(out_paths)} → {"sent" if ok else "FAILED"}', flush=True)
-            time.sleep(2)  # rate limit
+            print(f'  page {i+1}/{len(out_paths)} ({p.name}) → '
+                  f'{"sent" if ok else "FAILED"}', flush=True)
+            time.sleep(2)
 
     print('\nAll done.')
 

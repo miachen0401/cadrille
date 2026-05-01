@@ -36,9 +36,9 @@ REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from canonical_ops import (
+from common.essential_ops import (
     ESSENTIAL_BY_FAMILY, OP_PATTERNS, FEATURE_CLASS,
-    find_ops, essential_pass, feature_f1, fmt_spec,
+    find_ops, essential_pass, essential_score, feature_f1, fmt_spec,
 )
 
 EVAL_ROOT = REPO / 'eval_outputs' / 'cad_bench_722'
@@ -173,6 +173,7 @@ def main() -> None:
         n_pass = 0; n_fail = 0; n_na = 0
         n_no_pred = 0; n_filtered = 0
         feat_f1s = []
+        ess_scores = []                 # per-case fractional score [0,1] for partial credit
         per_family: dict[str, list[bool]] = defaultdict(list)
         per_case = []
         for stem, row in by_stem.items():
@@ -187,10 +188,12 @@ def main() -> None:
             gen_ops = find_ops(gen_code)
             gt_ops  = gt_ops_from_row(row)
             ep = essential_pass(row['family'], gen_ops)
+            es = essential_score(row['family'], gen_ops)  # fractional partial credit
             ff1 = feature_f1(gen_ops, gt_ops)
             if ep is True:  n_pass += 1; per_family[row['family']].append(True)
             elif ep is False: n_fail += 1; per_family[row['family']].append(False)
             else: n_na += 1
+            if es is not None: ess_scores.append(es)
             feat_f1s.append(ff1)
             per_case.append({'stem': stem, 'family': row['family'],
                              'difficulty': row.get('difficulty'),
@@ -198,6 +201,7 @@ def main() -> None:
                              'gt_ops':  sorted(gt_ops),
                              'iou': iou_by_stem.get(stem),
                              'essential_pass': ep,
+                             'essential_score': es,        # fractional [0,1] or None
                              'feature_f1': round(ff1, 4)})
 
         n_app = n_pass + n_fail
@@ -222,6 +226,12 @@ def main() -> None:
             #                           Models that don't exec get 0 credit.
             'pct_essential_pass':    (n_pass / n_app) if n_app else None,
             'pct_essential_pass_cw': n_pass / len(by_stem),
+            # Mean fractional ESS score over cases with applicable spec
+            # (each case contributes #satisfied_AND_elements / #total_AND_elements).
+            # Coverage-weighted variant denominates over total cases (720), so
+            # missing/non-exec preds count as 0 — fairer cross-model comparison.
+            'mean_essential_score':    (sum(ess_scores) / len(ess_scores)) if ess_scores else None,
+            'mean_essential_score_cw': (sum(ess_scores) / len(by_stem)) if ess_scores else 0.0,
             'mean_feature_f1':       (sum(feat_f1s) / len(feat_f1s)) if feat_f1s else None,
             'mean_feature_f1_cw':    feat_f1_cw_sum / len(by_stem),
             'per_family_pass_rate': {
@@ -230,10 +240,13 @@ def main() -> None:
             },
             'per_case': per_case,
         }
+        mean_es = sum(ess_scores)/len(ess_scores) if ess_scores else 0
+        mean_es_cw = sum(ess_scores)/len(by_stem) if ess_scores else 0
         print(f'  {label:<35}  exec_ok={len(per_case):3}  '
               f'pass={n_pass:3} fail={n_fail:3} na={n_na:3}  '
               f'ess={n_pass/n_app*100 if n_app else 0:5.1f}% '
               f'ess_cw={n_pass/len(by_stem)*100:5.2f}%  '
+              f'es_frac={mean_es:.3f} es_cw={mean_es_cw:.3f}  '
               f'F1={sum(feat_f1s)/len(feat_f1s) if feat_f1s else 0:.3f} '
               f'F1_cw={feat_f1_cw_sum/len(by_stem):.3f}',
               flush=True)

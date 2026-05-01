@@ -149,6 +149,36 @@ def find_ops(code: str) -> set[str]:
     return found
 
 
+def essential_score(family: str, gen_ops: set[str]) -> float | None:
+    """Per-case fractional score over the AND-elements of the family spec.
+
+    Returns:
+        in [0, 1] — fraction of AND-elements satisfied (each element is an
+                    OR-tuple; satisfied iff at least one alternative is in
+                    gen_ops, or — if element is a single string — that exact
+                    op is in gen_ops).
+        None      — family has no essential spec (N/A).
+
+    Examples:
+        spec [(loft|twistExtrude), (polyline|spline|...)]  AND of 2 OR-tuples
+            gen_ops={polyline}        →  1/2 = 0.5
+            gen_ops={loft, polyline}  →  2/2 = 1.0
+            gen_ops={cut}             →  0/2 = 0.0
+    """
+    spec = ESSENTIAL_BY_FAMILY.get(family)
+    if not spec:
+        return None
+    n_satisfied = 0
+    for element in spec:
+        if isinstance(element, str):
+            if element in gen_ops:
+                n_satisfied += 1
+        else:
+            if any(alt in gen_ops for alt in element):
+                n_satisfied += 1
+    return n_satisfied / len(spec)
+
+
 def essential_pass(family: str, gen_ops: set[str]) -> bool | None:
     """Per-stem essential check.
 

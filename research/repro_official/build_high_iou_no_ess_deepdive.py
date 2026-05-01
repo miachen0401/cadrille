@@ -90,8 +90,8 @@ def main():
     ess_per_case = {slug: {c['stem']: c for c in m['per_case']}
                     for slug, m in ess['models'].items()}
 
-    sys.path.insert(0, str(REPO / 'research/essential_ops'))
-    from canonical_ops import ESSENTIAL_BY_FAMILY
+    sys.path.insert(0, str(REPO))
+    from common.essential_ops import ESSENTIAL_BY_FAMILY
 
     from datasets import load_dataset
     ds = load_dataset('BenchCAD/cad_bench_722', split='train',

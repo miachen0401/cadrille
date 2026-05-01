@@ -29,9 +29,9 @@ sys.path.insert(0,
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                  'research', 'essential_ops'))
 
-from canonical_ops import (
+from common.essential_ops import (
     OP_PATTERNS, FEATURE_CLASS, ESSENTIAL_BY_FAMILY,
-    find_ops, essential_pass, feature_f1,
+    find_ops, essential_pass, essential_score, feature_f1,
 )
 
 
@@ -254,6 +254,50 @@ class TestPerFamilyAlternatives:
         assert essential_pass("helical_gear", {"loft"}) is False
         # missing structural element
         assert essential_pass("helical_gear", {"polyline"}) is False
+
+
+# ── essential_score (fractional / partial credit) ────────────────────────
+
+class TestEssentialScore:
+    """Fractional score in [0, 1] = #satisfied_AND_elements / #total."""
+
+    def test_na_when_family_unknown(self):
+        assert essential_score("not_a_family", {"cut"}) is None
+
+    def test_single_element_pass(self):
+        # propeller: [loft] — 1 element
+        assert essential_score("propeller", {"loft"}) == 1.0
+
+    def test_single_element_fail(self):
+        assert essential_score("propeller", {"revolve"}) == 0.0
+
+    def test_two_elements_partial(self):
+        # helical_gear: [(loft|twistExtrude), (polyline|spline|threePointArc|Sketch)]
+        assert essential_score("helical_gear", {"polyline"}) == 0.5
+        assert essential_score("helical_gear", {"loft"}) == 0.5
+        assert essential_score("helical_gear", {"loft", "polyline"}) == 1.0
+        assert essential_score("helical_gear", set()) == 0.0
+        assert essential_score("helical_gear", {"cut", "hole"}) == 0.0
+
+    def test_or_tuple_alternatives_dont_double_count(self):
+        # Each AND-element contributes at most 1 to the numerator,
+        # regardless of how many OR-tuple alternatives are matched.
+        assert essential_score("ball_knob", {"revolve", "sphere"}) == 1.0
+        assert essential_score("ball_knob", {"revolve"}) == 1.0
+        assert essential_score("ball_knob", {"sphere"}) == 1.0
+
+    def test_pass_iff_score_one(self):
+        # essential_pass and essential_score must agree at the boundaries.
+        for fam in ESSENTIAL_BY_FAMILY:
+            spec = ESSENTIAL_BY_FAMILY[fam]
+            full = set()
+            for el in spec:
+                if isinstance(el, str): full.add(el)
+                else: full.add(el[0])  # pick first alt
+            assert essential_pass(fam, full) is True
+            assert essential_score(fam, full) == 1.0
+            assert essential_pass(fam, set()) is False
+            assert essential_score(fam, set()) == 0.0
 
 
 # ── feature_f1 ────────────────────────────────────────────────────────────

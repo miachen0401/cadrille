@@ -160,7 +160,7 @@ def main():
             ess_set = set()
             from sys import path as _p
             _p.insert(0, str(REPO / 'research/essential_ops'))
-            from canonical_ops import ESSENTIAL_BY_FAMILY
+            from common.essential_ops import ESSENTIAL_BY_FAMILY
             spec = ESSENTIAL_BY_FAMILY.get(family) or []
             for elem in spec:
                 if isinstance(elem, str):
