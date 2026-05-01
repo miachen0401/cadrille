@@ -659,17 +659,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         else:
             print(f'[sft_mix_weights] enforced via WeightedRandomSampler: {active}')
 
-    # val set selection: prefer benchcad when it's the dominant source
-    # Prefer benchcad val whenever benchcad is in the mix (weight > 0) — that's
-    # the metric we're tracking. Fall back to cad-recode only when benchcad is
-    # absent entirely.
+    # val set selection: always prefer benchcad val when its pkl exists — it's
+    # the metric we report regardless of training mix. Some configs (e.g. the
+    # HQ-only baseline) zero the benchcad train weight but still want benchcad
+    # val for eval comparability. Only fall back to cad-recode val when no
+    # benchcad val.pkl is available, and only if cad-recode-v1.5 carries STL
+    # meshes (img-only bundles don't, and CadRecodeDataset.get_img would
+    # KeyError on `mesh_path`).
     eval_dataset = None
-    benchcad_dominant = (
-        sft_mix_weights
-        and float(sft_mix_weights.get('benchcad', 0)) > 0
-    )
     benchcad_val_pkl = os.path.join(benchcad_path, 'val.pkl')
-    if benchcad_dominant and os.path.exists(benchcad_val_pkl):
+    if os.path.exists(benchcad_val_pkl):
         eval_dataset = BenchCadDataset(
             root_dir=benchcad_path,
             split='val',
@@ -686,19 +685,26 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     else:
         val_pkl = os.path.join(cad_recode_path, 'val.pkl')
         if os.path.exists(val_pkl):
-            eval_dataset = CadRecodeDataset(
-                root_dir=cad_recode_path,
-                split='val',
-                n_points=256,
-                normalize_std_pc=100,
-                noise_scale_pc=None,
-                img_size=268,
-                normalize_std_img=200,
-                noise_scale_img=-1,
-                num_imgs=4,
-                mode=mode,
-                max_code_len=max_code_len)
-            print(f'[eval] using cad-recode val ({len(eval_dataset)} samples)')
+            with open(val_pkl, 'rb') as _f:
+                _val_probe = pickle.load(_f)
+            _val_has_stl = bool(_val_probe) and 'mesh_path' in _val_probe[0]
+            if _val_has_stl:
+                eval_dataset = CadRecodeDataset(
+                    root_dir=cad_recode_path,
+                    split='val',
+                    n_points=256,
+                    normalize_std_pc=100,
+                    noise_scale_pc=None,
+                    img_size=268,
+                    normalize_std_img=200,
+                    noise_scale_img=-1,
+                    num_imgs=4,
+                    mode=mode,
+                    max_code_len=max_code_len)
+                print(f'[eval] using cad-recode val ({len(eval_dataset)} samples)')
+            else:
+                print(f'[eval] cad-recode val.pkl is img-only (no mesh_path); '
+                      'no eval dataset selected')
     has_val = eval_dataset is not None
 
     processor = AutoProcessor.from_pretrained(

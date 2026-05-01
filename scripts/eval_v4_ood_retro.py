@@ -40,7 +40,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from common.holdout import HOLDOUT_FAMILIES  # noqa: E402
-from common.model import Cadrille  # noqa: E402
+from common.model import get_cadrille_class  # noqa: E402
 from eval.bench import run_bench  # noqa: E402
 
 
@@ -136,10 +136,10 @@ def main() -> None:
             print(f'  step={step} → already done, skipping', flush=True)
             continue
         print(f'\n  step={step} loading model from {ckpt}', flush=True)
-        model = Cadrille.from_pretrained(
+        cadrille_cls = get_cadrille_class(args.backbone)
+        model = cadrille_cls.from_pretrained(
             ckpt, torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
-            backbone=args.backbone,
         ).eval().to('cuda')
         run_bench(
             rows=rows, model=model, processor=processor,
