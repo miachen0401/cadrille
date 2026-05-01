@@ -1,11 +1,16 @@
 # Learnings — 2026-04-29
 
 Single source of truth for SFT recipe decisions and what we know works.
-Earlier learnings are in `docs/comparison_2026-04-26.md` and the v3 config
-header (`configs/sft/big_bench_shell_50k_v3.yaml` lines 1-38). This doc
-captures everything since 04-26 and consolidates v3's design rationale.
+Earlier learnings are in `docs/comparison_2026-04-26.md`. The v3 yaml was
+removed during the 2026-05-01 config rename; refer to
+`run_config.yaml` inside the v3 ckpt dir
+(`/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/`) for the exact
+v3 recipe. The v3 design rationale is consolidated in this doc.
 
-**Active config**: [`configs/sft/big_bench_shell_50k_v3.yaml`](../configs/sft/big_bench_shell_50k_v3.yaml).
+**Active configs** (post-rename):
+[`baseline`](../configs/sft/baseline.yaml) · [`ood`](../configs/sft/ood.yaml) ·
+[`ood_enhance`](../configs/sft/ood_enhance.yaml) · [`iid`](../configs/sft/iid.yaml).
+See [`configs/sft/README.md`](../configs/sft/README.md) for role mapping.
 
 ---
 

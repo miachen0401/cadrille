@@ -6,10 +6,10 @@ Storyline lives in `paper/storyline.md`. This file is the **experiment plan + st
 
 | # | Run | Config | ETA | Status |
 |---|---|---|---|---|
-| T0-1 | v4-holdout to 50k | `configs/sft/big_bench_shell_50k_v4_holdout.yaml` | +24h | 🟡 23k/50k |
-| T0-2 | v4-baseline 50k | `configs/sft/big_bench_shell_50k_v4_baseline.yaml` | +24h after T0-1 | ❌ pending (chain launcher armed) |
-| T0-3 | v4-holdout-noeasy 50k | `configs/sft/big_bench_shell_50k_v4_holdout_noeasy.yaml` | +24h after T0-2 | ❌ pending (chain launcher armed) |
-| T0-4 | v4-hq-only 50k | `configs/sft/big_bench_shell_50k_v4_hq_only.yaml` | +24h after T0-3 | ❌ pending (chain launcher armed) |
+| T0-1 | ood_enhance (was v4-holdout) → stop at next save | `configs/sft/ood_enhance.yaml` | +28min to stop point | 🟡 23k/50k — will stop at 24k |
+| T0-2 | baseline 50k (no benchcad) | `configs/sft/baseline.yaml` | +24h after T0-1 stop | ❌ pending (chain launcher armed) |
+| T0-3 | ood 50k (holdout, no easy) | `configs/sft/ood.yaml` | +24h after T0-2 | ❌ pending |
+| T0-4 | iid 50k (no holdout, full) | `configs/sft/iid.yaml` | +24h after T0-3 | ❌ pending |
 | T0-5 | Stratified offline eval @ ckpt-25k+50k for all 4 runs | `scripts/analysis/eval_report.py` | +30min × 8 = 4h after each run | partial (live report on v4-holdout) |
 
 ## Tier 1 — strong robustness (~3 GPU-day)

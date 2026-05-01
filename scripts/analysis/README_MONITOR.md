@@ -30,11 +30,11 @@ Cleaned 2026-05-01. **11 scripts, all active, no duplicates.**
 ## Conventions
 
 1. **All per-case figures with BC val MUST tag IID/OOD** (red `[OOD]` / blue `[IID]`).
-2. `_HOLDOUT_FAMILIES` constant lives in:
-   - `scripts/analysis/eval_to_discord.py`
-   - `train/sft/online_eval.py` (set via `set_holdout_families()` from train.py cfg)
-   Keep them in sync.
+2. **Holdout families** — single source is `configs/sft/holdout_families.yaml`,
+   loaded by `common/holdout.py`. `train/sft/online_eval.py` reads it via
+   `set_holdout_families()` (called from `train.py` with `cfg.holdout_families`).
+   Don't hardcode the list anywhere else.
 3. Single source for spec:
-   - `configs/eval/canonical_ops.yaml` — essential_pass per family
-   - `configs/eval/op_taxonomy.yaml` — op patterns + rare set + feature set
+   - `common/essential_ops.yaml` — per-family essential_pass tuples (Cadance taxonomy)
+   - `common/essential_ops.py` — `find_ops`, `essential_pass`, `feature_f1`, `OP_PATTERNS`
 4. Deleted (35 scripts) — pre-paper EDA, RL-only diagnostics, one-offs, superseded duplicates.

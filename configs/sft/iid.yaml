@@ -1,22 +1,19 @@
-# Cadrille SFT v4-baseline — same recipe as v4-holdout BUT no family holdout.
+# Cadrille SFT iid — full-data control (no training-side family holdout).
 #
-# Comparison config #1 from user policy 2026-04-30:
-#   "with ood训练集 其他不变" — include holdout families in training,
-#   everything else identical to v4-holdout.
+# Role in §7 4-line plot: the IID upper-bound. Holdout families are SEEN
+# during training, so the OOD eval bucket measures in-domain ceiling rather
+# than family transfer. Pairs with ood/ood_enhance to size the gap.
 #
-# Purpose: isolates the cost of the family holdout. If v4-holdout matches or
-# beats this on BC IID + DC + Fu, we know the holdout doesn't hurt in-domain
-# generalization — the OOD bucket then measures pure unseen-family transfer.
-#
-# vs v4-holdout:
+# vs ood_enhance:
 #   * benchcad_train_pkl: REMOVED → uses default train.pkl (11443 items)
 #   * cad_iso_106_train_pkl: REMOVED → uses default train.pkl (122483 items)
-#   * holdout_families: REMOVED
+#   * holdout_families: KEPT (eval-only — used to bucket BC val into IID/OOD,
+#     NOT to filter training data because no benchcad_train_pkl override)
 #   * Mix weights stay the same (60/40 HQ/bench-stack).
 #
-# Eval: SAME 4 buckets as v4-holdout — but BC val OOD bucket here measures
-# IN-DOMAIN performance on those families (since they were SEEN in train).
-# Comparison: v4-holdout OOD vs v4-baseline same-bucket = generalization gap.
+# Eval: SAME 4 buckets as ood_enhance — and the BC val OOD bucket here
+# measures IN-DOMAIN performance on those families (since they were SEEN
+# in train). Diff vs ood_enhance OOD = generalization gap from holdout.
 
 checkpoints_dir: /ephemeral/checkpoints
 data_path: ./data
@@ -67,12 +64,28 @@ sft_mix_weights:
   text2cad_bench_text:  55
   recode_bench:        490
 
+# Eval-only: train.py threads this into online_eval.set_holdout_families().
+# benchcad_train_pkl is NOT set → train uses full train.pkl, so families
+# below ARE seen during training. The OOD eval bucket then measures IID
+# ceiling for the §7 figure.
+holdout_families:
+  - tapered_boss
+  - taper_pin
+  - venturi_tube
+  - bucket
+  - dome_cap
+  - nozzle
+  - enclosure
+  - waffle_plate
+  - bolt
+  - duct_elbow
+
 curriculum_phases: null
 
 save_only_model: false
 save_total_limit: 4
 
-hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-v4-baseline-50k
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-iid-50k
 hf_upload_private: false
 
 wandb_project: cadrille-sft

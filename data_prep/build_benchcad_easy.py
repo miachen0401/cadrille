@@ -40,16 +40,37 @@ def main() -> None:
                     default=REPO_ROOT / 'data' / 'benchcad-easy')
     ap.add_argument('--max-shards', type=int, default=None,
                     help='cap for smoke testing')
+    ap.add_argument('--shard-range', type=str, default='15-54',
+                    help='Inclusive shard index range to ingest, e.g. "15-54". '
+                         'Pass "all" to take every shard (not recommended — '
+                         'shards 0–14 were not rendered locally and are missing PNG bytes).')
     args = ap.parse_args()
 
     train_dir = args.out_dir / 'train'
     train_dir.mkdir(parents=True, exist_ok=True)
 
-    shards = sorted(args.shards_dir.glob('train-*.parquet'))
+    all_shards = sorted(args.shards_dir.glob('train-*.parquet'))
+    if args.shard_range == 'all':
+        shards = list(all_shards)
+    else:
+        try:
+            lo, hi = (int(x) for x in args.shard_range.split('-', 1))
+        except ValueError:
+            ap.error(f'--shard-range must be "lo-hi" or "all", got {args.shard_range!r}')
+        # Match shard index from filename: train-NNNNN-of-00055.parquet
+        import re
+        rx = re.compile(r'train-(\d+)-of-\d+\.parquet$')
+        shards = []
+        for p in all_shards:
+            m = rx.search(p.name)
+            if m and lo <= int(m.group(1)) <= hi:
+                shards.append(p)
     if args.max_shards:
         shards = shards[:args.max_shards]
-    print(f'[benchcad_easy] {len(shards)} shards from {args.shards_dir}',
-          flush=True)
+    print(f'[benchcad_easy] {len(shards)} shards (range={args.shard_range}) '
+          f'from {args.shards_dir}', flush=True)
+    if not shards:
+        ap.error(f'no shards matched in {args.shards_dir} for range {args.shard_range!r}')
 
     rows: list[dict] = []
     n_skipped = 0

@@ -19,7 +19,7 @@ DUAL MODE:
 
          uv run python -m scripts.analysis.eval_to_discord \\
              --step 3000 \\
-             --log /home/ubuntu/cadrille/logs/big_bench_shell_50k_*.log \\
+             --log /home/ubuntu/cadrille/logs/ood_enhance_*.log \\
              --output-dir /ephemeral/checkpoints/sft-...
 
   2. SEND MODE — generic Discord pipe for arbitrary analysis images:
