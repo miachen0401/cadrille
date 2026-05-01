@@ -274,7 +274,24 @@ def main():
               for slug, m in ess['models'].items()}
 
     from canonical_ops import ESSENTIAL_BY_FAMILY
-    from _per_family_canonical import pick_canonical_case
+
+    # Per-family canonical case = both-exec-ok, Q3VL IoU closest to
+    # family median (alphabetical tiebreak).
+    def pick_canonical_case(family):
+        cands = []
+        for stem, q in metas['Q3VL (ours)'].items():
+            ce = metas['CADEvolve v3'].get(stem) or {}
+            if (q.get('family') != family
+                    or q.get('error_type') != 'success'
+                    or ce.get('error_type') != 'success'
+                    or q.get('iou') is None or ce.get('iou') is None):
+                continue
+            cands.append((stem, q['iou']))
+        if not cands: return None
+        cands.sort(key=lambda t: t[1])
+        mid = cands[len(cands)//2][1]
+        cands.sort(key=lambda t: (abs(t[1] - mid), t[0]))
+        return cands[0][0]
 
     def ess_set(fam):
         spec = ESSENTIAL_BY_FAMILY.get(fam) or []

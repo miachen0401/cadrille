@@ -379,17 +379,26 @@ def main():
         print(f'    {f["family"]:<26} n={f["n"]} ce={f["ce_iou"]:.3f} q={f["q_iou"]:.3f}',
               flush=True)
 
-    # Single source of truth for "representative case per family" — see
-    # _per_family_canonical.py. Same case will appear in every per-family
-    # analysis (overview grid, weak families, code deepdive).
-    from _per_family_canonical import pick_canonical_case
+    # Per-family canonical case = both-exec-ok, Q3VL IoU closest to
+    # family median (alphabetical tiebreak). Same rule used elsewhere.
     chosen = []
     for fam_info in weak_fams:
-        stem = pick_canonical_case(fam_info['family'])
-        if stem is None:
+        cands = []
+        for stem, c in ce_per_case.items():
+            if c['family'] != fam_info['family']: continue
+            ce_rec = metas['cadevolve_rl1'].get(stem) or {}
+            q_rec  = metas['cadrille_qwen3vl_v3'].get(stem) or {}
+            if (ce_rec.get('error_type') == 'success'
+                    and q_rec.get('error_type') == 'success'
+                    and q_rec.get('iou') is not None and ce_rec.get('iou') is not None):
+                cands.append((stem, q_rec['iou']))
+        if not cands:
             print(f'  ! no canonical case for {fam_info["family"]}', flush=True)
             continue
-        chosen.append({'stem': stem, **fam_info})
+        cands.sort(key=lambda t: t[1])
+        mid = cands[len(cands)//2][1]
+        cands.sort(key=lambda t: (abs(t[1] - mid), t[0]))
+        chosen.append({'stem': cands[0][0], **fam_info})
     print(f'  selected {len(chosen)} cases (canonical per-family)', flush=True)
 
     # GT

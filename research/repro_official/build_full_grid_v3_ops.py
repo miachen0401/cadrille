@@ -388,20 +388,30 @@ def main():
 
     # ── Sorted stems (or per-family representatives) ───────────────────────
     if args.per_family > 0:
-        # Single source of truth for "representative case per family".
-        # See research/repro_official/_per_family_canonical.py for the rule.
-        from _per_family_canonical import all_canonical
-        canonical = all_canonical()
-        chosen = list(canonical.values())
+        # Per-family canonical case = both-exec-ok, Q3VL IoU closest to
+        # family median (alphabetical tiebreak). Same rule used by
+        # build_cadevolve_weak_families.py and build_low_ess_families.py.
+        from collections import defaultdict
+        by_fam = defaultdict(list)
+        for stem, q in metas['cadrille_qwen3vl_v3'].items():
+            ce = metas['cadevolve_rl1'].get(stem) or {}
+            if (q.get('error_type') != 'success' or ce.get('error_type') != 'success'
+                    or q.get('iou') is None or ce.get('iou') is None
+                    or not q.get('family')):
+                continue
+            by_fam[q['family']].append((stem, q['iou']))
+        chosen = []
+        for fam, items in by_fam.items():
+            items.sort(key=lambda t: t[1])
+            mid = items[len(items)//2][1]
+            items.sort(key=lambda t: (abs(t[1] - mid), t[0]))
+            chosen.append(items[0][0])
         all_stems = sorted(set(chosen),
                            key=lambda s: ((metas['cadrille_qwen3vl_v3'].get(s)
                                            or metas['cadevolve_rl1'].get(s)
                                            or {}).get('family', '~'), s))
         print(f'  per-family canonical: {len(all_stems)} stems '
-              f'across {len(canonical)} families', flush=True)
-        if args.per_family > 1:
-            print(f'  (--per-family {args.per_family} requested but canonical '
-                  f'rule emits exactly 1 stem/family; ignoring count)', flush=True)
+              f'across {len(by_fam)} families', flush=True)
     else:
         all_stems = sorted(set().union(*[set(m.keys()) for m in metas.values()]))
     if args.limit:
