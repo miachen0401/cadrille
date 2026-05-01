@@ -1,0 +1,25 @@
+# Canonical holdout family list — single source of truth for ALL offline scripts.
+#
+# This file is read by every monitor / paper-figure script in scripts/analysis/.
+# When you change the holdout list, change it HERE and rerun build_holdout_split.py.
+#
+# Online runtime: train/sft/online_eval.py reads this list dynamically via
+# set_holdout_families() called from train.py main() with cfg.holdout_families,
+# which is itself sourced from each SFT yaml config's holdout_families: field.
+# Keep the SFT yaml configs in sync with this file when changing.
+#
+# Selection criterion (paper §7.1, public framing):
+#   v3 baseline ess_pass >= 0.80 (families demonstrably learnable when seen),
+#   val_n >= 4, covers diverse essential-op classes.
+
+holdout_families:
+  - tapered_boss
+  - taper_pin
+  - venturi_tube
+  - bucket
+  - dome_cap
+  - nozzle
+  - enclosure
+  - waffle_plate
+  - bolt
+  - duct_elbow

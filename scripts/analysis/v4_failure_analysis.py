@@ -34,8 +34,7 @@ import matplotlib.pyplot as plt
 V4_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/predictions'
 V3_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions'
 
-HOLDOUT = ['tapered_boss', 'taper_pin', 'venturi_tube', 'bucket', 'dome_cap',
-           'nozzle', 'enclosure', 'waffle_plate', 'bolt', 'duct_elbow']
+from common.holdout import HOLDOUT_FAMILIES as HOLDOUT
 
 
 def _load_taxonomy():

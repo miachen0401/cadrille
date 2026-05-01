@@ -30,8 +30,7 @@ V3_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions'
 V4_LOG = '/home/ubuntu/cadrille/logs/v4_holdout_20260430_082814.log'
 V3_LOG = '/home/ubuntu/cadrille/logs/v3_clean_20260428_132042.log'
 
-HOLDOUT = {'tapered_boss', 'taper_pin', 'venturi_tube', 'bucket', 'dome_cap',
-           'nozzle', 'enclosure', 'waffle_plate', 'bolt', 'duct_elbow'}
+from common.holdout import HOLDOUT_FAMILIES as HOLDOUT
 
 
 def _load_taxonomy():

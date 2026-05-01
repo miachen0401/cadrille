@@ -30,8 +30,7 @@ from scripts.analysis.eval_to_discord import (  # noqa: E402
     render_meshes_parallel, render_stls_parallel,
 )
 
-HOLDOUT = {'tapered_boss', 'taper_pin', 'venturi_tube', 'bucket', 'dome_cap',
-           'nozzle', 'enclosure', 'waffle_plate', 'bolt', 'duct_elbow'}
+from common.holdout import HOLDOUT_FAMILIES as HOLDOUT
 
 
 def main() -> None:

@@ -32,8 +32,7 @@ import yaml
 
 V3_DIR = '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions'
 
-CURRENT_HOLDOUT = ['tapered_boss', 'taper_pin', 'venturi_tube', 'bucket', 'dome_cap',
-                   'nozzle', 'enclosure', 'waffle_plate', 'bolt', 'duct_elbow']
+from common.holdout import HOLDOUT_FAMILIES as CURRENT_HOLDOUT
 
 # Alternative configs (proposed in §8.2 Tier 1)
 CONFIG_FEATURE_HEAVY = ['filleted_l_plate', 'filleted_t_plate', 'cbore_block',

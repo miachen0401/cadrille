@@ -622,43 +622,7 @@ def discover_steps(pred_dir: Path, max_step: int) -> list[int]:
     return out
 
 
-_HOLDOUT_FAMILIES = {'tapered_boss', 'taper_pin', 'venturi_tube', 'bucket',
-                     'dome_cap', 'nozzle', 'enclosure', 'waffle_plate', 'bolt',
-                     'duct_elbow'}
-
-
-def _load_bc_uid2fam() -> dict:
-    """Map BenchCAD val uid -> family for IID/OOD labeling in collages."""
-    try:
-        import pickle
-        pkl = REPO_ROOT / 'data/benchcad/val.pkl'
-        if not pkl.exists():
-            return {}
-        rows = pickle.load(pkl.open('rb'))
-        return {r['uid']: r['family'] for r in rows}
-    except Exception:
-        return {}
-
-
-_BC_UID2FAM = _load_bc_uid2fam()
-
-
-def is_ood(uid: str, bucket: str) -> bool:
-    """True iff uid is in a held-out family (only meaningful for BenchCAD val)."""
-    if bucket != 'BenchCAD val':
-        return False
-    fam = _BC_UID2FAM.get(uid)
-    return fam in _HOLDOUT_FAMILIES if fam else False
-
-
-def split_label(uid: str, bucket: str) -> str:
-    """Return '[OOD]' / '[IID]' / '' tag depending on bucket + family."""
-    if bucket != 'BenchCAD val':
-        return ''
-    fam = _BC_UID2FAM.get(uid)
-    if not fam:
-        return ''
-    return '[OOD]' if fam in _HOLDOUT_FAMILIES else '[IID]'
+from common.holdout import HOLDOUT_FAMILIES as _HOLDOUT_FAMILIES, uid2fam as _BC_UID2FAM, is_ood, split_label
 
 
 def pick_anchors(jsonl_path: Path, n_per_bucket: int) -> dict[str, list[dict]]:
