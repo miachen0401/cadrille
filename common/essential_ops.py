@@ -1,0 +1,225 @@
+"""Per-family essential ops — AND-of-(OR-tuples) format.
+
+The dict `ESSENTIAL_BY_FAMILY` is loaded at import time from the sibling
+`canonical_ops.yaml`. Edit the YAML to tweak the metric — no code change.
+
+Format (in YAML):
+  family_name: [<element>, ...]
+    • outer list = AND (every element must be satisfied)
+    • element = string (single required op)  OR  list of strings (OR alternatives)
+
+Match rule:
+  essential_pass = True iff for every outer element, at least one alternative
+  is in gen_ops. E.g. `[[sweep, revolve], rarray]` ⇒ (sweep OR revolve) AND rarray.
+
+Independent of FEATURE_CLASS (chamfer / fillet / hole) — scored separately
+via feature_f1; those names must NOT appear inside essentials.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import yaml
+
+OpSpec = str | tuple[str, ...]
+EssentialList = list[OpSpec]
+
+YAML_PATH = Path(__file__).with_suffix(".yaml")
+
+# ── ops we recognize in code ──────────────────────────────────────────────
+OP_PATTERNS: dict[str, str] = {
+    "twistExtrude":  r"\.twistExtrude\s*\(",
+    "sweep+helix":   r"\.sweep\s*\([^)]*helix|\.sweep\s*\([^)]*makeHelix|sweep.*makeHelix",
+    "sweep":         r"\.sweep\s*\(",
+    "revolve":       r"\.revolve\s*\(",
+    "loft":          r"\.loft\s*\(",
+    "shell":         r"\.shell\s*\(",
+    "taper=":        r"taper\s*=",
+    "polarArray":    r"\.polarArray\s*\(",
+    "rarray":        r"\.rarray\s*\(",
+    "makeTorus":     r"makeTorus\s*\(",
+    "sphere":        r"\.(sphere|makeSphere)\s*\(",
+    # `cut` also covers BenchCAD-style sketch-subtract: `circle(r, mode='s')`
+    # is the in-sketch carve op, semantically equivalent to a cut.
+    "cut":           r"\.(cut|cutBlind)\s*\(|mode\s*=\s*['\"][s][\"']",
+    # `polyline` also matches a chain of `.segment(...)` calls — the
+    # BenchCAD shell-style sketch primitive. CADEvolve uses this 595x in
+    # 200 sample preds; without this the metric never sees its polyline
+    # equivalent.
+    "polyline":      r"\.polyline\s*\(|\.segment\s*\(",
+    "spline":        r"\.spline\s*\(",
+    "threePointArc": r"\.threePointArc\s*\(",
+    # `Sketch` covers the class form `cq.Sketch(...)` AND the instance
+    # method form `.sketch()` used in BenchCAD shell style. CADEvolve uses
+    # the lowercase form 185x in 200 sample preds.
+    "Sketch":        r"cq\.Sketch\s*\(|\.placeSketch\s*\(|\.sketch\s*\(",
+    "polygon":       r"\.polygon\s*\(",
+    "lineTo":        r"\.lineTo\s*\(",
+    # feature class (independent — for has_* score, NOT for essentials)
+    "chamfer":       r"\.chamfer\s*\(",
+    "fillet":        r"\.fillet\s*\(",
+    "hole":          r"\.(hole|cboreHole|cskHole|cutThruAll)\s*\(",
+}
+
+ESSENTIAL_CLASS: frozenset[str] = frozenset({
+    "sweep+helix", "sweep", "revolve", "loft", "shell", "taper=",
+    "polarArray", "rarray", "twistExtrude", "makeTorus",
+    "sphere", "cut",
+    "polyline", "spline", "threePointArc", "Sketch", "polygon", "lineTo",
+})
+FEATURE_CLASS: frozenset[str] = frozenset({"chamfer", "fillet", "hole"})
+
+
+def _load_essentials(path: Path = YAML_PATH) -> dict[str, EssentialList]:
+    """Read canonical_ops.yaml; convert YAML lists → tuples for hashable OR-sets."""
+    raw = yaml.safe_load(path.read_text()) or {}
+    out: dict[str, EssentialList] = {}
+    for fam, spec in raw.items():
+        if not isinstance(spec, list):
+            raise ValueError(f"{fam}: spec must be a list, got {type(spec).__name__}")
+        if not spec:
+            raise ValueError(f"{fam}: spec is empty — remove the entry to mark N/A")
+        elements: EssentialList = []
+        for elem in spec:
+            if isinstance(elem, str):
+                elements.append(elem)
+            elif isinstance(elem, list):
+                elements.append(tuple(elem))
+            else:
+                raise ValueError(f"{fam}: element must be str or list, got {elem!r}")
+        # sanity: every op must be recognized by OP_PATTERNS
+        flat = {a for e in elements for a in (e if isinstance(e, tuple) else (e,))}
+        unknown = flat - set(OP_PATTERNS)
+        if unknown:
+            raise ValueError(f"{fam}: unknown ops {unknown}")
+        out[fam] = elements
+    return out
+
+
+ESSENTIAL_BY_FAMILY: dict[str, EssentialList] = _load_essentials()
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+def find_ops(code: str) -> set[str]:
+    """All recognized ops in code.
+
+    sweep+helix detection is order-agnostic: if both `.sweep(` and a helix
+    builder (`makeHelix(...)` or `.helix(...)`) appear ANYWHERE in the code,
+    the result is `sweep+helix` (and plain `sweep` is dropped). This catches
+    the common cross-statement pattern:
+        path = cq.Wire.makeHelix(...)
+        result = profile.sweep(path)
+    """
+    code = code or ""
+    found = set()
+    for name, pat in OP_PATTERNS.items():
+        if re.search(pat, code):
+            found.add(name)
+    has_helix = bool(re.search(r"makeHelix\s*\(|\.helix\s*\(", code))
+    if "sweep" in found and has_helix:
+        found.add("sweep+helix")
+        found.discard("sweep")
+    # Semantic equivalent: `cut(cylinder)` or `cylinder + cut` carves a
+    # through-hole, which is what `.hole()` does. Models like CADEvolve
+    # never use `.hole()` directly — they construct a cylinder and cut it
+    # away. Without this alias the strict op-vocab metric mis-fails them.
+    has_cylinder = bool(re.search(r"\.cylinder\s*\(", code))
+    if has_cylinder and "cut" in found:
+        found.add("hole")
+    # Polyline subsumes lineTo: a `.polyline([...])` is literally a chain of
+    # `.lineTo(...)` calls; equivalently, repeated `.segment(p, q)` calls
+    # form a polyline. Either way, the model has expressed line-by-line
+    # path construction, which is what `lineTo` measures.
+    if "polyline" in found:
+        found.add("lineTo")
+    # A closed polyline is a polygon: `.polyline([...]).close()` (or
+    # `.segment(...).segment(...)...close()`) bounds a polygonal region.
+    # When both signals are present, count the result as `polygon`.
+    if "polyline" in found and re.search(r"\.close\s*\(", code):
+        found.add("polygon")
+    # Note: `loft` and `revolve`/`sweep` are NOT inclusion-related — they
+    # are different ops with overlapping use-cases on specific shapes
+    # (a truncated cone is loft-able AND revolve-able, but a 3-profile
+    # loft is not equivalent to a single-profile revolve). Per-family
+    # equivalence belongs in canonical_ops.yaml as alternatives in the
+    # OR-tuple, NOT as a global alias here.
+    # Same reasoning for `pushPoints`: not every pushPoints is rarray
+    # (irregular point clouds exist), so it's per-family in the spec.
+    return found
+
+
+def essential_score(family: str, gen_ops: set[str]) -> float | None:
+    """Per-case fractional score over the AND-elements of the family spec.
+
+    Returns:
+        in [0, 1] — fraction of AND-elements satisfied (each element is an
+                    OR-tuple; satisfied iff at least one alternative is in
+                    gen_ops, or — if element is a single string — that exact
+                    op is in gen_ops).
+        None      — family has no essential spec (N/A).
+
+    Examples:
+        spec [(loft|twistExtrude), (polyline|spline|...)]  AND of 2 OR-tuples
+            gen_ops={polyline}        →  1/2 = 0.5
+            gen_ops={loft, polyline}  →  2/2 = 1.0
+            gen_ops={cut}             →  0/2 = 0.0
+    """
+    spec = ESSENTIAL_BY_FAMILY.get(family)
+    if not spec:
+        return None
+    n_satisfied = 0
+    for element in spec:
+        if isinstance(element, str):
+            if element in gen_ops:
+                n_satisfied += 1
+        else:
+            if any(alt in gen_ops for alt in element):
+                n_satisfied += 1
+    return n_satisfied / len(spec)
+
+
+def essential_pass(family: str, gen_ops: set[str]) -> bool | None:
+    """Per-stem essential check.
+
+    Returns:
+        True  — full score (every element satisfied by gen_ops)
+        False — at least one element missing
+        None  — N/A, family has no essential spec
+    """
+    spec = ESSENTIAL_BY_FAMILY.get(family)
+    if not spec:
+        return None
+    for element in spec:
+        if isinstance(element, str):
+            if element not in gen_ops:
+                return False
+        else:  # tuple of alternatives
+            if not any(alt in gen_ops for alt in element):
+                return False
+    return True
+
+
+def feature_f1(gen_ops: set[str], gt_ops: set[str]) -> float:
+    """F1 over FEATURE_CLASS indicators (chamfer, fillet, hole) — independent."""
+    keys = list(FEATURE_CLASS)
+    gt_b = {k: (k in gt_ops) for k in keys}
+    gen_b = {k: (k in gen_ops) for k in keys}
+    tp = sum(1 for k in keys if gt_b[k] and gen_b[k])
+    fp = sum(1 for k in keys if gen_b[k] and not gt_b[k])
+    fn = sum(1 for k in keys if gt_b[k] and not gen_b[k])
+    if not (tp + fp + fn):
+        return 1.0
+    p = tp / (tp + fp) if (tp + fp) else 0.0
+    r = tp / (tp + fn) if (tp + fn) else 0.0
+    return 2 * p * r / (p + r) if (p + r) else 0.0
+
+
+def fmt_spec(spec: EssentialList) -> str:
+    parts = []
+    for elem in spec:
+        if isinstance(elem, str):
+            parts.append(elem)
+        else:
+            parts.append("(" + " | ".join(elem) + ")")
+    return " AND ".join(parts) if len(parts) > 1 else parts[0]
