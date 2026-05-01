@@ -9,7 +9,7 @@ Lines:
 Same plot is generated for IID ceiling on left, OOD on right.
 
 Usage:
-    uv run python -m paper.scripts.plot_4line_ess
+    uv run python -m scripts.analysis.plot_4line_ess
 """
 from __future__ import annotations
 

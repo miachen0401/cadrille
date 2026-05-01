@@ -517,8 +517,12 @@ def build_trajectory_collage(bucket: str,
 
     img = Image.new('RGB', (W, H), (245, 245, 245))
     drw = ImageDraw.Draw(img)
+    iid_count = sum(1 for a in anchors if not is_ood(a['uid'], bucket))
+    ood_count = n_rows - iid_count
+    label_summary = (f'  IID={iid_count} OOD={ood_count}'
+                     if bucket == 'BenchCAD val' else '')
     drw.text((10, 6),
-             f'{bucket}  ({n_rows} anchors × {n_step_cols} steps)  '
+             f'{bucket}  ({n_rows} anchors × {n_step_cols} steps){label_summary}  '
              f'pred-cell={cell}px  GT-4view={gt_w}px',
              fill=(20, 20, 20))
 
@@ -543,7 +547,20 @@ def build_trajectory_collage(bucket: str,
                 drw.rectangle([1, y + 1, gt_w - 1, y + cell - 1], fill=(220, 220, 220))
         else:
             drw.rectangle([1, y + 1, gt_w - 1, y + cell - 1], fill=(232, 210, 210))
-        drw.text((4, y + 4), anc['uid'][:20], fill=(20, 20, 20))
+        # Tag uid with [IID]/[OOD] for BenchCAD val (helps reader instantly
+        # distinguish held-out family rows from in-domain ones).
+        tag = split_label(anc['uid'], bucket)
+        if tag == '[OOD]':
+            tag_color = (180, 30, 30)
+        elif tag == '[IID]':
+            tag_color = (30, 110, 180)
+        else:
+            tag_color = (60, 60, 60)
+        if tag:
+            drw.text((4, y + 4), tag, fill=tag_color)
+            drw.text((4, y + 18), anc['uid'][:24], fill=(20, 20, 20))
+        else:
+            drw.text((4, y + 4), anc['uid'][:20], fill=(20, 20, 20))
 
         # ── col 1: GT mesh iso ───────────────────────────
         gt_x = gt_w
@@ -605,8 +622,49 @@ def discover_steps(pred_dir: Path, max_step: int) -> list[int]:
     return out
 
 
+_HOLDOUT_FAMILIES = {'tapered_boss', 'taper_pin', 'venturi_tube', 'bucket',
+                     'dome_cap', 'nozzle', 'enclosure', 'waffle_plate', 'bolt',
+                     'duct_elbow'}
+
+
+def _load_bc_uid2fam() -> dict:
+    """Map BenchCAD val uid -> family for IID/OOD labeling in collages."""
+    try:
+        import pickle
+        pkl = REPO_ROOT / 'data/benchcad/val.pkl'
+        if not pkl.exists():
+            return {}
+        rows = pickle.load(pkl.open('rb'))
+        return {r['uid']: r['family'] for r in rows}
+    except Exception:
+        return {}
+
+
+_BC_UID2FAM = _load_bc_uid2fam()
+
+
+def is_ood(uid: str, bucket: str) -> bool:
+    """True iff uid is in a held-out family (only meaningful for BenchCAD val)."""
+    if bucket != 'BenchCAD val':
+        return False
+    fam = _BC_UID2FAM.get(uid)
+    return fam in _HOLDOUT_FAMILIES if fam else False
+
+
+def split_label(uid: str, bucket: str) -> str:
+    """Return '[OOD]' / '[IID]' / '' tag depending on bucket + family."""
+    if bucket != 'BenchCAD val':
+        return ''
+    fam = _BC_UID2FAM.get(uid)
+    if not fam:
+        return ''
+    return '[OOD]' if fam in _HOLDOUT_FAMILIES else '[IID]'
+
+
 def pick_anchors(jsonl_path: Path, n_per_bucket: int) -> dict[str, list[dict]]:
-    """Deterministic anchors: sort by uid, take first N per bucket."""
+    """Deterministic anchors per bucket. For BenchCAD val, FORCE half IID +
+    half OOD so the trajectory collage shows both regimes. For other buckets,
+    fall back to first-N-by-uid as before."""
     rows = _read_jsonl(jsonl_path)
     by_bucket: dict[str, list[dict]] = {b: [] for b in IOU_BUCKETS}
     for r in rows:
@@ -614,7 +672,14 @@ def pick_anchors(jsonl_path: Path, n_per_bucket: int) -> dict[str, list[dict]]:
             by_bucket[r['bucket']].append(r)
     for b, pool in by_bucket.items():
         pool.sort(key=lambda x: x['uid'])
-        by_bucket[b] = pool[:n_per_bucket]
+        if b == 'BenchCAD val' and _BC_UID2FAM:
+            iid_pool = [r for r in pool if not is_ood(r['uid'], b)]
+            ood_pool = [r for r in pool if is_ood(r['uid'], b)]
+            half_iid = n_per_bucket // 2
+            half_ood = n_per_bucket - half_iid
+            by_bucket[b] = ood_pool[:half_ood] + iid_pool[:half_iid]
+        else:
+            by_bucket[b] = pool[:n_per_bucket]
     return by_bucket
 
 

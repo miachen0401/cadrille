@@ -9,7 +9,7 @@ Lines:
 Companion to §7.a ops-metric plot.
 
 Usage:
-    uv run python -m paper.scripts.plot_ood_iou_4line
+    uv run python -m scripts.analysis.plot_ood_iou_4line
 """
 from __future__ import annotations
 

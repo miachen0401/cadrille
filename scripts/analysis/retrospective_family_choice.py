@@ -13,7 +13,7 @@ Method:
 Also: pick 3 alternative 10-family configs and compute v3's ess_pass on each.
 
 Usage:
-    uv run python -m paper.scripts.retrospective_family_choice
+    uv run python -m scripts.analysis.retrospective_family_choice
 """
 from __future__ import annotations
 

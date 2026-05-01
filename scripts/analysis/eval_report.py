@@ -213,47 +213,30 @@ def build_report(step: int) -> str:
 
     lines = [f'**v4-holdout step={step} — full metric report (vs v3)**', '']
 
-    # 1. greedy IoU + exec
-    lines.append('**Greedy IoU + exec_rate (v3 -> v4):**')
+    # 1. CONSOLIDATED row-per-bucket table — IoU + exec + recall + rare_rec + ess + feat_F1 + op_ent + distinct
+    lines.append('**Per-bucket greedy metrics (v3 -> v4):**')
     lines.append('```')
-    lines.append(f'{"bucket":<10} {"n":<3} {"IoU":<24} {"exec":<22}')
-    for bk, label in [('IID','BC IID'), ('OOD','BC OOD'), ('DC','DC test'), ('FU','Fu test')]:
+    hdr = f'{"bucket":<8} {"n":<3} {"IoU":<22} {"exec":<14} {"recall":<22} {"rare_rec":<22} {"ess_pass":<22} {"feat_F1":<22} {"op_ent":<22} {"d_ops":<6}'
+    lines.append(hdr)
+    lines.append('-' * len(hdr))
+    for bk, label in [('OOD','BC OOD'), ('IID','BC IID'), ('DC','DC test'), ('FU','Fu test')]:
         v3d = v3[bk]; v4d = v4[bk]
         if not v3d or not v4d: continue
-        lines.append(f'{label:<10} {v4d["n"]:<3} {fmt_d(v3d["iou"], v4d["iou"]):<24} {fmt_d_pct(v3d["exec_rate"], v4d["exec_rate"]):<22}')
+        ess_str = fmt_d(v3d["ess_pass"], v4d["ess_pass"]) if v3d["ess_pass"] is not None else '       N/A           '
+        # Highlight OOD with leading marker
+        prefix = '★ ' if bk == 'OOD' else '  '
+        lines.append(f'{prefix}{label:<6} {v4d["n"]:<3} {fmt_d(v3d["iou"], v4d["iou"]):<22} {fmt_d_pct(v3d["exec_rate"], v4d["exec_rate"]):<14} {fmt_d(v3d["recall"], v4d["recall"]):<22} {fmt_d(v3d["rare_recall"], v4d["rare_recall"]):<22} {ess_str:<22} {fmt_d(v3d["feat_f1"], v4d["feat_f1"]):<22} {fmt_d(v3d["op_entropy"], v4d["op_entropy"]):<22} {fmt_int(v3d["distinct_ops"], v4d["distinct_ops"]):<6}')
     lines.append('```')
 
-    # 2. ops metrics
-    lines.append('**Op metrics (v3 -> v4):**')
-    lines.append('```')
-    lines.append(f'{"bucket":<10} {"recall":<24} {"rare_recall":<24} {"distinct":<12}')
-    for bk, label in [('IID','BC IID'), ('OOD','BC OOD'), ('DC','DC test'), ('FU','Fu test')]:
-        v3d = v3[bk]; v4d = v4[bk]
-        if not v3d or not v4d: continue
-        lines.append(f'{label:<10} {fmt_d(v3d["recall"], v4d["recall"]):<24} {fmt_d(v3d["rare_recall"], v4d["rare_recall"]):<24} {fmt_int(v3d["distinct_ops"], v4d["distinct_ops"]):<12}')
-    lines.append('```')
-
-    # 3. essential_pass + feat_f1 + op_entropy (BC only for ess; all for others)
-    lines.append('**essential_pass + feature_F1 + op_entropy (v3 -> v4):**')
-    lines.append('```')
-    lines.append(f'{"bucket":<10} {"ess_pass":<22} {"ess_n":<10} {"feat_F1":<22} {"op_ent":<14}')
-    for bk, label in [('IID','BC IID'), ('OOD','BC OOD'), ('DC','DC test'), ('FU','Fu test')]:
-        v3d = v3[bk]; v4d = v4[bk]
-        if not v3d or not v4d: continue
-        ess_str = fmt_d(v3d["ess_pass"], v4d["ess_pass"]) if v3d["ess_pass"] is not None else '   N/A          '
-        ess_n = f'{v3d["ess_n"]}/{v4d["ess_n"]}'
-        lines.append(f'{label:<10} {ess_str:<22} {ess_n:<10} {fmt_d(v3d["feat_f1"], v4d["feat_f1"]):<22} {fmt_d(v3d["op_entropy"], v4d["op_entropy"]):<14}')
-    lines.append('```')
-
-    # 4. max@8 if available
+    # 2. max@8 if available
     if v4m8 and v3m8:
-        lines.append('**max@8 (k=8, T=1.0) (v3 -> v4):**')
+        lines.append('**max@8 (k=8, T=1.0) — IoU + pass>0.5 rate (v3 -> v4):**')
         lines.append('```')
-        lines.append(f'{"bucket":<10} {"max IoU":<22} {"pass>0.5":<22}')
+        lines.append(f'{"bucket":<14} {"max IoU":<22} {"pass>0.5":<22}')
         for bk in ('BenchCAD val', 'DeepCAD test', 'Fusion360 test'):
             v3m = v3m8.get(bk); v4m = v4m8.get(bk)
             if not v3m or not v4m: continue
-            lines.append(f'{bk:<10} {fmt_d(v3m["iou"], v4m["iou"]):<22} {fmt_d_pct(v3m["pass"], v4m["pass"]):<22}')
+            lines.append(f'{bk:<14} {fmt_d(v3m["iou"], v4m["iou"]):<22} {fmt_d_pct(v3m["pass"], v4m["pass"]):<22}')
         lines.append('```')
 
     return '\n'.join(lines)
