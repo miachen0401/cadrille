@@ -34,6 +34,35 @@ from common.model import collate
 from common.metrics import compute_metrics
 
 
+# Use canonical essential-ops module (master): single source for per-family
+# AND-of-OR spec, find_ops(), essential_pass(), feature_f1().
+from common.essential_ops import (
+    find_ops as _find_ops,
+    essential_pass as _essential_pass,
+    feature_f1 as _feature_f1,
+    OP_PATTERNS as _ESS_OP_PATTERNS,
+)
+
+
+def _op_presence_entropy(codes: list[str]) -> float:
+    """Shannon entropy (nats) of op presence distribution across n samples.
+    Uses common.essential_ops.OP_PATTERNS (21-op vocab) for consistency."""
+    if not codes:
+        return 0.0
+    op_names = list(_ESS_OP_PATTERNS.keys())
+    counts = np.zeros(len(op_names))
+    for c in codes:
+        ops = _find_ops(c or '')
+        for i, n in enumerate(op_names):
+            if n in ops:
+                counts[i] += 1
+    if counts.sum() == 0:
+        return 0.0
+    p = counts / counts.sum()
+    p = p[p > 0]
+    return float(-(p * np.log(p)).sum())
+
+
 # Op regex — kept in lockstep with scripts/analysis/diversity_analysis.py::_OPS.
 # Inlined here so callback imports stay light (no model code).
 _OPS: dict[str, re.Pattern] = {
@@ -262,6 +291,19 @@ def _multilabel_op_metrics(pred_codes: list[str], gt_codes: list[str],
 _SUBSETS_DEFAULT = ('benchcad_val', 'recode20k_train', 'text2cad_train',
                     'deepcad_test', 'fusion360_test')
 
+# Module-level state set from train.py via set_holdout_families(); when set,
+# benchcad_val items are tagged with `_dataset_label = 'BenchCAD val IID'` /
+# `'BenchCAD val OOD'` based on family. Eval logs split metrics per-bucket
+# (e.g. eval/img/BenchCAD val IID/IoU mean) so wandb shows IID/OOD curves.
+_HOLDOUT_FAMILIES: set[str] = set()
+
+
+def set_holdout_families(families: list[str] | set[str] | None) -> None:
+    """Configure which families are OOD for BC val bucket split.
+    Called from train.py once cfg is loaded."""
+    global _HOLDOUT_FAMILIES
+    _HOLDOUT_FAMILIES = set(families) if families else set()
+
 
 def _seeded_sample(items, n, seed=42):
     rng = random.Random(seed)
@@ -270,8 +312,41 @@ def _seeded_sample(items, n, seed=42):
     return shuffled[:n]
 
 
+def _stratified_sample_by_family(rows: list[dict], holdout: set[str],
+                                 n_iid: int, n_ood_per_family: int,
+                                 seed: int) -> list[tuple[dict, str]]:
+    """Stratified sample yielding (row, label) tuples where label is
+    'BenchCAD val IID' or 'BenchCAD val OOD'.
+    - IID: n_iid random samples from non-holdout families.
+    - OOD: n_ood_per_family per holdout family (cap by available rows).
+    """
+    rng = random.Random(seed)
+    iid_pool = [r for r in rows if r.get('family') not in holdout]
+    rng.shuffle(iid_pool)
+    iid_pick = [(r, 'BenchCAD val IID') for r in iid_pool[:n_iid]]
+
+    ood_pick = []
+    fams = sorted(holdout)
+    for fam in fams:
+        fam_rows = [r for r in rows if r.get('family') == fam]
+        rng.shuffle(fam_rows)
+        for r in fam_rows[:n_ood_per_family]:
+            ood_pick.append((r, 'BenchCAD val OOD'))
+    return iid_pick + ood_pick
+
+
 def _load_benchcad_val(n: int, seed: int) -> list[dict]:
-    """BenchCAD val — img modality, has STL + GT .py. Used for both ops and IoU."""
+    """BenchCAD val — img modality, has STL + GT .py. Used for both ops and IoU.
+
+    When _HOLDOUT_FAMILIES is set, items are STRATIFIED into IID + OOD buckets:
+      - IID: ~n samples from non-holdout families (random)
+      - OOD: 5 per holdout family (10 fams × 5 = 50)
+    Each item is tagged with _dataset_label = 'BenchCAD val IID' or
+    'BenchCAD val OOD' so the eval logs split metrics per-bucket.
+
+    When _HOLDOUT_FAMILIES is empty, falls back to legacy random n-sample
+    with single 'BenchCAD val' bucket.
+    """
     from PIL import Image
     root_p = Path('data/benchcad')
     pkl = root_p / 'val.pkl'
@@ -279,9 +354,22 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
         return []
     with pkl.open('rb') as f:
         rows = pickle.load(f)
-    rows = _seeded_sample(rows, n, seed)
+
+    if _HOLDOUT_FAMILIES:
+        # Stratified IID/OOD split. n is interpreted as desired IID size;
+        # OOD bucket gets 5 per holdout family.
+        picks = _stratified_sample_by_family(
+            rows, _HOLDOUT_FAMILIES,
+            n_iid=n,
+            n_ood_per_family=5,
+            seed=seed,
+        )
+    else:
+        sampled = _seeded_sample(rows, n, seed)
+        picks = [(r, 'BenchCAD val') for r in sampled]
+
     out = []
-    for r in rows:
+    for r, label in picks:
         png = root_p / r['png_path']
         stl = root_p / r['mesh_path']
         py  = root_p / r['py_path']
@@ -289,8 +377,9 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
             continue
         out.append({
             '_modality': 'img',
-            '_dataset_label': 'BenchCAD val',
+            '_dataset_label': label,
             '_gt_code': py.read_text(),
+            '_family': r.get('family'),
             'file_name': r['uid'],
             'gt_mesh_path': str(stl),
             'video': [Image.open(png).convert('RGB')],
@@ -828,7 +917,7 @@ def run_online_eval(model, processor, examples: list[dict],
 
         buckets = defaultdict(lambda: {'ious': [], 'cds': [], 'failures': 0,
                                        'total': 0, 'codes': [], 'gt_codes': [],
-                                       'has_iou': False})
+                                       'families': [], 'has_iou': False})
 
         def _score(idx):
             ex = examples[idx]
@@ -849,6 +938,7 @@ def run_online_eval(model, processor, examples: list[dict],
             buckets[key]['total'] += 1
             buckets[key]['codes'].append(all_codes[idx])
             buckets[key]['gt_codes'].append(ex.get('_gt_code'))
+            buckets[key]['families'].append(ex.get('_family'))
 
         with ThreadPoolExecutor(max_workers=reward_workers) as pool:
             futures = [pool.submit(_score, i) for i in range(n)
@@ -903,12 +993,47 @@ def run_online_eval(model, processor, examples: list[dict],
                 ml_loss_w = ml.get('op_loss_cos_weighted')
                 ml_recall = ml.get('op_macro_recall')
                 ml_rare_recall = ml.get('rare_op_macro_recall')
+
+            # essential_pass + feature_F1 (per-family ops composition).
+            # Computed only when we have GT codes AND family labels (BC val).
+            ess_rate = None
+            ess_n = 0
+            feat_f1_mean = None
+            if gt_codes and any(f is not None for f in b['families']):
+                ess_pass_list = []
+                feat_f1_list = []
+                for code, gt, fam in zip(b['codes'], gt_codes, b['families']):
+                    pred_ops = _find_ops(code or '')
+                    gt_ops = _find_ops(gt or '')
+                    if fam:
+                        e = _essential_pass(fam, pred_ops)
+                        if e is not None:
+                            ess_pass_list.append(1 if e else 0)
+                    feat_f1_list.append(_feature_f1(pred_ops, gt_ops))
+                if ess_pass_list:
+                    ess_rate = float(np.mean(ess_pass_list))
+                    ess_n = len(ess_pass_list)
+                    out[f'{prefix}/essential_pass_rate'] = ess_rate
+                    out[f'{prefix}/essential_n_applicable'] = ess_n
+                if feat_f1_list:
+                    feat_f1_mean = float(np.mean(feat_f1_list))
+                    out[f'{prefix}/feature_F1'] = feat_f1_mean
+
+            # op_entropy (Shannon, nats) of pred codes — diversity of op presence.
+            op_ent = _op_presence_entropy(b['codes'])
+            out[f'{prefix}/op_entropy'] = op_ent
+
             iou_part = (f'IoU={mean_iou:.3f}  exec={exec_rate*100:.1f}%  '
                         if mean_iou is not None else '')
             ml_part = (f'op_loss_w={ml_loss_w:.3f}  recall={ml_recall:.3f}  '
                        f'rare_recall={ml_rare_recall:.3f}  '
                        if ml_loss_w is not None else '')
-            print(f'  [{mod}/{label}] {ml_part}{iou_part}'
+            ess_part = (f'ess_pass={ess_rate:.3f}(n={ess_n})  '
+                        if ess_rate is not None else '')
+            feat_part = (f'feat_F1={feat_f1_mean:.3f}  '
+                         if feat_f1_mean is not None else '')
+            print(f'  [{mod}/{label}] {ml_part}{iou_part}{ess_part}{feat_part}'
+                  f'op_ent={op_ent:.3f}  '
                   f'distinct_ops={div.get("distinct_ops", 0)}  '
                   f'distinct_codes={div.get("distinct_codes_frac", 0):.2f}  '
                   f'(n={b["total"]})', flush=True)

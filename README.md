@@ -17,7 +17,9 @@ push to a public/private HF model repo by a non-blocking thread on every
 `save_steps`.
 
 > **Where the recipe lives**: the active SFT config is
-> [`configs/sft/big_bench_shell_50k_v3.yaml`](configs/sft/big_bench_shell_50k_v3.yaml).
+> [`configs/sft/iid.yaml`](configs/sft/iid.yaml) (full-data control). The
+> §7 paper study uses 4 sibling configs (`baseline.yaml`, `ood.yaml`,
+> `ood_enhance.yaml`, `iid.yaml`); see [configs/sft/README.md](configs/sft/README.md).
 > Its header comments (lines 1-38) document mix design + per-source step
 > share. Latest run learnings (data cleaning numbers, trajectory vs prior
 > versions, op_loss interpretation, rendering pitfalls) are in
@@ -52,12 +54,12 @@ source ~/.local/bin/env 2>/dev/null || source ~/.bashrc
 #    BEFORE the GPU boots up — has saved several launches)
 set -a && source .env && set +a
 uv run python -m scripts.preflight_check \
-    --config configs/sft/big_bench_shell_50k_v3.yaml
+    --config configs/sft/iid.yaml
 
-# 6. Train v3 (50 k steps, ~25 h on A100)
+# 6. Train iid (full-data baseline; 50 k steps, ~25 h on A100)
 nohup uv run python -u -m train.sft \
-    --config configs/sft/big_bench_shell_50k_v3.yaml \
-    > logs/v3_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+    --config configs/sft/iid.yaml \
+    > logs/iid_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 
 # 7. (optional) Live Discord posting — fires on every eval landing
 nohup bash scripts/watch_eval_post_discord.sh \
@@ -174,8 +176,10 @@ all sources except `cad_recode_20k` (7, NOT in v3). See
 
 | config | mix / weights | total weight | bs × acc | max_steps | notes |
 |---|---|---:|---|---:|---|
-| **`configs/sft/big_bench_shell_50k_v3.yaml`** ← active | bench 11 / iso 122 / simple 77 / t2c-img 29 / t2c-text 29 / recode-bench 257 | 525 | 8 × 4 = 32 | 50,000 | **Current production recipe.** Qwen3-VL-2B from scratch, 60% HQ / 40% bench-stack, equal-per-item within group, n=50 eval, max@8 every 2nd eval. ETA ~25 h on A100. |
-| `configs/sft/big_bench_shell_50k_phase2.yaml` | v2: bench 18 / iso 162 / simple 86 / t2c-bench 94 / recode-bench 175 | 535 | same | 50,000 | Predecessor (no dedup, no 80% drop). Best max@8 0.644/0.650/0.666 @ 27-29k. |
+| **`configs/sft/iid.yaml`** | bench 15 / iso 158 / simple 111 / easy 116 / t2c-img 55 / t2c-text 55 / recode-bench 490 | 1000 | 8 × 4 = 32 | 50,000 | Full-data control (no holdout). 60% HQ / 40% bench-stack. **§7 IID upper bound**. |
+| `configs/sft/ood_enhance.yaml` | same as iid + 10-family holdout filter | 1000 | same | 50,000 | Holdout + benchcad-easy supplement. **§7 OOD-with-supplement line**. |
+| `configs/sft/ood.yaml` | bench 21 / iso 222 / simple 157 / t2c-img 55 / t2c-text 55 / recode-bench 490 | 1000 | same | 50,000 | Holdout, **no benchcad-easy**. §7 OOD-plain line. |
+| `configs/sft/baseline.yaml` | t2c-img 53 / t2c-text 53 / recode-bench 472 | 578 | same | 50,000 | HQ-only floor (no benchcad data). §7 no-bench line. |
 | `configs/sft/curriculum_qwen3vl_2b.yaml` | 3-phase curriculum | varies | 8 × 4 | 20,000 | Plateaued early; phase-3 (8:1:1) hurt DC. |
 | `configs/sft/qwen3vl_2b_recode_30k_clean.yaml` | recode-only (single source) | – | 8 × 4 | 30,000 | Smoke / single-source baseline. |
 | `configs/sft/smoke.yaml` | minimal | – | 1 × 1 | 100 | CI-style end-to-end check. |
@@ -214,6 +218,55 @@ uv run python -m scripts.analysis.op_distribution_plot
 Online (during training) eval is automatic; results post to W&B and (if
 configured) Discord. Each eval emits per-bucket greedy IoU + exec rate +
 op_loss + rare_op_recall; every 2nd eval also runs max@8.
+
+---
+
+## Common tools (cheatsheet)
+
+Frequently-used scripts, grouped by job. All are runnable as-is — no flags
+required for the common path. See each script's docstring for full options.
+
+### Training control & monitoring
+
+| Tool | What it does | Usage |
+|---|---|---|
+| `scripts/preflight_check.py` | Validate every source in a YAML mix (pkl loadable, PNGs resolve, code lengths, filter-cache freshness). **Run before every SFT launch.** | `uv run python -m scripts.preflight_check --config configs/sft/<run>.yaml` |
+| `scripts/launch_chain_runs.sh` | Wait for one SFT PID to exit, then launch baseline → ood → iid back-to-back (v3-722 + v4-OOD retro evals run between v4 stop and baseline start). | `WAIT_PID=<pid> nohup bash scripts/launch_chain_runs.sh > logs/launch_chain.log 2>&1 &` |
+| `scripts/stop_v4_at_24k.sh` | Watchdog: wait for `checkpoint-{N}/model.safetensors` to write + stabilise, then SIGTERM the training PID. Tunable target step / PID / ckpt root via env vars. | `V4_PID=<pid> TARGET_STEP=24000 nohup bash scripts/stop_v4_at_24k.sh > logs/stop.log 2>&1 &` |
+| `scripts/watch_eval_post_discord.sh` | Poll `predictions/step-N.jsonl` files, fire `eval_to_discord.py` per new step, mark `.posted` to avoid duplicates. | `nohup bash scripts/watch_eval_post_discord.sh <train.log> <ckpt-out-dir> > logs/watch.log 2>&1 &` |
+| `scripts/analysis/eval_report.py` | Per-step v3 vs v4 unified table (greedy + max@8 + ops, IID/OOD aware ★ on OOD row). Posts to Discord with `--post`. | `uv run python -m scripts.analysis.eval_report --step <N> --post` |
+| `scripts/analysis/eval_to_discord.py` | Trajectory collage poster — renders mesh trajectories per bucket, IID/OOD tagged anchors. | called by the watcher above; or directly via `--step N` |
+| **Monitor index** | Full catalogue + conventions (red `[OOD]` / blue `[IID]` tags, holdout sync rules). | [`scripts/analysis/README_MONITOR.md`](scripts/analysis/README_MONITOR.md) |
+
+### Render
+
+| Tool | What it does | Usage |
+|---|---|---|
+| `data_prep/prerender_dataset.py` | Render all `*.stl` under a dir to `{stem}_render.png` (4-view 268×268). Idempotent, parallel-safe. **Run once per dataset before training**; `common.meshio.render_img` then loads PNGs instead of rendering on the fly. | `uv run python -m data_prep.prerender_dataset --dir data/<name> [--workers 8]` |
+| `data_prep/render_benchcad_easy.py` | cadquery `.py` → 4-view 268×268 PNG, parallel + shard-aware (resumes per shard). Use for raw HF parquets that ship code-only. | `uv run python -m data_prep.render_benchcad_easy --shards 15-54 [--workers 8]` |
+| `data_prep/merge_benchcad_easy_renders.py` | Merge per-shard rendered PNGs into one parquet ready for HF upload. | `uv run python -m data_prep.merge_benchcad_easy_renders` |
+| `common/meshio.py::render_img` | Library function: load `{stem}_render.png` if it exists, else render on the fly via Open3D headless. Used at training time. | `from common.meshio import render_img; img = render_img(stl_path)` |
+
+### Offline eval (paper figures)
+
+| Tool | What it does | Usage |
+|---|---|---|
+| `scripts/eval_v3_cad_bench_722.py` | v3 ckpt → full `BenchCAD/cad_bench_722` (722 samples × 106 families). Saves per-case `.py` + `metadata.jsonl` + per-family `summary.json`. **§7 IID upper-bound**. | `uv run python scripts/eval_v3_cad_bench_722.py --ckpt <v3-ckpt> --out eval_outputs/v3_cad_bench_722` |
+| `scripts/eval_v4_ood_retro.py` | Iterate saved checkpoints in a run dir, run stratified 50-OOD (10 fams × 5) on each. Backfills clean OOD trajectory for runs that pre-date the IID/OOD split refactor. | `uv run python scripts/eval_v4_ood_retro.py --ckpts <ckpt-root> --out eval_outputs/v4_ood_retro` |
+| `eval/bench_sweep.py` | Multi-dataset × multi-temp × max@N IoU sweep — see Eval section above. | `uv run python -m eval.bench_sweep ...` |
+| `eval/passk.py` | pass@k estimator. | `uv run python -m eval.passk ...` |
+| `scripts/analysis/main_figure_v2.py` | §7 4-panel paper figure: OOD rare_recall climb / OOD ess_pass plateau / final-step gap / IID control. | `uv run python -m scripts.analysis.main_figure_v2` |
+| `scripts/analysis/v4_failure_analysis.py` | Per-OOD-family IoU + exec + ess bars — appendix figure. | `uv run python -m scripts.analysis.v4_failure_analysis` |
+
+### Data prep (one-time)
+
+| Tool | What it does | Usage |
+|---|---|---|
+| `data_prep/fetch_cad_sft.py` | Pull all 5 v3 SFT sources from `Hula0401/cad-sft/`. | `uv run python -m data_prep.fetch_cad_sft` |
+| `data_prep/fetch_benchcad.py` | Pull eval split (90/10 of `BenchCAD/cad_bench`). Generates STLs + writes `_skipped.jsonl` for tessellation failures. | `uv run python -m data_prep.fetch_benchcad` |
+| `data_prep/build_holdout_split.py` | Partition `train.pkl` → `train_v4_holdout.pkl` by held-out family list. Required before launching `ood*.yaml` configs. | `uv run python -m data_prep.build_holdout_split --holdout-families <fam1> <fam2> ...` |
+| `data_prep/build_benchcad_easy.py` | Build `data/benchcad-easy/{train,*.py,*.png}` from local rendered shards (default range 15–54). | `uv run python -m data_prep.build_benchcad_easy [--shard-range 15-54]` |
+| `data_prep/repack_recode_to_bench.py` | AST-rewrite cad-recode codes to BenchCAD shell style (one-time; outputs already on HF). | `uv run python -m data_prep.repack_recode_to_bench` |
 
 ---
 

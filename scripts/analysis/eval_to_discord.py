@@ -19,7 +19,7 @@ DUAL MODE:
 
          uv run python -m scripts.analysis.eval_to_discord \\
              --step 3000 \\
-             --log /home/ubuntu/cadrille/logs/big_bench_shell_50k_*.log \\
+             --log /home/ubuntu/cadrille/logs/ood_enhance_*.log \\
              --output-dir /ephemeral/checkpoints/sft-...
 
   2. SEND MODE — generic Discord pipe for arbitrary analysis images:
@@ -432,7 +432,8 @@ def parse_eval_block(log_path: Path, step: int) -> dict:
     # Look ahead enough to capture both greedy eval AND max_iou@8 block
     block = text[idx:idx + 12000]
     out = {}
-    for bucket in ('BenchCAD val', 'recode20k train', 'text2cad train',
+    for bucket in ('BenchCAD val', 'BenchCAD val IID', 'BenchCAD val OOD',
+                   'recode20k train', 'text2cad train',
                    'DeepCAD test', 'Fusion360 test'):
         pat = re.compile(
             rf'\[(?:img|text)/{re.escape(bucket)}\]\s+'
@@ -462,6 +463,13 @@ def parse_eval_block(log_path: Path, step: int) -> dict:
             entry['pass_gt_0_5'] = float(m2.group('p'))
         if entry:
             out[bucket] = entry
+    # Backward-compat alias: downstream summary code keys 'BenchCAD val'.
+    # Prefer IID (the in-distribution number) when only the split form exists.
+    if 'BenchCAD val' not in out:
+        if 'BenchCAD val IID' in out:
+            out['BenchCAD val'] = out['BenchCAD val IID']
+        elif 'BenchCAD val OOD' in out:
+            out['BenchCAD val'] = out['BenchCAD val OOD']
     return out
 
 
@@ -517,8 +525,12 @@ def build_trajectory_collage(bucket: str,
 
     img = Image.new('RGB', (W, H), (245, 245, 245))
     drw = ImageDraw.Draw(img)
+    iid_count = sum(1 for a in anchors if not is_ood(a['uid'], bucket))
+    ood_count = n_rows - iid_count
+    label_summary = (f'  IID={iid_count} OOD={ood_count}'
+                     if bucket == 'BenchCAD val' else '')
     drw.text((10, 6),
-             f'{bucket}  ({n_rows} anchors × {n_step_cols} steps)  '
+             f'{bucket}  ({n_rows} anchors × {n_step_cols} steps){label_summary}  '
              f'pred-cell={cell}px  GT-4view={gt_w}px',
              fill=(20, 20, 20))
 
@@ -543,7 +555,20 @@ def build_trajectory_collage(bucket: str,
                 drw.rectangle([1, y + 1, gt_w - 1, y + cell - 1], fill=(220, 220, 220))
         else:
             drw.rectangle([1, y + 1, gt_w - 1, y + cell - 1], fill=(232, 210, 210))
-        drw.text((4, y + 4), anc['uid'][:20], fill=(20, 20, 20))
+        # Tag uid with [IID]/[OOD] for BenchCAD val (helps reader instantly
+        # distinguish held-out family rows from in-domain ones).
+        tag = split_label(anc['uid'], bucket)
+        if tag == '[OOD]':
+            tag_color = (180, 30, 30)
+        elif tag == '[IID]':
+            tag_color = (30, 110, 180)
+        else:
+            tag_color = (60, 60, 60)
+        if tag:
+            drw.text((4, y + 4), tag, fill=tag_color)
+            drw.text((4, y + 18), anc['uid'][:24], fill=(20, 20, 20))
+        else:
+            drw.text((4, y + 4), anc['uid'][:20], fill=(20, 20, 20))
 
         # ── col 1: GT mesh iso ───────────────────────────
         gt_x = gt_w
@@ -588,8 +613,24 @@ def build_trajectory_collage(bucket: str,
 
 # ─── EVAL MODE ──────────────────────────────────────────────────────────────
 
+def _canonical_bucket(b: str | None) -> str | None:
+    """Map 'BenchCAD val IID' / 'BenchCAD val OOD' → 'BenchCAD val' so older
+    code paths that group by IOU_BUCKETS still see one BC val pool.
+    Per-row IID/OOD identity is recovered at render time via uid → family."""
+    if b in ('BenchCAD val IID', 'BenchCAD val OOD'):
+        return 'BenchCAD val'
+    return b
+
+
 def _read_jsonl(p: Path) -> list[dict]:
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    rows = []
+    for l in p.read_text().splitlines():
+        if not l.strip():
+            continue
+        r = json.loads(l)
+        r['bucket'] = _canonical_bucket(r.get('bucket'))
+        rows.append(r)
+    return rows
 
 
 def discover_steps(pred_dir: Path, max_step: int) -> list[int]:
@@ -605,8 +646,13 @@ def discover_steps(pred_dir: Path, max_step: int) -> list[int]:
     return out
 
 
+from common.holdout import HOLDOUT_FAMILIES as _HOLDOUT_FAMILIES, uid2fam as _BC_UID2FAM, is_ood, split_label
+
+
 def pick_anchors(jsonl_path: Path, n_per_bucket: int) -> dict[str, list[dict]]:
-    """Deterministic anchors: sort by uid, take first N per bucket."""
+    """Deterministic anchors per bucket. For BenchCAD val, FORCE half IID +
+    half OOD so the trajectory collage shows both regimes. For other buckets,
+    fall back to first-N-by-uid as before."""
     rows = _read_jsonl(jsonl_path)
     by_bucket: dict[str, list[dict]] = {b: [] for b in IOU_BUCKETS}
     for r in rows:
@@ -614,7 +660,14 @@ def pick_anchors(jsonl_path: Path, n_per_bucket: int) -> dict[str, list[dict]]:
             by_bucket[r['bucket']].append(r)
     for b, pool in by_bucket.items():
         pool.sort(key=lambda x: x['uid'])
-        by_bucket[b] = pool[:n_per_bucket]
+        if b == 'BenchCAD val' and _BC_UID2FAM:
+            iid_pool = [r for r in pool if not is_ood(r['uid'], b)]
+            ood_pool = [r for r in pool if is_ood(r['uid'], b)]
+            half_iid = n_per_bucket // 2
+            half_ood = n_per_bucket - half_iid
+            by_bucket[b] = ood_pool[:half_ood] + iid_pool[:half_iid]
+        else:
+            by_bucket[b] = pool[:n_per_bucket]
     return by_bucket
 
 

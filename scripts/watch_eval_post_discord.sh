@@ -32,6 +32,9 @@ while true; do
         for f in "$PRED_DIR"/step-*.jsonl; do
             [ -e "$f" ] || continue
             base=$(basename "$f" .jsonl)             # step-001000
+            # Skip max@8 sample dump files (step-001000.max@8.jsonl) — only
+            # the greedy step-NNNNNN.jsonl drives Discord posts.
+            [[ "$base" == *.max@*  ]] && continue
             step_str="${base#step-}"                  # 001000
             step=$((10#$step_str))                    # 1000
             [ "$step" -eq 0 ] && continue             # skip eval_on_start
@@ -41,18 +44,25 @@ while true; do
             if ! grep -q "step=${step} running IoU eval" "$LOG_PATH" 2>/dev/null; then
                 continue
             fi
-            # Wait until all 5 buckets are logged for this step (otherwise IoU
-            # for the last bucket might be missing). Heuristic: count "[img/" +
-            # "[text/" lines after the marker.
+            # Wait until all expected buckets are logged for this step
+            # (otherwise IoU for the last bucket might be missing). Heuristic:
+            # count "[img/" + "[text/" lines after the marker.
             block=$(awk -v m="step=${step} running IoU eval" '
                 $0 ~ m {found=1}
                 found {print}
             ' "$LOG_PATH")
-            # Threshold: 4 buckets (text2cad legacy deleted; only BC val + recode20k train +
-            # DC test + FU test now reliably show. text2cad train counts but if 0 items it's skipped).
-            n_done=$(echo "$block" | grep -cE '\[(img|text)/(BenchCAD val|recode20k train|text2cad train|DeepCAD test|Fusion360 test)\]' || true)
-            if [ "$n_done" -lt 4 ]; then
-                echo "[watch] step=$step only $n_done/4 buckets logged, waiting"
+            # New online_eval splits BenchCAD val into IID + OOD when
+            # holdout_families is set, so the post-refactor world has 5
+            # buckets: BC val IID + BC val OOD + recode20k train + DC test +
+            # Fu test. Pre-refactor runs emit a single 'BenchCAD val' bucket
+            # → still hits 4. text2cad train is skipped at 0 items.
+            n_done=$(echo "$block" | grep -cE '\[(img|text)/(BenchCAD val( IID| OOD)?|recode20k train|text2cad train|DeepCAD test|Fusion360 test)\]' || true)
+            n_thresh=4
+            if echo "$block" | grep -qE '\[(img|text)/BenchCAD val (IID|OOD)\]'; then
+                n_thresh=5
+            fi
+            if [ "$n_done" -lt "$n_thresh" ]; then
+                echo "[watch] step=$step only $n_done/$n_thresh buckets logged, waiting"
                 continue
             fi
             # max_iou@8 cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
@@ -77,6 +87,26 @@ while true; do
                 echo "[watch] step=$step posted, marker=$marker"
             else
                 echo "[watch] step=$step FAILED, will retry next poll"
+            fi
+
+            # Every 5000 steps, refresh the §7 main+appendix figure suite
+            # and post — keeps trajectory plots up-to-date across all 4 runs
+            # without manual intervention.
+            if [ $((step % 5000)) -eq 0 ] && [ "$step" -ge 5000 ]; then
+                echo "[watch] step=$step refreshing §7 figure suite ..."
+                if uv run python -m scripts.analysis.plot_main_appendix > /dev/null; then
+                    uv run python -m scripts.analysis.eval_to_discord --send \
+                        --message "§7 figure suite refresh @ step ${step}" \
+                        --file paper/figures/fig_7_4line_ess_pass.png \
+                        --file paper/figures/fig_7_ood_iou_4line.png \
+                        --file paper/figures/fig_app_ood_exec.png \
+                        --file paper/figures/fig_app_iid_ess_pass.png \
+                        --file paper/figures/fig_app_iid_iou.png \
+                        --file paper/figures/fig_app_iid_exec.png \
+                        --file paper/figures/fig_app_deepcad_iou.png \
+                        --file paper/figures/fig_app_fusion360_iou.png \
+                        || echo "[watch] §7 figure post failed (non-fatal)"
+                fi
             fi
         done
     fi

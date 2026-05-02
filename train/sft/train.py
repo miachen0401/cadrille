@@ -405,7 +405,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         online_eval_n_per=20,
         backbone='qwen2_vl',
         max_iou_k=8, max_iou_temperature=1.0, max_iou_every_n_evals=1,
-        curriculum_phases=None):
+        curriculum_phases=None,
+        benchcad_train_pkl=None, cad_iso_106_train_pkl=None,
+        holdout_families=None):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -491,7 +493,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         accumulation_steps = accum_steps_override or 4
 
     benchcad_path = os.path.join(data_path, 'benchcad')
-    if os.path.isdir(benchcad_path) and os.path.exists(os.path.join(benchcad_path, 'train.pkl')):
+    benchcad_pkl = benchcad_train_pkl or 'train.pkl'
+    if os.path.isdir(benchcad_path) and os.path.exists(os.path.join(benchcad_path, benchcad_pkl)):
         sources['benchcad'] = BenchCadDataset(
             root_dir=benchcad_path,
             split='train',
@@ -503,7 +506,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             noise_scale_img=-1,
             num_imgs=4,
             mode=mode,
-            max_code_len=max_code_len)
+            max_code_len=max_code_len,
+            pkl_filename=benchcad_pkl)
 
     recode20k_path = os.path.join(data_path, 'cad-recode-20k')
     if os.path.isdir(recode20k_path) and os.path.exists(os.path.join(recode20k_path, 'train.pkl')):
@@ -549,14 +553,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # parts). 170k items, BenchCAD shell style, only dataset that has
     # fillet (~19% of items) — primary source for rare-op coverage.
     cad_iso_106_path = os.path.join(data_path, 'cad-iso-106')
-    if os.path.isdir(cad_iso_106_path) and os.path.exists(os.path.join(cad_iso_106_path, 'train.pkl')):
+    cad_iso_106_pkl = cad_iso_106_train_pkl or 'train.pkl'
+    if os.path.isdir(cad_iso_106_path) and os.path.exists(os.path.join(cad_iso_106_path, cad_iso_106_pkl)):
         if mode != 'pc':
             sources['cad_iso_106'] = CadRecode20kDataset(
                 root_dir=cad_iso_106_path,
                 split='train',
                 img_size=268,
                 max_code_len=max_code_len,
-                mode='img')
+                mode='img',
+                pkl_filename=cad_iso_106_pkl)
 
     # v4 source: BenchCAD/benchcad-easy (~109k items, 55 shards). Same
     # `simple_*` family taxonomy as benchcad/benchcad-simple but ~10× the
@@ -653,17 +659,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         else:
             print(f'[sft_mix_weights] enforced via WeightedRandomSampler: {active}')
 
-    # val set selection: prefer benchcad when it's the dominant source
-    # Prefer benchcad val whenever benchcad is in the mix (weight > 0) — that's
-    # the metric we're tracking. Fall back to cad-recode only when benchcad is
-    # absent entirely.
+    # val set selection: always prefer benchcad val when its pkl exists — it's
+    # the metric we report regardless of training mix. Some configs (e.g. the
+    # HQ-only baseline) zero the benchcad train weight but still want benchcad
+    # val for eval comparability. Only fall back to cad-recode val when no
+    # benchcad val.pkl is available, and only if cad-recode-v1.5 carries STL
+    # meshes (img-only bundles don't, and CadRecodeDataset.get_img would
+    # KeyError on `mesh_path`).
     eval_dataset = None
-    benchcad_dominant = (
-        sft_mix_weights
-        and float(sft_mix_weights.get('benchcad', 0)) > 0
-    )
     benchcad_val_pkl = os.path.join(benchcad_path, 'val.pkl')
-    if benchcad_dominant and os.path.exists(benchcad_val_pkl):
+    if os.path.exists(benchcad_val_pkl):
         eval_dataset = BenchCadDataset(
             root_dir=benchcad_path,
             split='val',
@@ -680,19 +685,26 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     else:
         val_pkl = os.path.join(cad_recode_path, 'val.pkl')
         if os.path.exists(val_pkl):
-            eval_dataset = CadRecodeDataset(
-                root_dir=cad_recode_path,
-                split='val',
-                n_points=256,
-                normalize_std_pc=100,
-                noise_scale_pc=None,
-                img_size=268,
-                normalize_std_img=200,
-                noise_scale_img=-1,
-                num_imgs=4,
-                mode=mode,
-                max_code_len=max_code_len)
-            print(f'[eval] using cad-recode val ({len(eval_dataset)} samples)')
+            with open(val_pkl, 'rb') as _f:
+                _val_probe = pickle.load(_f)
+            _val_has_stl = bool(_val_probe) and 'mesh_path' in _val_probe[0]
+            if _val_has_stl:
+                eval_dataset = CadRecodeDataset(
+                    root_dir=cad_recode_path,
+                    split='val',
+                    n_points=256,
+                    normalize_std_pc=100,
+                    noise_scale_pc=None,
+                    img_size=268,
+                    normalize_std_img=200,
+                    noise_scale_img=-1,
+                    num_imgs=4,
+                    mode=mode,
+                    max_code_len=max_code_len)
+                print(f'[eval] using cad-recode val ({len(eval_dataset)} samples)')
+            else:
+                print(f'[eval] cad-recode val.pkl is img-only (no mesh_path); '
+                      'no eval dataset selected')
     has_val = eval_dataset is not None
 
     processor = AutoProcessor.from_pretrained(
@@ -800,6 +812,15 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             max_iou_temperature=max_iou_temperature,
             max_iou_every_n_evals=max_iou_every_n_evals,
         ))
+
+    # Wire holdout_families into online_eval so BC val splits IID/OOD per
+    # eval (separate buckets in wandb: eval/img/BenchCAD val IID/* and
+    # eval/img/BenchCAD val OOD/*).
+    if holdout_families:
+        from train.sft import online_eval as _oe
+        _oe.set_holdout_families(holdout_families)
+        print(f'[online-eval] BC val IID/OOD split enabled, holdout_families='
+              f'{sorted(holdout_families)}', flush=True)
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
@@ -917,6 +938,10 @@ def main():
     # sampler picks active weights from the running global_step at each
     # epoch boundary. First phase MUST start at step 0.
     curriculum_phases     = cfg.get('curriculum_phases', None)
+    # v4-holdout: alternate train pkl + holdout family list (consumed by online_eval).
+    benchcad_train_pkl    = cfg.get('benchcad_train_pkl', None)
+    cad_iso_106_train_pkl = cfg.get('cad_iso_106_train_pkl', None)
+    holdout_families      = cfg.get('holdout_families', None)
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -972,6 +997,9 @@ def main():
         'max_iou_temperature':    max_iou_temperature,
         'max_iou_every_n_evals':  max_iou_every_n_evals,
         'curriculum_phases':      curriculum_phases,
+        'benchcad_train_pkl':     benchcad_train_pkl,
+        'cad_iso_106_train_pkl':  cad_iso_106_train_pkl,
+        'holdout_families':       holdout_families,
     }
 
     print(f'Run name : {run_name}')
@@ -996,7 +1024,10 @@ def main():
         max_iou_k=max_iou_k,
         max_iou_temperature=max_iou_temperature,
         max_iou_every_n_evals=max_iou_every_n_evals,
-        curriculum_phases=curriculum_phases)
+        curriculum_phases=curriculum_phases,
+        benchcad_train_pkl=benchcad_train_pkl,
+        cad_iso_106_train_pkl=cad_iso_106_train_pkl,
+        holdout_families=holdout_families)
 
 
 if __name__ == '__main__':

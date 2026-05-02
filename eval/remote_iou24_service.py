@@ -408,64 +408,77 @@ def score_pass(args, state: dict) -> bool:
     print(f'  prediction models discovered: {models}  (rows={len(per_row)})',
           flush=True)
 
-    tasks: list[tuple] = []
-    scored_at = _now_iso()
-    early_stop = args.early_stop
-    timeout = args.eval_timeout
+    # Build "applicable_keys" — every (model, stem, code_hash) tuple present in
+    # this SHA's predictions that has GT available. Each appears in this SHA's
+    # per_case output, regardless of whether we score it fresh or reuse cache.
+    applicable_keys: list[tuple] = []   # (model, stem, gen_code, gt_path, code_hash)
     for entry in per_row:
         stem = entry['stem']
         if stem not in gt_stl_paths:
             continue
         for model, gen_code in entry['model_codes'].items():
             ch = _code_hash(gen_code)
-            key = _scored_key(model, stem, ch)
-            if key in state['scored'] and not args.force:
-                continue
-            tasks.append((model, stem, gen_code, str(gt_stl_paths[stem]),
-                          ch, timeout, early_stop, sha_short, scored_at))
+            applicable_keys.append((model, stem, gen_code, str(gt_stl_paths[stem]), ch))
 
-    if not tasks:
-        print('  no new (model, stem, code_hash) tuples to score', flush=True)
-        # but still update last_sha so we don't repeat the diff next poll
+    tasks: list[tuple] = []
+    scored_at = _now_iso()
+    early_stop = args.early_stop
+    timeout = args.eval_timeout
+    for model, stem, gen_code, gt_path, ch in applicable_keys:
+        key = _scored_key(model, stem, ch)
+        if key in state['scored'] and not args.force:
+            continue
+        tasks.append((model, stem, gen_code, gt_path, ch,
+                      timeout, early_stop, sha_short, scored_at))
+
+    print(f'  applicable predictions: {len(applicable_keys)}  '
+          f'(new to score: {len(tasks)}, cache hits: {len(applicable_keys) - len(tasks)})',
+          flush=True)
+
+    new_results: list[dict] = []
+    if tasks:
+        t_start = time.time()
+        last_log = t_start
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futs = [pool.submit(_score_one, task) for task in tasks]
+            for i, fut in enumerate(as_completed(futs)):
+                r = fut.result()
+                new_results.append(r)
+                if time.time() - last_log > 30:
+                    rate = (i + 1) / (time.time() - t_start)
+                    eta_s = (len(tasks) - i - 1) / max(rate, 1e-3)
+                    print(f'    [{i+1}/{len(tasks)}] {rate:.1f}/s  eta={eta_s/60:.1f} min',
+                          flush=True)
+                    last_log = time.time()
+        print(f'  scored {len(new_results)} in {(time.time()-t_start)/60:.1f} min',
+              flush=True)
+
+    # (5) Update cache with full per_case rows so future SHAs can rebuild
+    # complete per_case snapshots from cache without re-scoring.
+    for r in new_results:
+        key = _scored_key(r['model'], r['stem'], r['code_hash'])
+        state['scored'][key] = dict(r)  # full row, includes iou/iou_24/rot/exec/reason/latency
+
+    # (6) Build COMPLETE per_case for this SHA — cache hits relabeled to
+    # the current sha_short so per_case/{sha} reflects the full snapshot of
+    # predictions present at this commit, not just the delta.
+    per_model: dict[str, list[dict]] = {}
+    for model, stem, _gen_code, _gt_path, ch in applicable_keys:
+        key = _scored_key(model, stem, ch)
+        cached = state['scored'].get(key)
+        if cached is None:
+            continue  # scoring failed and was not cached
+        row = dict(cached)
+        row['sha_short'] = sha_short  # relabel for this SHA's snapshot
+        per_model.setdefault(model, []).append(row)
+
+    if not per_model:
+        print('  no scored predictions to publish for this SHA', flush=True)
         state['last_sha'] = sha
         return True
 
-    print(f'  scoring {len(tasks)} new predictions with {args.workers} workers ...',
-          flush=True)
-    new_results: list[dict] = []
-    t_start = time.time()
-    last_log = t_start
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futs = [pool.submit(_score_one, task) for task in tasks]
-        for i, fut in enumerate(as_completed(futs)):
-            r = fut.result()
-            new_results.append(r)
-            if time.time() - last_log > 30:
-                rate = (i + 1) / (time.time() - t_start)
-                eta_s = (len(tasks) - i - 1) / max(rate, 1e-3)
-                print(f'    [{i+1}/{len(tasks)}] {rate:.1f}/s  eta={eta_s/60:.1f} min',
-                      flush=True)
-                last_log = time.time()
-
-    print(f'  scored {len(new_results)} in {(time.time()-t_start)/60:.1f} min',
-          flush=True)
-
-    # (5) Update scored set + push
-    for r in new_results:
-        key = _scored_key(r['model'], r['stem'], r['code_hash'])
-        state['scored'][key] = {
-            'iou_24': r['iou_24'], 'rot_idx': r['rot_idx'],
-            'exec_ok': r['exec_ok'], 'sha_short': r['sha_short'],
-        }
-
-    # group by model for per_case files
-    per_model: dict[str, list[dict]] = {}
-    for r in new_results:
-        per_model.setdefault(r['model'], []).append(r)
-
-    # build summary rows from CURRENT pass results (NOT the cumulative state).
-    # An aggregate roll-up across all SHAs would require either re-pulling the
-    # existing summary or storing all per_case rows in state — keep simple.
+    # Summary rolled up over the FULL per_case snapshot for this SHA (not the
+    # delta), so trend graphs are honest even when only a subset re-scored.
     summary_rows = [_build_summary_row(sha_short, m, rows)
                     for m, rows in per_model.items()]
 

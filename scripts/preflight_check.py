@@ -11,7 +11,7 @@ Run BEFORE launching SFT training. Verifies for each source in the YAML mix:
 Exits non-zero if any source fails. Prints a summary report.
 
 Usage:
-    uv run python -m scripts.preflight_check --config configs/sft/big_bench_shell_50k_v3.yaml
+    uv run python -m scripts.preflight_check --config configs/sft/baseline.yaml
 """
 from __future__ import annotations
 import argparse

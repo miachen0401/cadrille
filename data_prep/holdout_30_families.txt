@@ -1,0 +1,65 @@
+# 30-family holdout selection (Config B, reasoned by essential-op diversity)
+#
+# Selection criteria:
+#   1. v3 baseline ess_pass >= 0.85 on this family (verified retrospectively)
+#   2. val_n >= 5 (each shows up in stratified n=50 eval)
+#   3. train_n >= 30 (OOD eval meaningful)
+#   4. Excluded: helical_gear, sprocket, twisted_drill (v3 itself fails)
+#   5. Cover 12 essential-op classes uniformly (avoid single-op bias)
+#
+# Total: 30 families × ~1500 train samples each ≈ 45k items removed (3% of train)
+
+# polygon profile
+bolt
+hex_standoff
+hex_nut
+
+# revolve / sweep (axisymmetric)
+bellows
+pulley
+bucket
+dome_cap
+nozzle
+taper_pin
+
+# curved sweep
+duct_elbow
+pipe_elbow
+
+# sweep + helix (rare op composition)
+coil_spring
+torsion_spring
+worm_screw
+
+# loft + taper (tapered)
+tapered_boss
+wing_nut
+
+# pure loft (cross-section interp)
+propeller
+bevel_gear
+
+# shell (hollow)
+enclosure
+sheet_metal_tray
+
+# rarray (linear array)
+mesh_panel
+rib_plate
+vented_panel
+waffle_plate
+
+# polarArray (rotational array)
+motor_end_cap
+
+# irregular profile (polyline / spline / arc)
+star_blank
+dovetail_slide
+cruciform
+
+# revolve + sphere
+ball_knob
+
+# revolve + sweep + makeTorus
+torus_link
+eyebolt
