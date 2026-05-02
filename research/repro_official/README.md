@@ -29,21 +29,28 @@ Within ≤1% absolute on the in-distribution sets — call it reproduced.
 
 ## How to run
 
-### 1. Install the paper-era stack into the main venv
+### 1. Bootstrap the dedicated paper-repro venv
 
-`pyproject.toml` pins `transformers>=5.6.0`, so `uv run` and `uv sync`
-will fight a manual downgrade. Use the venv binary directly.
+`pyproject.toml` pins `transformers>=5.6.0` (training stack), but
+filapro/cadrille and kulibinai/cadevolve-rl1 were trained on
+`transformers==4.50.3` and **drift in 5.x** (DeepCAD IoU 0.92 → 0.14).
+To keep the two stacks side-by-side without `uv sync` clobbering either,
+this folder uses a separate venv at `.venv-eval/`:
 
 ```bash
-uv pip install \
-    transformers==4.50.3 \
-    tokenizers==0.21.0 \
-    accelerate==0.34.2 \
-    huggingface-hub==0.27.0
-.venv/bin/python -c "import transformers; assert transformers.__version__.startswith('4.50.')"
+bash scripts/setup_eval_env.sh           # idempotent — creates .venv-eval if missing
+bash scripts/setup_eval_env.sh --rebuild # nuke + reinstall
+
+source scripts/use_eval_env.sh           # activate (4.50.3 stack)
+deactivate && source .venv/bin/activate  # back to main (5.x stack)
 ```
 
-When done with the repro, restore with `uv sync`.
+The eval venv ships:
+- transformers 4.50.3 / tokenizers 0.21.0 / accelerate 0.34.2 / hf-hub 0.27.0
+- torch 2.5.1 + cadquery (git) + trimesh + pyvista + datasets
+- open3d source-built wheel (if `scripts/setup.sh` step [4] produced one),
+  else PyPI `open3d-cpu==0.18.0` as fallback (the latter SIGSEGVs on a
+  small fraction of meshes — wrap in subprocess + fall back to pyvista)
 
 ### 2. Generate predictions + score
 
