@@ -61,6 +61,11 @@ RUNS = [
         'key':   'iid_v3',
         'label': '(1) iid — v3 baseline (trained on all 106 families)',
         'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions',
+        # v3 was trained pre-refactor → online JSONL has ~9 random OOD per
+        # step (BC val random 50, of which ~9 fall in holdout fams). Use the
+        # HF-driven retro 50-stratified eval so v3's line matches baseline /
+        # ood / ood_enhance exactly on the 50-OOD set.
+        'retro_ood_dir': '/home/ubuntu/cadrille/eval_outputs/v3_ood_retro_hf',
         'plot':  dict(color='C2', linewidth=2.0, marker='', linestyle='-', alpha=0.85),
     },
     {
