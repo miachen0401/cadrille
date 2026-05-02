@@ -407,7 +407,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         max_iou_k=8, max_iou_temperature=1.0, max_iou_every_n_evals=1,
         curriculum_phases=None,
         benchcad_train_pkl=None, cad_iso_106_train_pkl=None,
-        holdout_families=None):
+        benchcad_simple_train_pkl=None,
+        holdout_families=None, holdout_families_v2=None):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -538,14 +539,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # rewrite needed); image+code, no description. Same on-disk layout as
     # recode_bench so we reuse CadRecode20kDataset.
     benchcad_simple_path = os.path.join(data_path, 'benchcad-simple')
-    if os.path.isdir(benchcad_simple_path) and os.path.exists(os.path.join(benchcad_simple_path, 'train.pkl')):
+    benchcad_simple_pkl = benchcad_simple_train_pkl or 'train.pkl'
+    if os.path.isdir(benchcad_simple_path) and os.path.exists(os.path.join(benchcad_simple_path, benchcad_simple_pkl)):
         if mode != 'pc':
             sources['benchcad_simple'] = CadRecode20kDataset(
                 root_dir=benchcad_simple_path,
                 split='train',
                 img_size=268,
                 max_code_len=max_code_len,
-                mode='img')
+                mode='img',
+                pkl_filename=benchcad_simple_pkl)
 
     # Phase F (T8 follow-up): BenchCAD/cad_iso_106 imported via the same
     # data_prep/import_benchcad_simple.py pipeline (different upstream
@@ -821,6 +824,11 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         _oe.set_holdout_families(holdout_families)
         print(f'[online-eval] BC val IID/OOD split enabled, holdout_families='
               f'{sorted(holdout_families)}', flush=True)
+    if holdout_families_v2:
+        from train.sft import online_eval as _oe
+        _oe.set_holdout_families_v2(holdout_families_v2)
+        print(f'[online-eval] bench-simple OOD bucket enabled, holdout_families_v2='
+              f'{sorted(holdout_families_v2)}', flush=True)
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
@@ -939,9 +947,13 @@ def main():
     # epoch boundary. First phase MUST start at step 0.
     curriculum_phases     = cfg.get('curriculum_phases', None)
     # v4-holdout: alternate train pkl + holdout family list (consumed by online_eval).
-    benchcad_train_pkl    = cfg.get('benchcad_train_pkl', None)
-    cad_iso_106_train_pkl = cfg.get('cad_iso_106_train_pkl', None)
-    holdout_families      = cfg.get('holdout_families', None)
+    benchcad_train_pkl        = cfg.get('benchcad_train_pkl', None)
+    cad_iso_106_train_pkl     = cfg.get('cad_iso_106_train_pkl', None)
+    benchcad_simple_train_pkl = cfg.get('benchcad_simple_train_pkl', None)
+    holdout_families          = cfg.get('holdout_families', None)
+    # §7 v2: bench-simple op-pattern holdout (separate from v1 mech holdout
+    # so a config can use both — e.g. ood_v2 holds out 10 mech AND 10 simple_op).
+    holdout_families_v2       = cfg.get('holdout_families_v2', None)
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -1027,7 +1039,9 @@ def main():
         curriculum_phases=curriculum_phases,
         benchcad_train_pkl=benchcad_train_pkl,
         cad_iso_106_train_pkl=cad_iso_106_train_pkl,
-        holdout_families=holdout_families)
+        benchcad_simple_train_pkl=benchcad_simple_train_pkl,
+        holdout_families=holdout_families,
+        holdout_families_v2=holdout_families_v2)
 
 
 if __name__ == '__main__':
