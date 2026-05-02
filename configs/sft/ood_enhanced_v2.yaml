@@ -85,11 +85,3 @@ hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-ood-enhanced-v2-50k
 hf_upload_private: false
 
 wandb_project: cadrille-sft
-
-# v2 ablation: cap unique training rows to 500k across all sources.
-# Subsamples each source proportionally to its mix weight, deterministic
-# seed=42. Controls for "data volume" being a confound across the 5 lines —
-# baseline_v2 has 578k HQ available, ood_enhanced_v2 has ~700k bench+HQ
-# available; capping equalises the pool-size axis.
-# Set to null to disable (use full source sizes).
-total_train_dp: 500000

@@ -1,161 +1,111 @@
-# §7 v2 — pool size vs sampling proportion (two independent axes)
+# §7 v2 — training mix per config (Plan A: natural pool, no cap)
 
-The 5 v2 configs control TWO orthogonal aspects of training data exposure.
-This doc clarifies which is which, where each lives in code, and what
-each ablation actually tests.
+After several iterations, settled on the simplest design:
 
-## Axis 1 — POOL size (which rows are loaded)
+- **No `total_train_dp` cap** — each config uses its full natural pool.
+- **`sft_mix_weights` controls per-batch sampling** (uniform within source).
+- **bench+iso ≥ 40%** in every config that includes them (the user-set floor).
+- **Same compute** across configs: 50k step × batch 8 × accum 4 = 1.6M
+  samples per run.
 
-How many UNIQUE rows make it into the training dataset, broken down per
-source. Set by `total_train_dp` in the yaml.
+## Mix per config (per-batch sampling proportions)
 
-- yaml field: `total_train_dp: 500000`
-- code: `train/sft/train.py` lines ~614–704 — saturate-and-redistribute
-  block, runs AFTER `Dataset` constructors but BEFORE `ConcatDataset`
-  assembly. Edits `ds.annotations` in-place to truncate to the per-source
-  target.
-- per-source rng seed = `sha256(f'{base_seed}:{src_name}')[:4]` (uint32) —
-  stable across processes and configs, so smaller targets are PREFIXES of
-  larger targets for the same source.
-- effect: equalises total unique-row count across configs. Drifts
-  per-source ratios when source supply < demand (saturation).
+`sft_mix_weights` from each yaml — sums to 1000 (= 100% per batch):
 
-## Axis 2 — SAMPLING proportion (per-step batch composition)
-
-What FRACTION of each batch comes from each source. Set by
-`sft_mix_weights` in the yaml.
-
-- yaml field: `sft_mix_weights: {benchcad: 34, cad_iso_106: 366, ...}`
-- code: `train/sft/train.py` lines ~159 (`LengthGroupedWeightedSampler`),
-  ~278 (`_expand_mix_to_sample_weights`), ~316 (`WeightedSamplerTrainer`).
-  Builds a `WeightedRandomSampler` whose per-sample weight = `mix_w / n`
-  so total source mass = `mix_w` regardless of `n`.
-- effect: per-step batch composition is fixed at the source weights.
-  Pool size shrinkage does NOT change source sampling probability — it
-  only changes how many UNIQUE rows the model can see during training.
-
-### Verified independence
-
-```python
-mix = {'recode': 490, 'iso': 366, 'bench': 34, 't2c_img': 55, 't2c_text': 55}
-
-# Full pool (no total_train_dp)
-sizes_full  = {'recode': 472244, 'iso': 82849, 'bench': 7511, 't2c_img': 53315, 't2c_text': 53315}
-
-# total_train_dp=500k rebalanced pool
-sizes_rebal = {'recode': 334539, 'iso': 82849, 'bench': 7511, 't2c_img': 37550, 't2c_text': 37550}
-
-# source-level sampling probability (after _expand_mix_to_sample_weights)
-full pool   sampling probs:  recode=0.490 iso=0.366 bench=0.034 t2c_img=0.055 t2c_text=0.055
-rebal pool  sampling probs:  recode=0.490 iso=0.366 bench=0.034 t2c_img=0.055 t2c_text=0.055
-```
-
-Both pools yield IDENTICAL source-level sampling probabilities.
-
-## Per-config summary (POOL size)
-
-After `total_train_dp: 500000` rebalance:
-
-| Config | total | benchcad | iso | simple | easy | t2c_img | t2c_text | recode |
+| Config | bench | iso | simple | easy | t2c_img | t2c_text | recode | bench+iso |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `baseline_v2`     | 500,000 | — | — | — | — | 46,000 | 46,000 | 408,000 |
-| `iid_enhanced_v2` | 500,000 | — | — | — | 79,737 | 38,524 | 38,524 | 343,215 |
-| `ood_v2`          | 499,999 | 7,511 | 82,849 | — | — | 37,550 | 37,550 | 334,539 |
-| `ood_enhanced_v2` | 500,000 | 11,443 | 122,483 | — | — | 33,557 | 33,557 | 298,960 |
-| `iid_v2`          | 499,999 | 11,443 | 122,483 | 60,876 | — | 27,976 | 27,976 | 249,245 |
+| `baseline_v2`     | — | — | — | — | 92 | 92 | 816 | **0%** |
+| `iid_enhanced_v2` | — | — | — | 400 | 55 | 55 | 490 | **0%** |
+| `ood_v2`          | 33 | 367 | — | — | 55 | 55 | 490 | **40%** |
+| `ood_enhanced_v2` | 33 | 367 | — | — | 55 | 55 | 490 | **40%** |
+| `iid_v2`          | 33 | 367 | 125 | — | 43 | 43 | 389 | **40%** |
 
-Saturated sources (capped at availability) → deficit redistributed to
-non-saturated sources proportional to weight. Per-source rows are
-DETERMINISTIC and NESTED across configs — e.g. ood_v2's 334,539 recode
-rows are a strict prefix of baseline_v2's 408,000 recode rows.
+Configs without bench+iso (baseline_v2 / iid_enhanced_v2) are HQ-only or
+HQ + benchcad-easy — those are testing data axes that don't include
+mechanical content, so the bench+iso floor doesn't apply.
 
-## Per-config summary (SAMPLING proportions)
+## Natural pool size per config (unique training rows)
 
-The `sft_mix_weights` from each yaml — **unchanged by `total_train_dp`**:
+Each config loads sources at full size (no subsample):
 
-| Config | benchcad | iso | simple | easy | t2c_img | t2c_text | recode | total |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `baseline_v2`     | — | — | — | — | 92 | 92 | 816 | 1000 |
-| `iid_enhanced_v2` | — | — | — | 400 | 55 | 55 | 490 | 1000 |
-| `ood_v2`          | 34 | 366 | — | — | 55 | 55 | 490 | 1000 |
-| `ood_enhanced_v2` | 33 | 367 | — | — | 55 | 55 | 490 | 1000 |
-| `iid_v2`          | 23 | 250 | 125 | — | 55 | 55 | 490 | 998 |
+| Config | benchcad | iso | simple | easy | text2cad×2 | recode | total |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `baseline_v2`     | — | — | — | — | 53,315×2 | 472,244 | 578,874 |
+| `iid_enhanced_v2` | — | — | — | 79,737 | 53,315×2 | 472,244 | 658,611 |
+| `ood_v2`          | 7,511 | 82,849 | — | — | 53,315×2 | 472,244 | 669,234 |
+| `ood_enhanced_v2` | 11,443 | 122,483 | — | — | 53,315×2 | 472,244 | 712,800 |
+| `iid_v2`          | 11,443 | 122,483 | 60,876 | — | 53,315×2 | 472,244 | 773,676 |
 
-These are the per-step source weights (sum to 1000 = 100%). Each batch
-draws ~weight/1000 fraction of its rows from that source. So at every
-training step, ood_v2 is 60% HQ + 40% bench-stack at the BATCH level —
-even though its POOL is 82% HQ / 18% bench-stack rows.
+Different totals are intentional — controlled axis is **per-batch source
+mix**, not unique-row count. Comparing at matched compute (1.6M samples
+seen by every config) is the standard ablation framing.
 
-## What the ablation actually controls
+## Effective epochs per source (matched compute = 1.6M samples)
 
-Both axes matter; v2 separates them:
+`epochs = sampling_prob × 1.6M / unique_rows`. Small pools (bench, iso,
+simple, easy) get oversampled because their high mix weight × few unique
+rows.
 
-| What | Controlled by | Same across all 5? |
+### ood_v2 example
+
+| Source | unique | mix prob | samples seen | epochs |
+|---|---:|---:|---:|---:|
+| benchcad | 7,511 | 3.3% | 52,800 | **7.0** |
+| cad_iso_106 | 82,849 | 36.7% | 587,200 | **7.1** |
+| text2cad_img | 53,315 | 5.5% | 88,000 | **1.7** |
+| text2cad_text | 53,315 | 5.5% | 88,000 | **1.7** |
+| recode_bench | 472,244 | 49.0% | 784,000 | **1.7** |
+
+bench-stack rows oversampled ~4× vs HQ — by design (small mechanical
+pool gets seen many times so the rare-op signal lands).
+
+### baseline_v2 example
+
+| Source | unique | mix prob | samples seen | epochs |
+|---|---:|---:|---:|---:|
+| text2cad_img | 53,315 | 9.2% | 147,200 | **2.8** |
+| text2cad_text | 53,315 | 9.2% | 147,200 | **2.8** |
+| recode_bench | 472,244 | 81.6% | 1,305,600 | **2.8** |
+
+All ~2.8 epochs — pure HQ, no oversample asymmetry.
+
+## What v2 controls vs lets vary
+
+| Axis | Controlled? | Mechanism |
 |---|---|---|
-| Total unique rows (pool size) | `total_train_dp: 500000` | YES (≈ 500k each) |
-| Total training compute | `max_steps: 50000` × `batch × accum × G` | YES |
-| Per-step batch composition (source mix) | `sft_mix_weights` | NO (different per config) |
-| Which families are train-vs-test (holdout) | `holdout_families` + `holdout_families_v2` | NO (varies per config) |
+| Total compute | YES (same) | `max_steps × batch × accum × G` identical |
+| Per-batch source mix | YES (per-config) | `sft_mix_weights` |
+| bench+iso ≥ 40% | YES (≥ floor) | hand-set in yamls |
+| Family holdout | YES (per-config) | `holdout_families` (v1 mech) + `holdout_families_v2` (bench-simple) |
+| Total unique rows | NO (varies 579k–774k) | natural pool |
+| Effective epochs per source | NO (varies) | derived from mix × pool |
 
-The §7 v2 figure isolates: **at fixed compute and fixed pool size, what
-does the per-step source mix and family-holdout selection do to OOD
-ess_pass / IoU?**
+## Why Plan A vs the earlier total_train_dp + saturate-redistribute
 
-## Effective epochs per source (combined view)
+The original concern was "data volume confound" — different mixes giving
+different total unique rows might confound the ablation. We tried two
+fixes:
 
-Approximate rows seen during 50k training steps (batch 8, accum 4 →
-effective batch 32):
+- **B (cap-only)**: `target_per_source = min(weight × budget / total_w,
+  available)`. Some configs underflow → totals drift up to ±20%. Ratio
+  preserved.
+- **C (saturate-redistribute)**: cap, then redistribute deficit. Total
+  hit exactly, but ratio drifts up to 24pp from nominal.
 
-```
-total samples viewed = 50,000 × 32 = 1,600,000
-samples per source   = 1,600,000 × (mix_weight / total_weight)
-unique rows per src  = (from POOL table above)
-effective epochs     = samples_viewed / unique_rows
-```
+Both added complexity for a confound that's already controlled by
+**matched compute** (every config sees 1.6M samples regardless of pool).
+A is the cleanest framing — defends against the volume-confound critique
+by pointing at compute parity.
 
-For ood_v2 specifically:
-| Source | unique rows | sampling prob | samples viewed | epochs |
-|---|---:|---:|---:|---:|
-| benchcad | 7,511 | 3.4% | 54,400 | **7.2** |
-| cad_iso_106 | 82,849 | 36.6% | 585,600 | **7.1** |
-| text2cad_img | 37,550 | 5.5% | 88,000 | **2.3** |
-| text2cad_text | 37,550 | 5.5% | 88,000 | **2.3** |
-| recode_bench | 334,539 | 49.0% | 784,000 | **2.3** |
-
-Note: bench-stack rows (high sampling prob, small pool) get repeated 7×
-while HQ rows get 2.3×. This is the design — sampling weight × small pool
-→ effective oversampling of mechanical content.
-
-For baseline_v2 (HQ only):
-| Source | unique rows | sampling prob | samples viewed | epochs |
-|---|---:|---:|---:|---:|
-| text2cad_img | 46,000 | 9.2% | 147,200 | **3.2** |
-| text2cad_text | 46,000 | 9.2% | 147,200 | **3.2** |
-| recode_bench | 408,000 | 81.6% | 1,305,600 | **3.2** |
-
-All ~3.2 epochs — pool/sampling matched within HQ.
+`total_train_dp` and `sft_pool_rows` support remain in train.py for
+future fine control, but the v2 yamls leave them unset (back to natural
+pool).
 
 ## Code references
 
-| What | File:line | Notes |
-|---|---|---|
-| `total_train_dp` arg parsing | `train/sft/train.py:1049` | `cfg.get('total_train_dp', None)` |
-| Pool subsample (saturate-redistribute) | `train/sft/train.py:614–704` | runs once per training launch |
-| `sft_mix_weights` arg parsing | `train/sft/train.py:1010` | `cfg.get('sft_mix_weights', None)` |
-| Per-sample weight expansion | `train/sft/train.py:278` | `_expand_mix_to_sample_weights` |
-| Sampler class | `train/sft/train.py:159` | `LengthGroupedWeightedSampler` |
-| Trainer that consumes sampler | `train/sft/train.py:306` | `WeightedSamplerTrainer` |
-
-## TL;DR
-
-- **POOL size** = how many distinct rows the model can ever see (set by
-  `total_train_dp` + per-source availability). Equalised at 500k across
-  v2 configs.
-- **SAMPLING proportion** = which source each batch row is drawn from
-  (set by `sft_mix_weights`). Stays at the yaml value regardless of
-  pool size.
-
-The two interact as `effective_epochs = (sampling_prob × total_samples) /
-unique_rows`. Different configs have different effective epochs per
-source — this is intentional (the high-weight + small-pool design
-oversamples bench-stack rows for the OOD-relevant signal).
+| What | File:line |
+|---|---|
+| sampler weight expansion | `train/sft/train.py:278` `_expand_mix_to_sample_weights` |
+| sampler class | `train/sft/train.py:159` `LengthGroupedWeightedSampler` |
+| trainer with sampler | `train/sft/train.py:306` `WeightedSamplerTrainer` |
+| (off by default) pool subsample | `train/sft/train.py:614+` |
