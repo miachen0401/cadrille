@@ -611,44 +611,71 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # different source compositions (§7 v2 5-line ablation), so the only
     # confound is content not pool-size diversity.
     #
-    # Subsample is deterministic per source (seed = hash(seed, src_name)) so
-    # any source's chosen row subset is INDEPENDENT of which other sources
-    # are present in the mix. Two configs that both load `recode_bench` see
-    # the SAME rows (modulo target size — smaller target is a prefix of
-    # larger). Property: across all v2 configs, the row sets are nested
-    # subsets per source, so "data identity" is controlled at the row level
-    # rather than only at the volume level.
+    # Saturate-and-redistribute: keep TOTAL = total_train_dp exactly across
+    # configs, even when some sources can't fill their proportional share.
+    # When source X has fewer rows than (weight_X / total_weight) × budget,
+    # the deficit is redistributed to non-saturated sources proportional to
+    # their remaining weight. Iterates until either total_train_dp is hit
+    # or all sources are saturated.
+    #
+    # Trade-off vs strict-ratio: source-level ratio drifts when underflow
+    # rebalances, but every config trains on EXACTLY total_train_dp unique
+    # rows — controls the "data volume" axis in the v2 ablation.
+    #
+    # Per-source rng is derived from sha256(f'{base_seed}:{src_name}') so
+    # same source + base_seed always produces the same shuffle (subset
+    # relation: smaller target is a prefix of larger).
     if total_train_dp and sft_mix_weights:
         import random as _rnd
-        active_w = {s: float(sft_mix_weights.get(s, 0.0)) for s in sources}
-        total_w = sum(w for w in active_w.values() if w > 0)
-        if total_w <= 0:
-            print('[total_train_dp] WARN: all weights zero; skipping subsample',
+        import hashlib as _hl
+        active_w = {s: float(sft_mix_weights.get(s, 0.0))
+                    for s in sources if hasattr(sources[s], 'annotations')}
+        if not active_w or sum(active_w.values()) <= 0:
+            print('[total_train_dp] WARN: no active weighted sources; skipping',
                   flush=True)
         else:
             base_seed = int(seed) if isinstance(seed, int) else 42
-            print(f'[total_train_dp] capping pool to {total_train_dp:,} rows '
-                  f'across {len(sources)} sources '
-                  f'(per-source rng seed = base_seed + hash(src_name))', flush=True)
+            avail = {s: len(sources[s].annotations) for s in active_w}
+
+            # Iterative saturate-redistribute
+            saturated: set[str] = set()
+            targets: dict[str, int] = {s: 0 for s in active_w}
+            for _iter in range(len(active_w) + 1):
+                non_sat = [s for s in active_w if s not in saturated and active_w[s] > 0]
+                if not non_sat:
+                    break
+                non_sat_w = sum(active_w[s] for s in non_sat)
+                already = sum(targets[s] for s in saturated)
+                remaining = total_train_dp - already
+                if remaining <= 0:
+                    break
+                any_new_sat = False
+                for s in non_sat:
+                    proposed = int(round(remaining * active_w[s] / non_sat_w))
+                    if proposed >= avail[s]:
+                        targets[s] = avail[s]
+                        saturated.add(s)
+                        any_new_sat = True
+                    else:
+                        targets[s] = proposed
+                if not any_new_sat:
+                    break
+
+            actual_total = sum(targets.values())
+            print(f'[total_train_dp] target={total_train_dp:,}  '
+                  f'achieved={actual_total:,}  '
+                  f'({len(saturated)}/{len(active_w)} sources saturated)',
+                  flush=True)
+
             for src_name, ds in sources.items():
-                w = active_w[src_name]
+                w = active_w.get(src_name, 0.0)
                 if w <= 0:
                     continue
-                target = max(1, int(round(total_train_dp * w / total_w)))
-                if not hasattr(ds, 'annotations'):
-                    print(f'  {src_name:24s}  (no .annotations attr — skip)')
-                    continue
+                target = targets.get(src_name, 0)
                 cur = len(ds.annotations)
                 if target >= cur:
-                    print(f'  {src_name:24s}  {cur:,} kept  (target {target:,} ≥ available)')
+                    print(f'  {src_name:24s}  {cur:,} kept  (saturated at available)')
                     continue
-                # Per-source rng — same source name + seed → same shuffle,
-                # regardless of mix-config. Subset relation: smaller target
-                # gives a prefix of the larger target's selected rows.
-                # Use hashlib (stable across Python processes) — Python's
-                # built-in hash() is salted via PYTHONHASHSEED and would
-                # break run-to-run determinism.
-                import hashlib as _hl
                 _digest = _hl.sha256(f'{base_seed}:{src_name}'.encode()).digest()
                 src_seed = int.from_bytes(_digest[:4], 'big')
                 _rng = _rnd.Random(src_seed)
@@ -660,7 +687,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                         len(ds.lengths) == cur:
                     ds.lengths = [ds.lengths[i] for i in idx]
                 print(f'  {src_name:24s}  {cur:,} → {target:,}  '
-                      f'(weight {w:.0f}/{total_w:.0f}, src_seed={src_seed})')
+                      f'(weight {w:.0f}, src_seed={src_seed})')
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
