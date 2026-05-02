@@ -72,7 +72,7 @@ curriculum_phases: null
 save_only_model: false
 save_total_limit: 4
 
-hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-iid-easy-v2-50k
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-iid-enhanced-v2-50k
 hf_upload_private: false
 
 wandb_project: cadrille-sft

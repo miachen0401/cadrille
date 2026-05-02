@@ -44,7 +44,7 @@ log "pre-flight ok"
 # Chain order (matches paper §7.v2 figure line ordering)
 RUNS=(
     "baseline_v2     configs/sft/baseline_v2.yaml"
-    "iid_easy_v2     configs/sft/iid_easy_v2.yaml"
+    "iid_enhanced_v2     configs/sft/iid_enhanced_v2.yaml"
     "ood_v2          configs/sft/ood_v2.yaml"
     "ood_enhanced_v2 configs/sft/ood_enhanced_v2.yaml"
     "iid_v2          configs/sft/iid_v2.yaml"

@@ -5,7 +5,7 @@
 | Config | mech-OOD (10 v1 fams) holdout | bench-simple OOD (10 v2 fams) holdout | benchcad-easy in train? | Mix HQ:bench | total_train_dp |
 |---|---|---|---|---|---|
 | `baseline_v2.yaml` | n/a (no bench)        | n/a (no bench)              | ✗ | 100/0 | 500k |
-| `iid_easy_v2.yaml` | n/a (no bench)        | n/a (no bench)              | ✓ | 60/40 | 500k |
+| `iid_enhanced_v2.yaml` | n/a (no bench)        | n/a (no bench)              | ✓ | 60/40 | 500k |
 | `ood_v2.yaml`      | **YES** (held out)    | **YES** (held out from train, eval bucket) | ✗ | 60/40 | 500k |
 | `ood_enhanced_v2.yaml` | NO (in train)     | **YES** (held out from train, eval bucket) | ✗ | 60/40 | 500k |
 | `iid_v2.yaml`      | NO (in train)         | **YES** (held out from train; 44 IID fams in train, eval bucket on 10 OOD) | ✗ | 60/40 | 500k |
