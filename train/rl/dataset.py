@@ -7,12 +7,31 @@ three classes below.
 import os
 import json
 import pickle
+import re
 
 import numpy as np
 
 from common.meshio import render_img  # used by RLDataset.__getitem__ img branch
 
 __all__ = ['RLDataset', 'CurriculumRLDataset', 'DPODataset']
+
+
+# Reused from data_prep/build_holdout_split.py — extracts family name from
+# BenchCAD/cad_iso_106 stems like "synth_ball_knob_002666_s4420" → "ball_knob".
+# Returns None for stems that don't match (cad-recode/text2cad/DC/Fu).
+_FAMILY_STEM_RX = re.compile(r'(?P<fam>[a-z][a-z0-9_]+?)_\d{3,}(_s\w+)?$')
+
+
+def _extract_family(uid: str | None) -> str | None:
+    if not uid:
+        return None
+    s = uid
+    if s.startswith('dvsub_'):
+        s = s[len('dvsub_'):]
+    if s.startswith('synth_'):
+        s = s[len('synth_'):]
+    m = _FAMILY_STEM_RX.match(s)
+    return m.group('fam') if m else None
 
 
 class RLDataset:
@@ -38,6 +57,11 @@ class RLDataset:
             'file_name': ex['file_name'],
             'gt_mesh_path': ex['gt_mesh_path'],
             'modality': self.modality,
+            # Family lookup for ess-reward shaping. Order: explicit pkl field,
+            # else regex-extracted from file_name (BenchCAD/iso stem pattern).
+            # None for cad-recode/text2cad/DC/Fu rows — those fall back to
+            # pure-IoU reward inside the worker.
+            'family': ex.get('family') or _extract_family(ex.get('file_name')),
         }
         if self.modality == 'pc':
             import trimesh

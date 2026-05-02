@@ -310,14 +310,23 @@ def _reward_worker_run(
     gt_mesh_path: str,
     timeout: float,
     soft_invalid: float = -1.0,
-) -> Tuple[Optional[float], Optional[float]]:
+    family: Optional[str] = None,
+    ess_mode: str = 'fractional',
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """Run CadQuery + IoU inside a warm worker process.
 
-    Failure modes (controlled by soft_invalid):
-      SyntaxError / timeout → returns (None, None)     → caller maps to -1.0
-      Code ran but CQ/mesh failed → returns (soft_invalid, None)
-        soft_invalid=-1.0: same hard penalty (default, backward-compat)
-        soft_invalid=-0.5: softer penalty — code structure existed but shape wrong
+    Returns:
+        (iou, cd, ess_score)
+          iou:      None on SyntaxError/timeout, soft_invalid on CQ/mesh fail,
+                    else float in [0, 1].
+          cd:       always None in this code path (legacy slot, kept for back-compat).
+          ess_score: None when `family` lacks an essential_ops spec, else
+                    float in [0, 1] computed from raw code via regex
+                    (essential_score for ess_mode='fractional', binary 0/1
+                    for ess_mode='binary'). Independent of CQ exec status —
+                    even a soft_invalid run can carry a usable ess signal.
+
+    SyntaxError → ess_score is also None (raw code is too garbled to trust).
     """
     import signal
     import io
@@ -329,6 +338,27 @@ def _reward_worker_run(
     def _on_alarm(signum, frame):
         raise TimeoutError(f'CadQuery exceeded {timeout:.0f}s')
 
+    # Compute essential-ops score from RAW code via regex (no exec needed).
+    # Done up-front so it survives SyntaxError / CQ failure paths.
+    ess_score: Optional[float] = None
+    if family:
+        try:
+            from common.essential_ops import (
+                ESSENTIAL_BY_FAMILY,
+                find_ops as _find_ops,
+                essential_score as _ess_score,
+                essential_pass as _ess_pass,
+            )
+            if family in ESSENTIAL_BY_FAMILY:
+                _ops = _find_ops(code_str or '')
+                if ess_mode == 'binary':
+                    p = _ess_pass(family, _ops)
+                    ess_score = None if p is None else (1.0 if p else 0.0)
+                else:
+                    ess_score = _ess_score(family, _ops)
+        except Exception:
+            ess_score = None
+
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(max(1, int(timeout) + 2))
     try:
@@ -338,7 +368,8 @@ def _reward_worker_run(
             code_obj = compile(code_str, '<string>', 'exec')
         except SyntaxError:
             signal.alarm(0)
-            return None, None
+            # Drop ess_score on SyntaxError — raw text is too garbled to trust.
+            return None, None, None
         # Code is syntactically valid — any failure from here gets soft_invalid.
         _captured = {}
         g = {'show_object': lambda obj, *a, **kw: _captured.setdefault('r', obj)}
@@ -380,11 +411,12 @@ def _reward_worker_run(
             pass
         signal.alarm(0)
         # iou=None means mesh existed but boolean failed → still better than syntax error
-        return (iou if iou is not None else soft_invalid), None
+        return (iou if iou is not None else soft_invalid), None, ess_score
     except Exception:
         signal.alarm(0)
         # Runtime CQ error (e.g. invalid operation) → soft_invalid
-        return soft_invalid, None
+        # ess_score (regex-based) survives this branch — code structure exists.
+        return soft_invalid, None, ess_score
 
 
 def shutdown_pools() -> None:
@@ -779,7 +811,10 @@ def compute_rewards_parallel(
     workers: int = 4,
     timeout: float = 10.0,
     soft_invalid: float = -1.0,
-) -> List[float]:
+    families: Optional[List[Optional[str]]] = None,
+    ess_mode: str = 'fractional',
+    return_pairs: bool = False,
+):
     """Compute rewards for multiple codes in parallel.
 
     Uses the warm reward pool if init_reward_pool() was called — eliminates
@@ -791,33 +826,60 @@ def compute_rewards_parallel(
     Args:
         soft_invalid: Reward for code that is syntactically valid but fails at
             CadQuery build/mesh level.  Default -1.0 (backward-compat).
-            Set to e.g. -0.5 to give partial credit for "almost valid" code.
+        families:    Optional per-row family hint. When provided AND a row's
+                     family has an `essential_ops` spec, the worker also returns
+                     an ess_score for that row (else None). When omitted, ess
+                     is None for every row — caller can ignore the second tuple
+                     element to preserve pure-IoU behavior.
+        ess_mode:    'fractional' (default) → essential_score in [0, 1];
+                     'binary' → 0/1 from essential_pass.
+        return_pairs: When False (default), returns a List[float] of IoU-only
+                     rewards (back-compat with mining + tests + bench_workers).
+                     When True, returns List[Tuple[float, Optional[float]]] of
+                     (iou, ess_score) — caller composes the final scalar.
+
+    Returns:
+        Either List[float] (return_pairs=False, default) or
+        List[Tuple[float, Optional[float]]] (return_pairs=True).
+        IoU semantics: -1.0 on SyntaxError/timeout (hard penalty),
+        soft_invalid (typically -1.0 or -0.5) on CQ/mesh runtime failure,
+        else float in [0, 1]. ess_score (when paired): None when row's family
+        lacks a spec or on SyntaxError; else float in [0, 1] (regex-based,
+        survives CQ runtime failures).
     """
     from concurrent.futures.process import BrokenProcessPool
 
     assert len(codes) == len(gt_paths), "codes and gt_paths must have the same length"
+    if families is not None:
+        assert len(families) == len(codes), \
+            "families must align with codes/gt_paths"
+    else:
+        families = [None] * len(codes)
 
-    def _to_reward(iou: Optional[float]) -> float:
+    def _pack(iou: Optional[float], ess: Optional[float]):
         if iou is None:
-            return -1.0          # SyntaxError / timeout — hard penalty
-        return float(iou)        # IoU ∈ [0,1] on success; soft_invalid < 0 on CQ failure
+            pair = (-1.0, None)        # SyntaxError / timeout — hard penalty, no ess
+        else:
+            pair = (float(iou), ess)   # IoU ∈ [0,1] on success; soft_invalid < 0 on CQ fail
+        return pair if return_pairs else pair[0]
 
     global _reward_pool
     if _reward_pool is not None:
         try:
             futures = [
-                _reward_pool.submit(_reward_worker_run, code, path, timeout, soft_invalid)
-                for code, path in zip(codes, gt_paths)
+                _reward_pool.submit(
+                    _reward_worker_run, code, path, timeout, soft_invalid, fam, ess_mode)
+                for code, path, fam in zip(codes, gt_paths, families)
             ]
-            results = []
+            results: list = []
             for f in futures:
                 try:
-                    iou, _ = f.result(timeout=timeout + 5)
-                    results.append(_to_reward(iou))
+                    iou, _cd, ess = f.result(timeout=timeout + 5)
+                    results.append(_pack(iou, ess))
                 except BrokenProcessPool:
                     raise  # bubble up to outer handler
                 except Exception:
-                    results.append(-1.0)
+                    results.append((-1.0, None) if return_pairs else -1.0)
             return results
         except BrokenProcessPool:
             global _reward_pool_crashes
@@ -832,10 +894,14 @@ def compute_rewards_parallel(
             init_reward_pool(n_workers=workers)  # warm pool for next batch
             # fall through to subprocess for this batch
 
-    # Fallback: fresh subprocess per call
+    # Fallback: fresh subprocess per call (no ess support — pure IoU only).
+    # Worker pool is the only path that computes ess; the subprocess fallback
+    # is a rare crash-recovery path so losing ess for one batch is acceptable.
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
             pool.submit(compute_reward, code, path, timeout)
             for code, path in zip(codes, gt_paths)
         ]
+        if return_pairs:
+            return [(f.result(), None) for f in futures]
         return [f.result() for f in futures]
