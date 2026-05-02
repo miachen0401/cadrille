@@ -1,0 +1,69 @@
+# Cadrille RL §8 — ess + IoU shaped reward (the proposed scheme).
+#
+# Identical to rl_pure_iou.yaml EXCEPT essential_reward_weight=0.2.
+# Per-row reward composition (in worker via common.metrics):
+#   if family has essential_ops spec:
+#     reward = 0.2 * essential_score + 0.8 * iou
+#   else:
+#     reward = iou        # pure-IoU fallback (DC/Fu rows, ~26% of pool)
+#
+# Pairs with rl_pure_iou.yaml as the §8 main comparison.
+
+checkpoints_dir: /ephemeral/checkpoints
+
+mode: cppo
+checkpoint_path: /ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/checkpoint-30000
+
+data_dir: null
+train_modality: img
+hard_examples_pkl: ./data/_rl/candidates_bench_dc_fu.pkl
+dpo_dataset: null
+
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+max_steps: 12000
+lr: 1.0e-6
+
+G: 16
+top_N: 4
+eps_high: 0.2
+eps_low: 0.1
+entropy_coef: 0.01
+batch_updates: 3
+batch_size: 4
+max_new_tokens: 400
+rollout_temperature: 1.0
+reward_normalization: false
+reward_workers: 24
+use_buffer: false
+eval_batch_size: 32
+eval_workers: 24
+eval_timeout: 120.0
+sequential_generation: false
+
+adv_std_norm: false
+soft_invalid_reward: -1.0
+
+# Essential-ops reward shaping — ENABLED
+essential_reward_weight: 0.2
+essential_reward_mode: fractional       # 'fractional' (smoother) or 'binary' (0/1)
+
+curriculum: false
+
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   50
+val_samples_fusion360: 50
+val_modalities:        img
+eval_steps: 200
+
+log_steps: 10
+save_steps: 500
+save_total_limit: 6
+
+hf_upload_repo: Hula0401/cadrille-rl-ess-iou-v1
+hf_upload_private: false
+
+wandb_project: cadrille-rl
+wandb_offline: false
+run_name: rl-ess-iou-0.2-G16-from-ood_enhance-30k
