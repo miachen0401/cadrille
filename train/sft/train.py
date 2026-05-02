@@ -611,20 +611,25 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # different source compositions (§7 v2 5-line ablation), so the only
     # confound is content not pool-size diversity.
     #
-    # Subsample is deterministic (seed=42) and applied in-place on
-    # `dataset.annotations` + `dataset.lengths`. Each source ends up with
-    # ceil(weight / total_weight × total_train_dp) unique rows.
+    # Subsample is deterministic per source (seed = hash(seed, src_name)) so
+    # any source's chosen row subset is INDEPENDENT of which other sources
+    # are present in the mix. Two configs that both load `recode_bench` see
+    # the SAME rows (modulo target size — smaller target is a prefix of
+    # larger). Property: across all v2 configs, the row sets are nested
+    # subsets per source, so "data identity" is controlled at the row level
+    # rather than only at the volume level.
     if total_train_dp and sft_mix_weights:
         import random as _rnd
-        _rng = _rnd.Random(seed if isinstance(seed, int) else 42)
         active_w = {s: float(sft_mix_weights.get(s, 0.0)) for s in sources}
         total_w = sum(w for w in active_w.values() if w > 0)
         if total_w <= 0:
             print('[total_train_dp] WARN: all weights zero; skipping subsample',
                   flush=True)
         else:
+            base_seed = int(seed) if isinstance(seed, int) else 42
             print(f'[total_train_dp] capping pool to {total_train_dp:,} rows '
-                  f'across {len(sources)} sources (weighted)', flush=True)
+                  f'across {len(sources)} sources '
+                  f'(per-source rng seed = base_seed + hash(src_name))', flush=True)
             for src_name, ds in sources.items():
                 w = active_w[src_name]
                 if w <= 0:
@@ -637,7 +642,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 if target >= cur:
                     print(f'  {src_name:24s}  {cur:,} kept  (target {target:,} ≥ available)')
                     continue
-                # Shuffle deterministically, take first `target`.
+                # Per-source rng — same source name + seed → same shuffle,
+                # regardless of mix-config. Subset relation: smaller target
+                # gives a prefix of the larger target's selected rows.
+                # Use hashlib (stable across Python processes) — Python's
+                # built-in hash() is salted via PYTHONHASHSEED and would
+                # break run-to-run determinism.
+                import hashlib as _hl
+                _digest = _hl.sha256(f'{base_seed}:{src_name}'.encode()).digest()
+                src_seed = int.from_bytes(_digest[:4], 'big')
+                _rng = _rnd.Random(src_seed)
                 idx = list(range(cur))
                 _rng.shuffle(idx)
                 idx = sorted(idx[:target])
@@ -646,7 +660,7 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                         len(ds.lengths) == cur:
                     ds.lengths = [ds.lengths[i] for i in idx]
                 print(f'  {src_name:24s}  {cur:,} → {target:,}  '
-                      f'(weight {w:.0f}/{total_w:.0f})')
+                      f'(weight {w:.0f}/{total_w:.0f}, src_seed={src_seed})')
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
