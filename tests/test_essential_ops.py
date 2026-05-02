@@ -46,7 +46,9 @@ class TestPatterns:
 
     def test_loft(self):
         assert find_ops(".loft()") == {"loft"}
-        assert find_ops(".circle(5).workplane(offset=10).circle(3).loft()") == {"loft"}
+        # `.circle(...)` now matches the `circle` op (added per Cadance#10),
+        # so this expression yields both loft and circle in gen_ops.
+        assert find_ops(".circle(5).workplane(offset=10).circle(3).loft()") == {"loft", "circle"}
 
     def test_sweep_no_helix(self):
         # Plain sweep (no makeHelix in code) → just sweep
@@ -131,6 +133,12 @@ class TestPatterns:
         ops = find_ops(".cutThruAll()")
         assert "hole" in ops, "cutThruAll is a hole-class op"
 
+    def test_circle(self):
+        ops = find_ops(".circle(5.0)")
+        assert "circle" in ops
+        ops = find_ops(".circle(5).extrude(10)")
+        assert "circle" in ops
+
     def test_polarArray_rarray(self):
         assert find_ops(".polarArray(10, 0, 360, 6)") == {"polarArray"}
         assert find_ops(".rarray(10, 10, 4, 4)") == {"rarray"}
@@ -159,11 +167,16 @@ class TestSemanticAliases:
         assert "lineTo" in ops
         assert "polyline" not in ops
 
-    def test_cylinder_plus_cut_implies_hole(self):
-        """`cut(cylinder(...))` is what `.hole()` does internally."""
+    def test_cylinder_plus_cut_does_NOT_imply_hole(self):
+        """Per HaozheZhang6/Cadance#10: this inference was REMOVED.
+        Counting any `.cylinder(` + any `.cut(` in the file would mark
+        unrelated extrusions as holes (CodeRabbit's flag). Per-family
+        equivalence is now expressed via `circle` OR alternative in
+        canonical_ops.yaml for washer-pattern families."""
         code = "result.cut(cq.Workplane().cylinder(10, 2))"
         ops = find_ops(code)
-        assert "hole" in ops
+        assert "hole" not in ops, "cylinder+cut→hole alias removed; use family spec instead"
+        assert "cut" in ops      # cut still detected normally
 
     def test_cylinder_alone_does_NOT_imply_hole(self):
         ops = find_ops("cq.Workplane().cylinder(10, 5)")
@@ -382,10 +395,39 @@ class TestRealCases:
         wp5 = wp4.close().assemble().finalize().extrude(-125)
     ''')
 
-    def test_gusseted_bracket_legit_fail(self):
-        # spec [(cut, hole)] — model draws final outline directly,
-        # never uses cut OR hole. This is a LEGITIMATE fail.
+    WASHER_SOLID_CYLINDER_CODE = textwrap.dedent('''\
+        result = cq.Workplane("XY").circle(20).extrude(2)
+    ''')
+
+    def test_washer_passes_via_circle_alternative(self):
+        # Per HaozheZhang6/Cadance#10: washer-pattern families list
+        # `circle` as OR alternative. This is INTENTIONALLY permissive —
+        # a solid cylinder via .circle().extrude() passes the vocab check
+        # even though it has no actual hole. Geometric IoU is the backstop
+        # for catching missing-feature errors. Philosophy: essential ops
+        # are necessary but not sufficient.
+        ops = find_ops(self.WASHER_SOLID_CYLINDER_CODE)
+        assert "circle" in ops
+        assert essential_pass("washer", ops) is True, \
+            "washer spec [cut|hole|circle] is permissive on vocab"
+
+    BATTERY_HOLDER_HOLE_ONLY_CODE = textwrap.dedent('''\
+        result = cq.Workplane("XY").box(50, 50, 10).faces(">Z").workplane().hole(5)
+    ''')
+
+    def test_battery_holder_tightened_rejects_hole_only(self):
+        # Tightened in HaozheZhang6/Cadance#10: battery_holder is now
+        # [[cut]] (was [[cut, hole]]). GT cuts cell slots; .hole() alone
+        # does not satisfy the canonical construction.
+        ops = find_ops(self.BATTERY_HOLDER_HOLE_ONLY_CODE)
+        assert "hole" in ops
+        assert "cut" not in ops
+        assert essential_pass("battery_holder", ops) is False, \
+            "battery_holder tightened to [cut] only — .hole() doesn't substitute"
+
+    def test_gusseted_bracket_dropped_to_NA(self):
+        # gusseted_bracket was dropped from the YAML (HaozheZhang6/Cadance#10):
+        # GT op usage was inconsistent across synthesis variants. Now it
+        # returns None (N/A) — neither pass nor fail.
         ops = find_ops(self.GUSSETED_BRACKET_CODE)
-        assert "cut" not in ops, "no .cut(/.cutBlind(/mode='s' in code"
-        assert "hole" not in ops, "no .hole(/.cutThruAll/etc in code"
-        assert essential_pass("gusseted_bracket", ops) is False
+        assert essential_pass("gusseted_bracket", ops) is None

@@ -56,6 +56,12 @@ OP_PATTERNS: dict[str, str] = {
     "Sketch":        r"cq\.Sketch\s*\(|\.placeSketch\s*\(|\.sketch\s*\(",
     "polygon":       r"\.polygon\s*\(",
     "lineTo":        r"\.lineTo\s*\(",
+    # `circle` recognises `wp.circle(R).extrude(d)` — used for solid
+    # cylinders / annular profiles. Many cut/hole-class families list
+    # `circle` as an OR alternative in the YAML (washer-pattern parts):
+    # the metric is intentionally permissive on vocabulary because
+    # geometric IoU is the backstop that catches missing-feature errors.
+    "circle":        r"\.circle\s*\(",
     # feature class (independent — for has_* score, NOT for essentials)
     "chamfer":       r"\.chamfer\s*\(",
     "fillet":        r"\.fillet\s*\(",
@@ -67,6 +73,7 @@ ESSENTIAL_CLASS: frozenset[str] = frozenset({
     "polarArray", "rarray", "twistExtrude", "makeTorus",
     "sphere", "cut",
     "polyline", "spline", "threePointArc", "Sketch", "polygon", "lineTo",
+    "circle",
 })
 FEATURE_CLASS: frozenset[str] = frozenset({"chamfer", "fillet", "hole"})
 
@@ -120,13 +127,11 @@ def find_ops(code: str) -> set[str]:
     if "sweep" in found and has_helix:
         found.add("sweep+helix")
         found.discard("sweep")
-    # Semantic equivalent: `cut(cylinder)` or `cylinder + cut` carves a
-    # through-hole, which is what `.hole()` does. Models like CADEvolve
-    # never use `.hole()` directly — they construct a cylinder and cut it
-    # away. Without this alias the strict op-vocab metric mis-fails them.
-    has_cylinder = bool(re.search(r"\.cylinder\s*\(", code))
-    if has_cylinder and "cut" in found:
-        found.add("hole")
+    # NOTE: a previous version added `cylinder + cut → hole` here. That
+    # was removed (see HaozheZhang6/Cadance#10): the inference is too
+    # broad — counting any `.cylinder(` + any `.cut(` in the file would
+    # mark unrelated extrusions as holes. Replaced by per-family `circle`
+    # OR alternative in canonical_ops.yaml for washer-pattern families.
     # Polyline subsumes lineTo: a `.polyline([...])` is literally a chain of
     # `.lineTo(...)` calls; equivalently, repeated `.segment(p, q)` calls
     # form a polyline. Either way, the model has expressed line-by-line

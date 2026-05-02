@@ -7,7 +7,7 @@
 # Recognized op names (must match keys in canonical_ops.OP_PATTERNS):
 #   structural  : sweep+helix, sweep, revolve, loft, shell, taper=,
 #                 polarArray, rarray, twistExtrude, makeTorus, sphere, cut
-#   profile     : polyline, spline, threePointArc, Sketch, polygon, lineTo
+#   profile     : polyline, spline, threePointArc, Sketch, polygon, lineTo, circle
 #   feature     : chamfer, fillet, hole
 # All classes are allowed in essentials. feature_f1 is computed independently
 # over {chamfer, fillet, hole} regardless of whether they appear here.
@@ -20,6 +20,12 @@
 # A family NOT listed here is automatically N/A — no essential check, only
 # soft feature_f1 applies.
 #
+# Philosophy (after HaozheZhang6/Cadance#10): essential ops are NECESSARY
+# but NOT SUFFICIENT. Missing essentials → very likely wrong. Having all
+# essentials → not guaranteed correct (e.g. `wp.circle(R).extrude(d)` for a
+# washer family with `[cut, hole, circle]` spec passes the vocabulary check
+# even when the part has no actual hole; geometric IoU is the backstop).
+#
 # Alternatives policy (when adding new entries):
 #   revolve(360°) ↔ sweep along closed circle
 #   revolve(180°) ↔ sweep along U / J path
@@ -27,6 +33,9 @@
 #   sweep+helix   ↔ sweep along spline (for non-perfect helices)
 #   twistExtrude  ↔ loft of N rotated cross-sections
 #   taper=        ↔ loft between two scaled circles
+#   cut|hole|circle — washer-pattern parts (annular profile) where solid
+#                     `circle().extrude()` and carved `.hole()` are both
+#                     plausible; vocabulary stays permissive, IoU disambiguates.
 
 # ── axisymmetric ──────────────────────────────────────────────────────────
 ball_knob:         [[revolve, sphere]]
@@ -64,7 +73,7 @@ helical_gear:      [[loft, twistExtrude], [polyline, spline, threePointArc, Sket
 
 # ── loft (cross-section interpolation) ────────────────────────────────────
 bevel_gear:        [loft, [polyline, spline, threePointArc, Sketch]]
-propeller:         [loft]                                              # GT 中 1/7 用 circle 截面 loft, 没 polyline → drop profile AND
+propeller:         [loft]
 tapered_boss:      [[loft, taper=]]
 wing_nut:          [[loft, taper=]]
 
@@ -92,16 +101,13 @@ duct_elbow:        [sweep]
 pipe_elbow:        [sweep]
 
 # ── defined-by-cuts (cut OR hole equivalent — both subtract material) ─────
-battery_holder:    [[cut, hole]]   # N cylindrical cell slots
-clevis:            [[cut, hole]]   # fork slot (the defining feature)
-gridfinity_bin:    [[cut, hole]]   # rectangular bin grid
-hex_key_organizer: [[cut, hole]]   # hex key slots
-keyhole_plate:     [[cut, hole]]   # keyhole slot
-lobed_knob:        [[cut, hole]]   # lobe cuts
-u_channel:         [[cut, hole]]   # U-groove
+battery_holder:    [[cut]]                    # tightened: GT cuts cell slots, .hole() not equivalent
+gridfinity_bin:    [[cut, hole]]
+hex_key_organizer: [[cut, hole, circle]]
+keyhole_plate:     [[cut, hole]]
+lobed_knob:        [[cut, hole, circle]]
 
 # ── irregular profile (gears / cams / stars / cross / etc.) ───────────────
-# all need a custom 2-D profile op. some also combine with cut / loft etc.
 spur_gear:               [[polyline, spline, threePointArc, Sketch]]
 sprocket:                [[polyline, spline, threePointArc, Sketch]]
 double_simplex_sprocket: [[polyline, spline, threePointArc, Sketch]]
@@ -113,52 +119,49 @@ ratchet_sector:          [[polyline, spline, threePointArc, Sketch]]
 circlip:                 [[polyline, spline, threePointArc, Sketch]]
 dog_bone:                [[polyline, spline, threePointArc, Sketch]]
 snap_clip:               [[polyline, spline, threePointArc, Sketch]]
-handwheel:               [[cut, hole], [polyline, spline, threePointArc, Sketch]]   # cut spokes/holes + ring profile
-spline_hub:              [[cut, hole], [polyline, spline, threePointArc, Sketch]]   # keyway + spline profile
+handwheel:               [[cut, hole, circle], [polyline, spline, threePointArc, Sketch]]
+spline_hub:              [[cut], [polyline, spline, threePointArc, Sketch]]   # tightened: keyway cut, not hole
 
 # ── rounded ends (sphere) ─────────────────────────────────────────────────
-capsule:           [sphere]                        # cylinder + 2 hemispheres
+capsule:           [sphere]
 
 # ── hex / polygon profile (bolts, nuts, hex standoffs) ────────────────────
 bolt:                  [polygon]
-hex_nut:               [[polygon, lineTo], [cut, hole]]   # hex profile via polygon() OR manual lineTo path
-hex_standoff:          [[polygon, lineTo], [cut, hole]]
-threaded_adapter:      [[polygon, lineTo], [cut, hole]]
+hex_nut:               [[polygon, lineTo], [cut, hole, circle]]
+hex_standoff:          [[polygon, lineTo], [cut, hole, circle]]
+threaded_adapter:      [[polygon, lineTo], [cut, hole, circle]]
 
 # ── dovetail (custom polyline profile) ────────────────────────────────────
 dovetail_slide:        [[polyline, spline, threePointArc, Sketch]]
 
 # ── parts whose geometry is defined by material removal (cut OR hole) ─────
-# (any subtraction op is acceptable — they produce equivalent geometry)
-bearing_retainer_cap:  [[cut, hole]]
-connecting_rod:        [[cut, hole]]
-hinge:                 [[cut, hole]]
+bearing_retainer_cap:  [[cut, hole, circle]]
+connecting_rod:        [[cut, hole, circle]]
+hinge:                 [[cut, hole, circle]]
 locator_block:         [[cut, hole]]
 pillow_block:          [[cut, hole]]
-turnbuckle:            [[cut, hole]]
-pan_head_screw:        [[cut, hole]]
-fan_shroud:            [[cut, hole]]
-flat_link:             [[cut, hole]]
-gusseted_bracket:      [[cut, hole]]
-hollow_tube:           [[cut, hole]]
-l_bracket:             [[cut, hole]]
+turnbuckle:            [[cut, hole, circle]]
+pan_head_screw:        [[cut]]                # tightened: head/shaft cuts, not generic hole
+fan_shroud:            [[cut, hole, circle]]
 manifold_block:        [[cut, hole]]
-mounting_angle:        [[cut, hole]]
 mounting_plate:        [[cut, hole]]
 pcb_standoff_plate:    [[cut, hole]]
-pipe_flange:           [[cut, hole]]
-rect_frame:            [[cut, hole]]
+pipe_flange:           [[cut, hole, circle]]
 shaft_collar:          [[cut, hole]]
-spacer_ring:           [[cut, hole]]
+spacer_ring:           [[cut, hole, circle]]
 standoff:              [[cut, hole]]
-t_slot_rail:           [[cut, hole, lineTo]]              # T-profile 可以画 lineTo path 直接 extrude
-washer:                [[cut, hole]]
-wire_grid:             [[cut, hole]]
-z_bracket:             [[cut, hole]]
-connector_faceplate:   [[cut, hole]]
+washer:                [[cut, hole, circle]]
+z_bracket:             [[cut, hole, circle]]
+connector_faceplate:   [[cut, hole, circle]]
 
-# Dropped (all yellows promoted to N/A — synthesis variant inconsistency means
-# any single essential is wrong for some GT samples; better to skip the check):
+# Dropped to N/A (per HaozheZhang6/Cadance#10) — these families have
+# inconsistent GT op usage across synthesis variants, or the canonical
+# op is too ambiguous to score reliably:
+#   clevis, u_channel, gusseted_bracket, hollow_tube, l_bracket,
+#   mounting_angle, rect_frame, wire_grid, t_slot_rail
+# (all formerly [[cut, hole]]; t_slot_rail also had lineTo)
+#
+# Dropped earlier (synthesis variant inconsistency):
 #   wall_anchor    — 5/6 (revolve | sweep)
 #   clevis_pin     — 6/8 (cut | hole)
 #   round_flange   — 4/7 polarArray
