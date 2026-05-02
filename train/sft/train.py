@@ -408,7 +408,8 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         curriculum_phases=None,
         benchcad_train_pkl=None, cad_iso_106_train_pkl=None,
         benchcad_simple_train_pkl=None,
-        holdout_families=None, holdout_families_v2=None):
+        holdout_families=None, holdout_families_v2=None,
+        total_train_dp=None):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -601,6 +602,51 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 root_dir=text2cad_bench_path,
                 split='train',
                 max_code_len=max_code_len)
+
+    # Optional: cap the unique-row pool to a fixed total dp count,
+    # subsampling each source proportionally to its mix weight. Default off
+    # (None / 0) → use full source sizes.
+    #
+    # Use case: enforce identical "data volume" across configs that mix
+    # different source compositions (§7 v2 5-line ablation), so the only
+    # confound is content not pool-size diversity.
+    #
+    # Subsample is deterministic (seed=42) and applied in-place on
+    # `dataset.annotations` + `dataset.lengths`. Each source ends up with
+    # ceil(weight / total_weight × total_train_dp) unique rows.
+    if total_train_dp and sft_mix_weights:
+        import random as _rnd
+        _rng = _rnd.Random(seed if isinstance(seed, int) else 42)
+        active_w = {s: float(sft_mix_weights.get(s, 0.0)) for s in sources}
+        total_w = sum(w for w in active_w.values() if w > 0)
+        if total_w <= 0:
+            print('[total_train_dp] WARN: all weights zero; skipping subsample',
+                  flush=True)
+        else:
+            print(f'[total_train_dp] capping pool to {total_train_dp:,} rows '
+                  f'across {len(sources)} sources (weighted)', flush=True)
+            for src_name, ds in sources.items():
+                w = active_w[src_name]
+                if w <= 0:
+                    continue
+                target = max(1, int(round(total_train_dp * w / total_w)))
+                if not hasattr(ds, 'annotations'):
+                    print(f'  {src_name:24s}  (no .annotations attr — skip)')
+                    continue
+                cur = len(ds.annotations)
+                if target >= cur:
+                    print(f'  {src_name:24s}  {cur:,} kept  (target {target:,} ≥ available)')
+                    continue
+                # Shuffle deterministically, take first `target`.
+                idx = list(range(cur))
+                _rng.shuffle(idx)
+                idx = sorted(idx[:target])
+                ds.annotations = [ds.annotations[i] for i in idx]
+                if hasattr(ds, 'lengths') and ds.lengths is not None and \
+                        len(ds.lengths) == cur:
+                    ds.lengths = [ds.lengths[i] for i in idx]
+                print(f'  {src_name:24s}  {cur:,} → {target:,}  '
+                      f'(weight {w:.0f}/{total_w:.0f})')
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
@@ -954,6 +1000,12 @@ def main():
     # §7 v2: bench-simple op-pattern holdout (separate from v1 mech holdout
     # so a config can use both — e.g. ood_v2 holds out 10 mech AND 10 simple_op).
     holdout_families_v2       = cfg.get('holdout_families_v2', None)
+    # Optional: cap the total unique training rows across all sources to a
+    # fixed number, subsampling each source proportionally to its mix weight.
+    # Default None → use full source sizes (back-compat). Set to e.g. 500000
+    # to enforce identical pool-size across configs whose source composition
+    # differs (controls for "data volume" confound in §7 v2 ablation).
+    total_train_dp            = cfg.get('total_train_dp', None)
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -1041,7 +1093,8 @@ def main():
         cad_iso_106_train_pkl=cad_iso_106_train_pkl,
         benchcad_simple_train_pkl=benchcad_simple_train_pkl,
         holdout_families=holdout_families,
-        holdout_families_v2=holdout_families_v2)
+        holdout_families_v2=holdout_families_v2,
+        total_train_dp=total_train_dp)
 
 
 if __name__ == '__main__':

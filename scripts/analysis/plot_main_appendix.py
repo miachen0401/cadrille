@@ -281,7 +281,7 @@ def plot_one(bucket_name, metric, ylabel, title, outpath, ymax_hint=None,
         steps = sorted(d)
         max_step = max(max_step, max(steps))
         ax.plot(steps, [d[s] for s in steps],
-                label=f'{run["label"]} (n={len(steps)})',
+                label=f'{run["label"]} ({len(steps)} ckpts)',
                 **run['plot'])
 
     placeholder_x = np.arange(1000, max(max_step, 50000) + 1, 1000)
@@ -293,7 +293,9 @@ def plot_one(bucket_name, metric, ylabel, title, outpath, ymax_hint=None,
                 color=run['plot']['color'], linestyle='--', linewidth=1.2,
                 alpha=0.4, label=f'{run["label"]} [TBD]')
 
-    ax.set_title(title, fontsize=12)
+    ax.set_title(f'{title}\n'
+                 f'(each ckpt scored on the SAME stratified 50-OOD set: 10 fams × 5)',
+                 fontsize=11)
     ax.set_xlabel('training step', fontsize=11)
     ax.set_ylabel(ylabel, fontsize=11)
     if ymax_hint:
