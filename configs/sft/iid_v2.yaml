@@ -1,90 +1,117 @@
 # §7 v2 — iid: full bench-stack including 44 of 54 bench-simple op patterns.
+
 #
+
 # §7 role (1): IID upper bound. Saw bench-simple op patterns IN train (44
+
 # of 54 fams that aren't held out). Tests "given near-complete coverage of
+
 # atomic ops + full mech bench, can the model generalize across atomic
+
 # patterns to the 10 unseen?" — a real cross-pattern transfer test, not
+
 # the trivial "saw everything" case.
+
 #
+
 # Total mix weight: 1000, HQ 60 / bench-stack 40.
 
 checkpoints_dir: /ephemeral/checkpoints
+
 data_path: ./data
+
 mode: img
+
 use_text: true
 
 backbone: qwen3_vl
+
 base_model: Qwen/Qwen3-VL-2B-Instruct
 
 max_steps: 50000
+
 batch_size: 8
+
 accumulation_steps: 4
+
 learning_rate: 2.0e-4
+
 warmup_steps: 2000
+
 lr_scheduler_type: cosine
+
 weight_decay: 0.01
 
 bf16: true
+
 gradient_checkpointing: true
+
 dataloader_workers: 4
+
 group_by_length: true
 
 log_steps: 50
+
 save_steps: 2000
+
 eval_steps: 1000
+
 online_eval_n_per: 50
+
 max_iou_k: 16
+
 max_iou_temperature: 1.0
+
 max_iou_every_n_evals: 2
 
 eval_on_start: true
+
 resume_from_checkpoint: null
+
 run_name: null
 
 seed: 42
-max_code_len: 1000
 
-# bench-stack distribution within 400 weight, proportional to row count:
-# bench+iso held to ≥ 40% (the §7-v2 floor), proportional to row count:
-#   benchcad (FULL 11k)        : 11/133 × 400 = 33
-#   cad_iso_106 (FULL 122k)    : 122/133 × 400 = 367
-#   benchcad_simple            : 125 (44 IID fams, 60k rows after v2 holdout)
-#   HQ (text2cad×2 + recode)   : 1000 - 400 - 125 = 475
+max_code_len: 1500
+
+total_train_dp: 300000
+
+# Pool target (cap-only at 300k, bench/iso FULL, simple uses train_v2_holdout):
+
+#   bench:   6.3k   iso:   69.9k   simple:  23.8k    (ours = 100k)
+
+#   t2c_img: 18.3k  t2c_text: 18.3k recode: 163.4k   (HQ = 200k)
+
 sft_mix_weights:
-  benchcad:             33
-  cad_iso_106:         367
-  benchcad_simple:     125
+
+  benchcad:             21
+
+  cad_iso_106:         233
+
+  benchcad_simple:      79
+
   benchcad_easy:         0
-  text2cad_bench_img:   43    # 475 × 55/600
-  text2cad_bench_text:  43
-  recode_bench:        389    # 475 × 490/600
-# total = 1000  (bench+iso = 40%, bench-simple = 12.5%, HQ = 47.5%)
+
+  text2cad_bench_img:   61
+
+  text2cad_bench_text:  61
+
+  recode_bench:        545
 
 # No mech holdout (full bench/iso).
-# v2 bench-simple holdout — drives both train filter (only 44 of 54 fams in
-# train) and the OOD eval bucket.
-holdout_families_v2:
-  - simple_revolve
-  - simple_loft
-  - simple_polygon_cut
-  - simple_extrude_hole
-  - simple_box_hole_fillet
-  - simple_cyl_cut
-  - simple_revolve_cut
-  - simple_extrude_hole_fillet
-  - simple_loft_cut
-  - simple_taper_extrude_chamfer
 
 # bench/iso use full train.pkl (no holdout); bench-simple uses the v2 holdout
+
 # pkl (44 of 54 op patterns).
-benchcad_simple_train_pkl: train_v2_holdout.pkl
 
 curriculum_phases: null
 
 save_only_model: false
+
 save_total_limit: 4
 
 hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-iid-v2-50k
+
 hf_upload_private: false
 
 wandb_project: cadrille-sft

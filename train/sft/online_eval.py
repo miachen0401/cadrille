@@ -288,9 +288,11 @@ def _multilabel_op_metrics(pred_codes: list[str], gt_codes: list[str],
 #   ops + IoU:  BenchCAD val (full triplet: img + STL + .py)
 #   ops only:   recode20k train, text2cad train
 #   IoU only:   DeepCAD test, Fusion360 test (mesh-only datasets, no GT code)
-_SUBSETS_DEFAULT = ('benchcad_val', 'bench_simple_val',
+_SUBSETS_DEFAULT = ('benchcad_val', 'iso_val',
                     'recode20k_train', 'text2cad_train',
                     'deepcad_test', 'fusion360_test')
+# bench_simple_val intentionally dropped from default — bench-simple is a
+# TRAINING source only; OOD eval lives in benchcad_val + iso_val.
 
 # Module-level state set from train.py via set_holdout_families(); when set,
 # benchcad_val items are tagged with `_dataset_label = 'BenchCAD val IID'` /
@@ -399,6 +401,62 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
             'gt_mesh_path': str(stl),
             'video': [Image.open(png).convert('RGB')],
             'description': 'Generate cadquery code',
+        })
+    return out
+
+
+def _load_iso_val(n: int, seed: int) -> list[dict]:
+    """cad_iso_106 val — img modality, GT .py only (no STL → no IoU on raw exec).
+
+    Mirrors _load_benchcad_val: when _HOLDOUT_FAMILIES is set, splits into
+    'iso val IID' / 'iso val OOD' by family. iso val is the SECOND mech-OOD
+    eval pool (~836 OOD rows across 10 families) — paired with BC val OOD
+    (~177 rows) so paper has two independent mech-OOD test bodies.
+
+    Family is regex-extracted from uid (iso pkl rows lack explicit family).
+    """
+    from PIL import Image
+    import sys as _sys; _sys.path.insert(0, '.')
+    from train.rl.dataset import _extract_family
+
+    root_p = Path('data/cad-iso-106')
+    pkl = root_p / 'val.pkl'
+    if not pkl.exists():
+        return []
+    with pkl.open('rb') as f:
+        rows = pickle.load(f)
+
+    # Add `family` derived from uid
+    for r in rows:
+        if 'family' not in r:
+            r['family'] = _extract_family(r.get('uid', ''))
+
+    if _HOLDOUT_FAMILIES:
+        picks = _stratified_sample_by_family(
+            rows, _HOLDOUT_FAMILIES,
+            n_iid=n, n_ood_per_family=5, seed=seed,
+        )
+        # Override the 'BenchCAD val IID/OOD' labels to 'iso val IID/OOD'
+        picks = [(r, lbl.replace('BenchCAD val', 'iso val')) for r, lbl in picks]
+    else:
+        sampled = _seeded_sample(rows, n, seed)
+        picks = [(r, 'iso val') for r in sampled]
+
+    out = []
+    for r, label in picks:
+        png = root_p / r['png_path']
+        py  = root_p / r['py_path']
+        if not (png.exists() and py.exists()):
+            continue
+        out.append({
+            '_modality': 'img',
+            '_dataset_label': label,
+            '_gt_code': py.read_text(),
+            '_family': r.get('family'),
+            'file_name': r['uid'],
+            'video': [Image.open(png).convert('RGB')],
+            'description': 'Generate cadquery code',
+            # iso val has no STL, no IoU computed on this bucket
         })
     return out
 
@@ -543,6 +601,7 @@ def _load_stl_dir_test(root: str, label: str, n: int, seed: int) -> list[dict]:
 
 _SOURCE_LOADERS = {
     'benchcad_val':     lambda n, s: _load_benchcad_val(n, s),
+    'iso_val':          lambda n, s: _load_iso_val(n, s),
     'bench_simple_val': lambda n, s: _load_bench_simple_val(n, s),
     'recode20k_train':  lambda n, s: _load_recode20k_train(n, s),
     'text2cad_train':   lambda n, s: _load_text2cad_train(n, s),
@@ -1186,7 +1245,16 @@ class OnlineIoUEvalCallback(TrainerCallback):
                  predictions_dir: str | None = None):
         self.processor = processor
         self.n_per_dataset = n_per_dataset
-        self.seed = seed
+        # IMPORTANT: eval seed is HARDCODED to 42 regardless of the training
+        # seed. This guarantees that every config (and every training seed
+        # within a config) scores on the EXACT same eval rows — paper-side
+        # row identity for cross-run comparison is decoupled from training-
+        # side stochasticity (init / shuffle / dropout).
+        self.seed = 42
+        if seed != 42:
+            print(f'[online-eval] ignoring train seed={seed} for eval row '
+                  f'selection — eval always uses seed=42 for cross-run '
+                  f'reproducibility', flush=True)
         self.subsets = subsets
         self.eval_batch_size = eval_batch_size
         self.reward_workers = reward_workers
