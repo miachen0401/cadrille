@@ -52,6 +52,7 @@ def resolve_args(args, cfg: dict) -> dict:
     # Core
     args.mode            = _p(args.mode,           cfg.get('mode'),           'cppo')
     args.base_model      = cfg.get('base_model', 'Qwen/Qwen2-VL-2B-Instruct')
+    args.backbone        = cfg.get('backbone', 'qwen2_vl')
     args.checkpoint_path = _p(args.checkpoint_path, cfg.get('checkpoint_path'), 'maksimko123/cadrille')
     args.max_steps       = _p(args.max_steps,       cfg.get('max_steps'),       50000)
     args.lr              = float(cfg.get('lr', 3e-5))

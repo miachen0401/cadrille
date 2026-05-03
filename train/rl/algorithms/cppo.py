@@ -193,7 +193,7 @@ def compute_policy_entropy(log_probs: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 _GEN_INPUT_KEYS = ('input_ids', 'attention_mask', 'point_clouds', 'is_pc', 'is_img',
-                   'pixel_values_videos', 'video_grid_thw')
+                   'pixel_values_videos', 'video_grid_thw', 'mm_token_type_ids')
 
 
 def model_forward(model, full_ids, attention_mask, g_batch, device):
@@ -207,6 +207,20 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
     non-null; _update_causal_mask then checks attention_mask[:, -1] and
     raises ValueError if any completion ended before max_len (right-padding).
     """
+    # Build mm_token_type_ids for full sequence (prompt + completion).
+    # Qwen3-VL needs this for M-RoPE; processor supplies it for the prompt;
+    # completion tokens are pure text → type 0.
+    mm_token_type_ids = g_batch.get('mm_token_type_ids')
+    if mm_token_type_ids is not None:
+        prompt_mm = mm_token_type_ids.to(device)
+        full_len = full_ids.shape[1]
+        prompt_len = prompt_mm.shape[1]
+        if full_len > prompt_len:
+            pad = torch.zeros(prompt_mm.shape[0], full_len - prompt_len,
+                              dtype=prompt_mm.dtype, device=device)
+            mm_token_type_ids = torch.cat([prompt_mm, pad], dim=1)
+        else:
+            mm_token_type_ids = prompt_mm[:, :full_len]
     return model(
         input_ids=full_ids.to(device),
         attention_mask=attention_mask.to(device),
@@ -221,6 +235,7 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
         video_grid_thw=(
             g_batch['video_grid_thw'].to(device)
             if g_batch.get('video_grid_thw') is not None else None),
+        mm_token_type_ids=mm_token_type_ids,
     )
 
 
@@ -1065,7 +1080,9 @@ def train_cppo(model, optimizer, dataset, processor,
                 if 'INTERNAL ASSERT FAILED' in msg or 'handles_.at' in msg:
                     print(f'[step {step}] FATAL CUDA allocator error — restarting from last checkpoint is required.\n{e}')
                     raise
-                print(f'[step {step}] cppo_step error: {e}')
+                import traceback as _tb
+                _tb.print_exc()
+                print(f'[step {step}] cppo_step error: {e}', flush=True)
                 torch.cuda.empty_cache()
                 continue
 

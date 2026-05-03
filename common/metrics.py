@@ -156,7 +156,7 @@ def _get_worker_path() -> str:
     if _worker_path is not None and os.path.exists(_worker_path):
         return _worker_path
     fd, path = tempfile.mkstemp(suffix='.py', prefix='cq_reward_worker_')
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(_WORKER_SCRIPT)
     _worker_path = path
     return path

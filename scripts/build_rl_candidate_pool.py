@@ -34,7 +34,7 @@ sys.path.insert(0, str(REPO))
 from train.rl.dataset import _extract_family  # reuse the family-from-stem regex
 
 
-def _bench_rows() -> list[dict]:
+def _bench_rows(limit: int | None = None, seed: int = 42) -> list[dict]:
     pkl = REPO / 'data/benchcad/train_v4_holdout.pkl'
     if not pkl.exists():
         print(f'[skip] {pkl} not found')
@@ -51,6 +51,11 @@ def _bench_rows() -> list[dict]:
             'file_name':    r['uid'],
             'family':       r.get('family'),
         })
+    if limit and len(out) > limit:
+        import random as _r
+        rng = _r.Random(seed)
+        rng.shuffle(out)
+        out = out[:limit]
     print(f'[bench] {len(out)} rows from {pkl.name} (STLs verified)')
     return out
 
@@ -100,6 +105,9 @@ def main() -> None:
                     help='Comma-separated subset of {bench, iso, deepcad, fusion360}.')
     ap.add_argument('--iso-stl-root', type=Path, default=REPO / 'data/cad-iso-106/train',
                     help='Directory containing pre-generated iso STLs (if --include iso).')
+    ap.add_argument('--bench-limit', type=int, default=None,
+                    help='Max BenchCAD rows to include (full set ~14.5k after holdout). '
+                         'Random subsample with seed=42 if smaller than full.')
     ap.add_argument('--dc-limit', type=int, default=2000,
                     help='Max DeepCAD rows to include (full set is 8k).')
     ap.add_argument('--fu-limit', type=int, default=1500,
@@ -110,7 +118,7 @@ def main() -> None:
     sources = [s.strip() for s in args.include.split(',') if s.strip()]
     rows: list[dict] = []
     if 'bench' in sources:
-        rows.extend(_bench_rows())
+        rows.extend(_bench_rows(limit=args.bench_limit))
     if 'iso' in sources:
         rows.extend(_iso_rows(args.iso_stl_root))
     if 'deepcad' in sources:
