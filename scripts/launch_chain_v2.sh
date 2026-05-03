@@ -41,13 +41,15 @@ if [[ ! -f data/benchcad-simple/train_v2_holdout.pkl ]]; then
 fi
 log "pre-flight ok"
 
-# Chain order (matches paper §7.v2 figure line ordering)
+# Chain order (matches paper §7.v2 figure line ordering).
+# Use a single space between label and config — multi-space breaks the
+# `${entry#* }` parameter expansion below.
 RUNS=(
-    "baseline_v2     configs/sft/baseline_v2.yaml"
-    "iid_enhanced_v2     configs/sft/iid_enhanced_v2.yaml"
-    "ood_v2          configs/sft/ood_v2.yaml"
+    "baseline_v2 configs/sft/baseline_v2.yaml"
+    "iid_enhanced_v2 configs/sft/iid_enhanced_v2.yaml"
+    "ood_v2 configs/sft/ood_v2.yaml"
     "ood_enhanced_v2 configs/sft/ood_enhanced_v2.yaml"
-    "iid_v2          configs/sft/iid_v2.yaml"
+    "iid_v2 configs/sft/iid_v2.yaml"
 )
 
 skip=true
@@ -75,9 +77,7 @@ launch_run() {
 
 log "=== chain start (start_from=$START_FROM) ==="
 for entry in "${RUNS[@]}"; do
-    label="${entry%% *}"
-    cfg="${entry#* }"
-    cfg="${cfg# }"
+    read -r label cfg <<<"$entry"
     if $skip; then
         if [[ "$label" == "$START_FROM" ]]; then
             skip=false
