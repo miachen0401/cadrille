@@ -30,6 +30,11 @@ import sys
 import traceback
 from pathlib import Path
 
+# Make repo root importable + auto-load .env (HF_TOKEN, BenchCAD_HF_TOKEN).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
+
 
 def _split(stem: str, val_frac: float = 0.1) -> str:
     """Deterministic split by stem hash — same stem always lands in same split."""

@@ -1,9 +1,15 @@
 import os
+import sys
 import json
 import math
 import pickle
 from pathlib import Path
 import yaml
+
+# Make repo root importable + auto-load .env (HF_TOKEN, WANDB_API_KEY).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
 
 # transformers 5.6+ requires torch>=2.6 for torch.load() of optimizer.pt during
 # resume_from_checkpoint. We're on torch 2.5.1; bypass the check since we

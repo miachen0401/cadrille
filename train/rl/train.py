@@ -21,23 +21,17 @@ python rl/train.py --config configs/rl/4080.yaml --max-steps 3 --wandb-offline
 import os
 import sys
 
-# Load .env (HF_TOKEN, WANDB_API_KEY, etc.) before anything else
-_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
-if os.path.exists(_env_path):
-    with open(_env_path) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith('#') and '=' in _line:
-                _k, _v = _line.split('=', 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
+# Allow execution from repo root or train/rl/ subdirectory before any other import.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Load .env (HF_TOKEN, WANDB_API_KEY, etc.) before anything else.
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
 
 # expandable_segments:True can trigger !handles_.at(i) INTERNAL ASSERT when
 # VRAM is near-full after inline eval (100 generate() calls fragment the pool).
 # garbage_collection_threshold=0.8 aggressively reclaims cached blocks instead.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.8")
-
-# Allow execution from repo root or rl/ subdirectory
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 import yaml

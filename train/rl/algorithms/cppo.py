@@ -519,10 +519,9 @@ def cppo_step(model, optimizer, items, processor, args,
         _ess_cov = _ess_count / max(1, _ess_count + _iou_only_count)
         _ess_mean = (_ess_sum / max(1, _ess_count)) if _ess_count else float('nan')
         _iou_mean_ess_rows = (_iou_for_ess_sum / max(1, _ess_count)) if _ess_count else float('nan')
-        print(f'[reward] ess_w={ess_w:.2f} mode={ess_mode}  '
-              f'ess_coverage={_ess_cov:.2f} ({_ess_count}/{_ess_count + _iou_only_count})  '
-              f'ess_mean={_ess_mean:.3f}  iou_mean(ess_rows)={_iou_mean_ess_rows:.3f}',
-              flush=True)
+        tqdm.write(f'[reward] ess_w={ess_w:.2f} mode={ess_mode}  '
+                   f'ess_coverage={_ess_cov:.2f} ({_ess_count}/{_ess_count + _iou_only_count})  '
+                   f'ess_mean={_ess_mean:.3f}  iou_mean(ess_rows)={_iou_mean_ess_rows:.3f}')
 
     # ------------------------------------------------------------------
     # Build per-mini-batch PPO tensors: advantages, old_lp, masks.

@@ -1,13 +1,20 @@
-# Cadrille RL §8 — ess + IoU shaped reward (the proposed scheme).
+# Cadrille RL §8 — ess + IoU shaped reward, paper-recipe (h100_bs128_grpo).
 #
-# Identical to rl_pure_iou.yaml EXCEPT essential_reward_weight=0.2.
 # Per-row reward composition (in worker via common.metrics):
-#   if family has essential_ops spec:
-#     reward = 0.2 * essential_score + 0.8 * iou
-#   else:
-#     reward = iou        # pure-IoU fallback (DC/Fu rows, ~26% of pool)
+#   if family has essential_ops spec:   reward = 0.2 * ess_score + 0.8 * iou
+#   else (DC/Fu rows):                  reward = iou
 #
-# Pairs with rl_pure_iou.yaml as the §8 main comparison.
+# Hyperparams from h100_bs128_grpo.yaml (paper Table 14):
+#   effective batch_size=128 via mini_batch_size=4 (32 grad-accum chunks),
+#   G=16, top_N=16 (full GRPO, no CPPO clipping), eps=0.1 sym,
+#   entropy_coef=0, batch_updates=3, max_new_tokens=512.
+#   lr=5e-5 (user override; paper 3e-5 — slightly hot but Qwen3-VL is stable).
+#
+# Pool: candidates_bench3500_dc2000_fu1500.pkl (7000 rows, bench:dc+fu = 50:50,
+# bench is IID-only — 10 OOD families excluded by build_holdout_split).
+#
+# 7000 examples / 128 = ~55 steps/epoch.
+# max_steps=600 ≈ 11 epochs. ETA on single A100: ~3-5 days (8-10 min/step).
 
 checkpoints_dir: /ephemeral/checkpoints
 
@@ -22,49 +29,56 @@ dpo_dataset: null
 base_model: Qwen/Qwen3-VL-2B-Instruct
 backbone: qwen3_vl
 
-max_steps: 12000
-lr: 1.0e-6
+# Training — paper-faithful effective bs=128
+max_steps: 600
+lr: 2.0e-5
 
+# Dr. CPPO / GRPO official settings (top_N=G=16 → pure GRPO, no clipping)
 G: 16
 top_N: 4
-eps_high: 0.2
+eps_high: 0.1
 eps_low: 0.1
-entropy_coef: 0.01
+entropy_coef: 0.00
 batch_updates: 3
-batch_size: 4
-max_new_tokens: 400
+batch_size: 128                   # effective prompts per step (128 = 32 mini × mini_batch_size)
+mini_batch_size: 4                # per-step VRAM stays bounded
+max_new_tokens: 512
 rollout_temperature: 1.0
 reward_normalization: false
 reward_workers: 24
 use_buffer: false
-eval_batch_size: 32
+buffer_sample_size: 1
+buffer_expand_frac: 0.5
+buffer_max_size: 4096
+eval_batch_size: 36
 eval_workers: 24
 eval_timeout: 120.0
-sequential_generation: false
+sequential_generation: false      # G=16 batched generation fits in 80 GB
 
 adv_std_norm: false
 soft_invalid_reward: -1.0
 
 # Essential-ops reward shaping — ENABLED
 essential_reward_weight: 0.2
-essential_reward_mode: fractional       # 'fractional' (smoother) or 'binary' (0/1)
+essential_reward_mode: fractional
 
 curriculum: false
 
+# Validation — DC50 + Fu50 (paper-style); val_modalities=img to match training
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
 val_modalities:        img
-eval_steps: 200
+eval_steps: 30                    # paper uses 5 — that's overkill; 30 ≈ every ~half-epoch
 
-log_steps: 10
-save_steps: 500
-save_total_limit: 6
+log_steps: 2
+save_steps: 30
+save_total_limit: 10
 
 hf_upload_repo: Hula0401/cadrille-rl-ess-iou-from-ood50k-24k
 hf_upload_private: false
 
-wandb_project: cadrille-rl
+wandb_project: cadrille-rl-ess-iou
 wandb_offline: false
-run_name: rl-ess-iou-0.2-G16-from-ood50k-24k
+run_name: rl-ess-iou-0.2-bs128-G16-from-ood50k-24k

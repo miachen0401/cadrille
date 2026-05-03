@@ -59,6 +59,8 @@ from pathlib import Path
 from typing import List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
 
 import numpy as np
 import torch

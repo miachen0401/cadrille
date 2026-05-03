@@ -39,6 +39,11 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# Make repo root importable + auto-load .env (HF_TOKEN, etc.).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
+
 import torch
 from transformers import AutoProcessor
 
