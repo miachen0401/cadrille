@@ -972,16 +972,29 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             max_iou_every_n_evals=max_iou_every_n_evals,
         ))
 
-    # Wire holdout_families into online_eval so BC val splits IID/OOD per
-    # eval (separate buckets in wandb: eval/img/BenchCAD val IID/* and
-    # eval/img/BenchCAD val OOD/*).
-    if holdout_families:
-        from train.sft import online_eval as _oe
-        _oe.set_holdout_families(holdout_families)
-        print(f'[online-eval] BC val IID/OOD split enabled, holdout_families='
-              f'{sorted(holdout_families)}', flush=True)
+    # Wire holdout_families into online_eval so BC val + iso val split into
+    # IID/OOD buckets (separate metrics in wandb: eval/img/BenchCAD val IID/*,
+    # eval/img/BenchCAD val OOD/*, eval/img/iso val IID/*, eval/img/iso val
+    # OOD/*). The split is decoupled from train data filtering — even
+    # configs that don't filter the train pkl (baseline/iid) still need the
+    # 4-bucket eval so all §7 v2 lines plot on the same axes.
+    #
+    # Default: read configs/sft/holdout_families.yaml unconditionally so
+    # every config in the chain shows the same 4 val buckets. cfg.holdout_families
+    # (when set) overrides — kept for backward compat.
+    from train.sft import online_eval as _oe
+    eval_holdout = holdout_families
+    if not eval_holdout:
+        try:
+            with open('configs/sft/holdout_families.yaml') as f:
+                eval_holdout = yaml.safe_load(f).get('holdout_families', [])
+        except FileNotFoundError:
+            eval_holdout = []
+    if eval_holdout:
+        _oe.set_holdout_families(eval_holdout)
+        print(f'[online-eval] BC + iso val IID/OOD split enabled, holdout_families='
+              f'{sorted(eval_holdout)}', flush=True)
     if holdout_families_v2:
-        from train.sft import online_eval as _oe
         _oe.set_holdout_families_v2(holdout_families_v2)
         print(f'[online-eval] bench-simple OOD bucket enabled, holdout_families_v2='
               f'{sorted(holdout_families_v2)}', flush=True)
