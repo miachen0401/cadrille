@@ -442,13 +442,18 @@ def _load_iso_val(n: int, seed: int) -> list[dict]:
         sampled = _seeded_sample(rows, n, seed)
         picks = [(r, 'iso val') for r in sampled]
 
+    # GT STLs are pre-rendered per-uid by data_prep/render_iso_val_stls.py for
+    # the 100 uids that show up in §7 v2 eval (frozen at seed=42). When the STL
+    # exists, set gt_mesh_path so the IoU pipeline runs on this bucket too.
+    val_meshes = root_p / 'val_meshes'
+
     out = []
     for r, label in picks:
         png = root_p / r['png_path']
         py  = root_p / r['py_path']
         if not (png.exists() and py.exists()):
             continue
-        out.append({
+        item = {
             '_modality': 'img',
             '_dataset_label': label,
             '_gt_code': py.read_text(),
@@ -456,8 +461,11 @@ def _load_iso_val(n: int, seed: int) -> list[dict]:
             'file_name': r['uid'],
             'video': [Image.open(png).convert('RGB')],
             'description': 'Generate cadquery code',
-            # iso val has no STL, no IoU computed on this bucket
-        })
+        }
+        stl_path = val_meshes / f"{r['uid']}.stl"
+        if stl_path.exists():
+            item['gt_mesh_path'] = str(stl_path)
+        out.append(item)
     return out
 
 
