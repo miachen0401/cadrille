@@ -32,9 +32,7 @@ log_steps: 50
 save_steps: 2000
 eval_steps: 1000
 online_eval_n_per: 50
-max_iou_k: 16
-max_iou_temperature: 1.0
-max_iou_every_n_evals: 2
+max_iou_k: 0  # disabled — saves ~3.7h/config (was 16)
 eval_on_start: true
 
 resume_from_checkpoint: null
