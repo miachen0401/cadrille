@@ -60,6 +60,8 @@ def main() -> None:
         )
     token = os.environ.get('HF_TOKEN')
 
+    failures: list[tuple[str, str]] = []  # (key, reason) for analyst-side gate
+
     for key in keys:
         repo = DEFAULT_REPOS[key]
         print(f'\n=== {key} ({repo}) ===', flush=True)
@@ -71,10 +73,12 @@ def main() -> None:
             )
         except Exception as e:
             print(f'  download failed: {e}', flush=True)
+            failures.append((key, f'download: {e}'))
             continue
         src = Path(local) / 'predictions'
         if not src.is_dir():
             print(f'  no predictions/ dir on the repo yet — skip')
+            failures.append((key, 'no predictions/ dir on repo'))
             continue
         dst = args.out / key / 'predictions'
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -83,10 +87,20 @@ def main() -> None:
         shutil.copytree(src, dst)
         n = len(list(dst.glob('step-*.jsonl')))
         print(f'  → {dst} ({n} step JSONLs)', flush=True)
+        if n == 0:
+            failures.append((key, 'predictions/ dir was empty'))
         # Drop the snapshot cache to avoid disk bloat
         shutil.rmtree(local, ignore_errors=True)
         repo_cache = args.cache_dir / f'models--{repo.replace("/", "--")}'
         shutil.rmtree(repo_cache, ignore_errors=True)
+
+    if failures:
+        print(f'\nFAILED — {len(failures)}/{len(keys)} repos did not sync cleanly:')
+        for k, reason in failures:
+            print(f'  {k}: {reason}')
+        # Exit 1 so analyst gates / CI / wrapper scripts can see the failure
+        # rather than silently producing partial inputs to plot_main_appendix.
+        raise SystemExit(1)
 
     print(f'\nsync done → {args.out}')
     print(f'next:  uv run python -m scripts.analysis.plot_main_appendix')

@@ -47,8 +47,15 @@ while true; do
             # Wait until all expected buckets are logged for this step
             # (otherwise IoU for the last bucket might be missing). Heuristic:
             # count "[img/" + "[text/" lines after the marker.
+            #
+            # IMPORTANT: scope the block to step=N's eval block only —
+            # stop at the NEXT "step=M running IoU eval" marker (M ≠ N).
+            # Otherwise max_iou@K lines from later eval cycles can satisfy
+            # the gate prematurely and trigger a Discord post for step=N
+            # before its own max-IoU results have actually landed.
             block=$(awk -v m="step=${step} running IoU eval" '
-                $0 ~ m {found=1}
+                $0 ~ m {found=1; print; next}
+                found && /running IoU eval/ {exit}
                 found {print}
             ' "$LOG_PATH")
             # New online_eval splits BenchCAD val into IID + OOD when

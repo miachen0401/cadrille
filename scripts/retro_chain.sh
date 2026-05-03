@@ -16,12 +16,16 @@ mkdir -p logs
 set -a
 [[ -f .env ]] && source .env
 set +a
-# DISCORD_WEBHOOK_URL lives in ~/.bashrc behind the non-interactive guard,
-# so just extract it via parameter expansion (does not echo the value).
+# DISCORD_WEBHOOK_URL lives in ~/.bashrc behind the non-interactive guard.
+# Parse via string extraction — never `eval` arbitrary shell text.
 if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
-    _line=$(grep -E "^export DISCORD_WEBHOOK_URL=" /home/ubuntu/.bashrc | head -1 || true)
+    _line=$(grep -E "^export DISCORD_WEBHOOK_URL=" /home/ubuntu/.bashrc 2>/dev/null | head -1 || true)
     if [[ -n "$_line" ]]; then
-        eval "$_line"
+        _val=${_line#*=}
+        _val=${_val#\"}; _val=${_val%\"}
+        _val=${_val#\'}; _val=${_val%\'}
+        export DISCORD_WEBHOOK_URL="$_val"
+        unset _val
     fi
     unset _line
 fi

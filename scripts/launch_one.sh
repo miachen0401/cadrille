@@ -24,21 +24,31 @@ set -a
 [[ -f .env ]] && source .env
 set +a
 
-# DISCORD_WEBHOOK_URL — extract from .bashrc (lives behind non-interactive guard).
+# DISCORD_WEBHOOK_URL — parse from .bashrc by string extraction (never `eval`
+# arbitrary shell text; .bashrc lives behind the non-interactive guard).
 if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
     _line=$(grep -E "^export DISCORD_WEBHOOK_URL=" /home/ubuntu/.bashrc 2>/dev/null | head -1 || true)
-    [[ -n "$_line" ]] && eval "$_line"
+    if [[ -n "$_line" ]]; then
+        _val=${_line#*=}
+        _val=${_val#\"}; _val=${_val%\"}
+        _val=${_val#\'}; _val=${_val%\'}
+        export DISCORD_WEBHOOK_URL="$_val"
+        unset _val
+    fi
     unset _line
 fi
 
-# Pre-flight (skip if already done)
+# Pre-flight (skip if already done) — explicit `|| exit` so a failed
+# generator stops the launcher instead of training on missing artifacts.
 if [[ ! -f common/essential_ops_simple.yaml ]]; then
     echo "[pre-flight] generating bench-simple ess specs ..."
-    uv run python -m data_prep.generate_simple_op_specs > /dev/null
+    uv run python -m data_prep.generate_simple_op_specs > /dev/null \
+        || { echo "FATAL: generate_simple_op_specs failed" >&2; exit 2; }
 fi
 if [[ ! -f data/benchcad-simple/train_v2_holdout.pkl ]]; then
     echo "[pre-flight] building bench-simple v2 holdout pkl ..."
-    uv run python -m data_prep.build_holdout_v2 > /dev/null
+    uv run python -m data_prep.build_holdout_v2 > /dev/null \
+        || { echo "FATAL: build_holdout_v2 failed" >&2; exit 2; }
 fi
 
 LABEL=$(basename "$CFG" .yaml)
