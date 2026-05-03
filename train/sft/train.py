@@ -1,6 +1,8 @@
 import os
+import json
 import math
 import pickle
+from pathlib import Path
 import yaml
 
 # transformers 5.6+ requires torch>=2.6 for torch.load() of optimizer.pt during
@@ -725,6 +727,36 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                     ds.lengths = [ds.lengths[i] for i in idx]
                 print(f'  {src_name:24s}  {cur:,} → {target:,}  '
                       f'(weight {w:.0f}, src_seed={src_seed})')
+
+    # Defensive filter — remove any row whose uid appears in the eval set.
+    # The 90/10 split at data prep already guarantees disjointness, but we
+    # apply this filter unconditionally so that no eval uid CAN possibly
+    # leak into training, even if a future data-prep script regresses or a
+    # custom pkl is dropped in. Reads data/_eval_uids/v2_eval_uids.json
+    # (regenerate via `uv run python scripts/dump_eval_uids.py`).
+    eval_uids_path = Path('data/_eval_uids/v2_eval_uids.json')
+    if eval_uids_path.exists():
+        try:
+            _eval_uids: set[str] = set()
+            for _bucket_uids in json.loads(eval_uids_path.read_text()).values():
+                _eval_uids.update(_bucket_uids)
+            for src_name, ds in sources.items():
+                if not hasattr(ds, 'annotations'):
+                    continue
+                cur = len(ds.annotations)
+                kept = [r for r in ds.annotations if r.get('uid') not in _eval_uids]
+                drop = cur - len(kept)
+                if drop > 0:
+                    ds.annotations = kept
+                    if hasattr(ds, 'lengths') and ds.lengths is not None:
+                        ds.lengths = ds.lengths[:len(kept)] if len(ds.lengths) >= len(kept) else ds.lengths
+                    print(f'[eval-leak-filter] {src_name}: dropped {drop} eval-overlap rows '
+                          f'({cur} → {len(kept)})', flush=True)
+            print(f'[eval-leak-filter] {len(_eval_uids):,} eval uids checked across '
+                  f'{len(sources)} sources', flush=True)
+        except Exception as _e:
+            print(f'[eval-leak-filter] failed: {_e!r} (continuing without filter)',
+                  flush=True)
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
