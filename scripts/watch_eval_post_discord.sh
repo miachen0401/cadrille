@@ -89,23 +89,23 @@ while true; do
                 fi
             fi
 
-            echo "[watch] $(date -u +%H:%M:%S) firing eval_to_discord for step=$step"
-            if uv run python -m scripts.analysis.eval_to_discord \
-                    --step "$step" \
-                    --log "$LOG_PATH" \
-                    --output-dir "$OUT_DIR" \
-                    --workers "$WORKERS"; then
-                touch "$marker"
-                echo "[watch] step=$step posted, marker=$marker"
-            else
-                echo "[watch] step=$step FAILED, will retry next poll"
-            fi
+            # Trajectory collage rendering (eval_to_discord) is DISABLED — cadquery
+            # has C++-level infinite loops that SIGALRM doesn't preempt, so a
+            # single bad code in a step can hang the worker for hours. fig 7 is
+            # the headline output anyway; trajectory collages can be regenerated
+            # offline from the JSONLs at any time.
+            #
+            # To re-enable: wrap eval_to_discord in `timeout 300 ...` so the
+            # whole subprocess gets SIGKILL'd if it stalls.
+            echo "[watch] step=$step skipping trajectory collage (disabled — see watcher comment)"
+            touch "$marker"
 
             # Refresh §7 v2 fig 7 (IoU + ess vs step, 4 buckets × 5 configs)
             # on EVERY eval tick — cheap (~1s), keeps the headline plot current
             # without waiting for a 5000-step boundary. Posts to Discord.
+            # Hard timeout 60s as defense-in-depth.
             echo "[watch] step=$step refreshing fig 7 ..."
-            if uv run python -m scripts.analysis.plot_fig7_v2 --post \
+            if timeout 60 uv run python -m scripts.analysis.plot_fig7_v2 --post \
                     --out-dir "$OUT_DIR/fig7" > /dev/null 2>&1; then
                 echo "[watch] step=$step fig 7 refreshed + posted"
             else
