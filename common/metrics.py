@@ -336,12 +336,36 @@ def get_and_reset_pool_crashes() -> int:
 
 
 def _reward_worker_init() -> None:
-    """Pre-import heavy deps once per worker at pool startup."""
+    """Pre-import heavy deps once per worker at pool startup.
+
+    Also caps the worker's virtual address space at 12 GB. A single bad
+    generated code (e.g. boolean op on degenerate geometry) can fan out
+    into a 100+ GB allocation in cadquery/OCP — without a cap, the kernel
+    OOM-kills the whole tmux scope. With the cap, the allocation hits
+    ENOMEM → Python MemoryError → caught by `_reward_worker_run`'s
+    `except Exception` → returns soft_invalid. Worker stays alive.
+
+    Confirmed: PID 319041 reached 98.6 GB anon-rss on 2026-05-03 21:02
+    while every other worker stayed at ~600-800 MB. Single-task explosion,
+    not gradual leak.
+    """
     import trimesh          # noqa: F401
     import cadquery         # noqa: F401
     try:
         from scipy.spatial import cKDTree  # noqa: F401
     except ImportError:
+        pass
+    # Cap virtual address space at 20 GB. cadquery + trimesh + scipy use
+    # ~3 GB at idle; OCP/TBB can spin worker threads needing ~8 MB stack each
+    # plus working memory for boolean ops on complex geometry. 20 GB gives
+    # comfortable headroom while still capping pathological 100+ GB explosions.
+    # 12 GB was too tight — caused glibc SIGABRT "cannot allocate memory for
+    # thread-local data" mid-exec on legit code (uncatchable by Python except).
+    try:
+        import resource
+        _CAP = 20 * 1024 ** 3
+        resource.setrlimit(resource.RLIMIT_AS, (_CAP, _CAP))
+    except Exception:
         pass
 
 
@@ -353,20 +377,20 @@ def _reward_worker_run(
     family: Optional[str] = None,
     ess_mode: str = 'fractional',
 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """Run CadQuery + IoU inside a warm worker process.
+    """Run CadQuery + IoU inside a warm worker process (March recipe + ess).
+
+    Body matches the March 4fc843d implementation: signal.SIGALRM for timeout,
+    in-process exec, no fork/subprocess. Only addition: ess_score regex on the
+    raw code (no exec needed) so the per-row reward shaping signal survives
+    even when cadquery exec fails.
 
     Returns:
         (iou, cd, ess_score)
           iou:      None on SyntaxError/timeout, soft_invalid on CQ/mesh fail,
                     else float in [0, 1].
-          cd:       always None in this code path (legacy slot, kept for back-compat).
-          ess_score: None when `family` lacks an essential_ops spec, else
-                    float in [0, 1] computed from raw code via regex
-                    (essential_score for ess_mode='fractional', binary 0/1
-                    for ess_mode='binary'). Independent of CQ exec status —
-                    even a soft_invalid run can carry a usable ess signal.
-
-    SyntaxError → ess_score is also None (raw code is too garbled to trust).
+          cd:       always None in this code path (legacy slot).
+          ess_score: None when `family` lacks an essential_ops spec or on
+                    SyntaxError; else float in [0, 1].
     """
     import signal
     import io
@@ -379,22 +403,18 @@ def _reward_worker_run(
         raise TimeoutError(f'CadQuery exceeded {timeout:.0f}s')
 
     # Compute essential-ops score from RAW code via regex (no exec needed).
-    # Done up-front so it survives SyntaxError / CQ failure paths.
     ess_score: Optional[float] = _compute_ess_score(code_str, family, ess_mode)
 
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(max(1, int(timeout) + 2))
     try:
-        # Compile first to catch SyntaxErrors/SyntaxWarnings without exec noise.
-        # SyntaxError = model produced completely garbled output → hard penalty.
         try:
             code_obj = compile(code_str, '<string>', 'exec')
         except SyntaxError:
             signal.alarm(0)
-            # Drop ess_score on SyntaxError — raw text is too garbled to trust.
+            # Drop ess on SyntaxError — raw text too garbled to trust.
             return None, None, None
-        # Code is syntactically valid — any failure from here gets soft_invalid.
-        _captured = {}
+        _captured: dict = {}
         g = {'show_object': lambda obj, *a, **kw: _captured.setdefault('r', obj)}
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
@@ -433,12 +453,11 @@ def _reward_worker_run(
         except Exception:
             pass
         signal.alarm(0)
-        # iou=None means mesh existed but boolean failed → still better than syntax error
+        # iou=None means mesh existed but boolean failed → soft penalty.
         return (iou if iou is not None else soft_invalid), None, ess_score
     except Exception:
         signal.alarm(0)
-        # Runtime CQ error (e.g. invalid operation) → soft_invalid
-        # ess_score (regex-based) survives this branch — code structure exists.
+        # Runtime CQ error → soft_invalid; ess_score (regex) survives.
         return soft_invalid, None, ess_score
 
 

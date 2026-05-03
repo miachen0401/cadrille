@@ -5,7 +5,7 @@
 #   else (DC/Fu rows):                  reward = iou
 #
 # Hyperparams from h100_bs128_grpo.yaml (paper Table 14):
-#   effective batch_size=128 via mini_batch_size=4 (32 grad-accum chunks),
+#   effective batch_size=128 via mini_batch_size=16 (8 grad-accum chunks),
 #   G=16, top_N=16 (full GRPO, no CPPO clipping), eps=0.1 sym,
 #   entropy_coef=0, batch_updates=3, max_new_tokens=512.
 #   lr=5e-5 (user override; paper 3e-5 — slightly hot but Qwen3-VL is stable).
@@ -40,17 +40,17 @@ eps_high: 0.1
 eps_low: 0.1
 entropy_coef: 0.00
 batch_updates: 3
-batch_size: 128                   # effective prompts per step (128 = 32 mini × mini_batch_size)
-mini_batch_size: 4                # per-step VRAM stays bounded
+batch_size: 128                   # effective prompts per step (= 8 mini × mini_batch_size, matches h100_bs128.yaml)
+mini_batch_size: 16               # 8 grad-accum chunks (proven by h100_bs128.yaml)
 max_new_tokens: 512
 rollout_temperature: 1.0
 reward_normalization: false
-reward_workers: 24
+reward_workers: 24                # March default; RLIMIT_AS=12GB per worker (in metrics.py) caps any single OCCT explosion
 use_buffer: false
 buffer_sample_size: 1
 buffer_expand_frac: 0.5
 buffer_max_size: 4096
-eval_batch_size: 36
+eval_batch_size: 32
 eval_workers: 24
 eval_timeout: 120.0
 sequential_generation: false      # G=16 batched generation fits in 80 GB
