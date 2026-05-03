@@ -97,6 +97,17 @@ while true; do
                 echo "[watch] step=$step FAILED, will retry next poll"
             fi
 
+            # Refresh §7 v2 fig 7 (IoU + ess vs step, 4 buckets × 5 configs)
+            # on EVERY eval tick — cheap (~1s), keeps the headline plot current
+            # without waiting for a 5000-step boundary. Posts to Discord.
+            echo "[watch] step=$step refreshing fig 7 ..."
+            if uv run python -m scripts.analysis.plot_fig7_v2 --post \
+                    --out-dir "$OUT_DIR/fig7" > /dev/null 2>&1; then
+                echo "[watch] step=$step fig 7 refreshed + posted"
+            else
+                echo "[watch] step=$step fig 7 refresh failed (non-fatal)"
+            fi
+
             # Every 5000 steps, refresh the §7 main+appendix figure suite
             # and post — keeps trajectory plots up-to-date across all 4 runs
             # without manual intervention.
