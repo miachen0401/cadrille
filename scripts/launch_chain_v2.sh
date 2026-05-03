@@ -13,7 +13,8 @@
 #   START_FROM=ood_enhanced_v2 nohup bash scripts/launch_chain_v2.sh > ... &
 
 set -uo pipefail
-cd /home/ubuntu/cadrille
+cd /home/ubuntu/cadrille || { echo "FATAL: cd /home/ubuntu/cadrille failed" >&2; exit 1; }
+mkdir -p logs
 set -a
 [[ -f .env ]] && source .env
 set +a

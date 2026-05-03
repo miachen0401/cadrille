@@ -41,7 +41,6 @@ resume_from_checkpoint: null
 run_name: null
 seed: 42
 max_code_len: 1500
-total_train_dp: 300000
 
 # Pool target (cap at 300k, bench/iso FULL, simple v2 holdout):
 #   bench: 10.0k   iso: 110.0k   simple: 60.9k    (ours = 100k cap → 100k)

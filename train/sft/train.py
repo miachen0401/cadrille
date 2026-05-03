@@ -664,69 +664,20 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                     len(ds.lengths) == cur:
                 ds.lengths = [ds.lengths[i] for i in idx]
             print(f'  {src_name:24s}  {cur:,} → {target:,}  (src_seed={src_seed})')
-    elif total_train_dp and sft_mix_weights:
-        import random as _rnd
-        import hashlib as _hl
-        active_w = {s: float(sft_mix_weights.get(s, 0.0))
-                    for s in sources if hasattr(sources[s], 'annotations')}
-        if not active_w or sum(active_w.values()) <= 0:
-            print('[total_train_dp] WARN: no active weighted sources; skipping',
-                  flush=True)
-        else:
-            base_seed = int(seed) if isinstance(seed, int) else 42
-            avail = {s: len(sources[s].annotations) for s in active_w}
-
-            # Iterative saturate-redistribute
-            saturated: set[str] = set()
-            targets: dict[str, int] = {s: 0 for s in active_w}
-            for _iter in range(len(active_w) + 1):
-                non_sat = [s for s in active_w if s not in saturated and active_w[s] > 0]
-                if not non_sat:
-                    break
-                non_sat_w = sum(active_w[s] for s in non_sat)
-                already = sum(targets[s] for s in saturated)
-                remaining = total_train_dp - already
-                if remaining <= 0:
-                    break
-                any_new_sat = False
-                for s in non_sat:
-                    proposed = int(round(remaining * active_w[s] / non_sat_w))
-                    if proposed >= avail[s]:
-                        targets[s] = avail[s]
-                        saturated.add(s)
-                        any_new_sat = True
-                    else:
-                        targets[s] = proposed
-                if not any_new_sat:
-                    break
-
-            actual_total = sum(targets.values())
-            print(f'[total_train_dp] target={total_train_dp:,}  '
-                  f'achieved={actual_total:,}  '
-                  f'({len(saturated)}/{len(active_w)} sources saturated)',
-                  flush=True)
-
-            for src_name, ds in sources.items():
-                w = active_w.get(src_name, 0.0)
-                if w <= 0:
-                    continue
-                target = targets.get(src_name, 0)
-                cur = len(ds.annotations)
-                if target >= cur:
-                    print(f'  {src_name:24s}  {cur:,} kept  (saturated at available)')
-                    continue
-                _digest = _hl.sha256(f'{base_seed}:{src_name}'.encode()).digest()
-                src_seed = int.from_bytes(_digest[:4], 'big')
-                _rng = _rnd.Random(src_seed)
-                idx = list(range(cur))
-                _rng.shuffle(idx)
-                idx = sorted(idx[:target])
-                ds.annotations = [ds.annotations[i] for i in idx]
-                if hasattr(ds, 'lengths') and ds.lengths is not None and \
-                        len(ds.lengths) == cur:
-                    ds.lengths = [ds.lengths[i] for i in idx]
-                print(f'  {src_name:24s}  {cur:,} → {target:,}  '
-                      f'(weight {w:.0f}, src_seed={src_seed})')
+    elif total_train_dp:
+        # Removed: saturate-redistribute path. The rounding made targets
+        # off by 1-2 from total_train_dp (CodeRabbit flag), and we've
+        # converged on natural-pool sampling (Plan A) for §7 v2. If you
+        # want a precise pool cap, use explicit `sft_pool_rows:` —
+        # generated once via data_prep/compute_v2_pool_rows.py and
+        # committed for provenance.
+        raise ValueError(
+            'total_train_dp is set without sft_pool_rows. The saturate-'
+            'redistribute path was removed (was inexact and dead code in '
+            'practice). Either drop total_train_dp from your config '
+            '(natural pool, Plan A) or generate explicit sft_pool_rows '
+            'via data_prep/compute_v2_pool_rows.py.'
+        )
 
     # Defensive filter — remove any row whose uid appears in the eval set.
     # The 90/10 split at data prep already guarantees disjointness, but we
@@ -1191,9 +1142,13 @@ def main():
         'max_iou_temperature':    max_iou_temperature,
         'max_iou_every_n_evals':  max_iou_every_n_evals,
         'curriculum_phases':      curriculum_phases,
-        'benchcad_train_pkl':     benchcad_train_pkl,
-        'cad_iso_106_train_pkl':  cad_iso_106_train_pkl,
-        'holdout_families':       holdout_families,
+        'benchcad_train_pkl':         benchcad_train_pkl,
+        'cad_iso_106_train_pkl':      cad_iso_106_train_pkl,
+        'benchcad_simple_train_pkl':  benchcad_simple_train_pkl,
+        'holdout_families':           holdout_families,
+        'holdout_families_v2':        holdout_families_v2,
+        'total_train_dp':             total_train_dp,
+        'sft_pool_rows':              sft_pool_rows,
     }
 
     print(f'Run name : {run_name}')

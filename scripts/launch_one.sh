@@ -14,7 +14,8 @@
 #   uv run python -m data_prep.build_holdout_v2
 
 set -uo pipefail
-cd /home/ubuntu/cadrille
+cd /home/ubuntu/cadrille || { echo "FATAL: cd /home/ubuntu/cadrille failed" >&2; exit 1; }
+mkdir -p logs
 
 CFG="${1:?usage: $0 <config.yaml>}"
 [[ -f "$CFG" ]] || { echo "config not found: $CFG"; exit 1; }

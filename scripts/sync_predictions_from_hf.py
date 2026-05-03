@@ -52,12 +52,16 @@ def main() -> None:
     args.cache_dir.mkdir(parents=True, exist_ok=True)
 
     keys = [k.strip() for k in args.repos.split(',') if k.strip()]
+    unknown = [k for k in keys if k not in DEFAULT_REPOS]
+    if unknown:
+        valid = sorted(DEFAULT_REPOS.keys())
+        raise SystemExit(
+            f'unknown config key(s): {unknown}. valid keys: {valid}'
+        )
     token = os.environ.get('HF_TOKEN')
 
     for key in keys:
-        repo = DEFAULT_REPOS.get(key)
-        if not repo:
-            print(f'[skip] unknown config key: {key}'); continue
+        repo = DEFAULT_REPOS[key]
         print(f'\n=== {key} ({repo}) ===', flush=True)
         try:
             local = snapshot_download(

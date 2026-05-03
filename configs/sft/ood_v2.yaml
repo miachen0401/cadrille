@@ -76,7 +76,6 @@ seed: 42
 
 max_code_len: 1500
 
-total_train_dp: 300000
 
 # Pool target (cap-only at 300k, bench/iso use train_v4_holdout pkl):
 

@@ -65,14 +65,15 @@ while true; do
                 echo "[watch] step=$step only $n_done/$n_thresh buckets logged, waiting"
                 continue
             fi
-            # max_iou@8 cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
-            # When applicable, wait for all 3 max_iou@8 bucket lines too so the
-            # Discord post includes both greedy + max@8.
+            # max_iou@K cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
+            # When applicable, wait for all 3 max_iou@K bucket lines too so the
+            # Discord post includes both greedy + max@K. K may be 8 or 16
+            # depending on cfg.max_iou_k — match either via @[0-9]+.
             half_step=$((step / 1000))
             if [ $((half_step % 2)) -eq 1 ]; then
-                n_max=$(echo "$block" | grep -cE '\] max_iou@8 \(t=[0-9.]+\)=' || true)
+                n_max=$(echo "$block" | grep -cE '\] max_iou@[0-9]+ \(t=[0-9.]+\)=' || true)
                 if [ "$n_max" -lt 3 ]; then
-                    echo "[watch] step=$step max_iou@8 only $n_max/3 buckets logged, waiting"
+                    echo "[watch] step=$step max_iou@K only $n_max/3 buckets logged, waiting"
                     continue
                 fi
             fi

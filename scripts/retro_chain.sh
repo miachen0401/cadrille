@@ -8,7 +8,8 @@
 # Watches: WAIT_PID env var (default 0 = no wait).
 
 set -uo pipefail
-cd /home/ubuntu/cadrille
+cd /home/ubuntu/cadrille || { echo "FATAL: cd /home/ubuntu/cadrille failed" >&2; exit 1; }
+mkdir -p logs
 # Source .env normally (set -a marks all assignments for export, then unset).
 # Avoids the previous bug where `export $(grep ...)` fed grep's "file:KEY=val"
 # output to export verbatim (leaking values into stderr/log).

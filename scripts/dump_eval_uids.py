@@ -49,26 +49,16 @@ def main() -> None:
     out: dict[str, list[str]] = {}
 
     print('Loading BC val (IID + OOD) ...')
-    items = _load_benchcad_val(n=50, seed=42)
-    by_label: dict[str, list[str]] = {}
-    for it in items:
-        by_label.setdefault(it['_dataset_label'], []).append(it['file_name'])
-    out.update(by_label)
-
-    print('Loading bench-simple val (IID + OOD) ...')
-    items = _load_bench_simple_val(n=20, seed=42)
-    for it in items:
-        by_label.setdefault(it['_dataset_label'], []).append(it['file_name'])
-        out.setdefault(it['_dataset_label'], []).append(it['file_name'])
-
-    # Clean rebuild
-    out = {}
     for it in _load_benchcad_val(n=50, seed=42):
         out.setdefault(it['_dataset_label'], []).append(it['file_name'])
+
+    print('Loading iso val (IID + OOD) ...')
     for it in _load_iso_val(n=50, seed=42):
         out.setdefault(it['_dataset_label'], []).append(it['file_name'])
+
     # bench-simple kept available but NOT in default eval subsets — included
     # here for completeness only (paper docs may cite it as deprecated).
+    print('Loading bench-simple val (IID + OOD, deprecated) ...')
     for it in _load_bench_simple_val(n=20, seed=42):
         out.setdefault(it['_dataset_label'], []).append(it['file_name'])
 

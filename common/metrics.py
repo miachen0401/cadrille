@@ -287,6 +287,46 @@ def _cache_set(key: str, value: Tuple) -> None:
 _reward_pool: Optional[ProcessPoolExecutor] = None
 _reward_pool_crashes: int = 0
 
+_VALID_ESS_MODES = ('binary', 'fractional')
+
+
+def _compute_ess_score(
+    code_str: str,
+    family: Optional[str],
+    ess_mode: str,
+) -> Optional[float]:
+    """Compute essential-ops score from raw code via regex (no exec needed).
+
+    Returns None when:
+      * family is None (caller didn't supply one — ess not applicable)
+      * family has no spec in ESSENTIAL_BY_FAMILY (expected for cad-recode /
+        text2cad / DeepCAD / Fusion360 rows that aren't in the benchcad/iso/
+        bench-simple registry)
+      * ess_mode == 'binary' and the family's spec returns inconclusive
+
+    Raises ValueError for unknown ess_mode (typo in config / RL recipe must
+    fail loudly, NOT silently revert to IoU-only — see PR review history).
+    """
+    if ess_mode not in _VALID_ESS_MODES:
+        raise ValueError(
+            f'unknown ess_mode={ess_mode!r}; must be one of {_VALID_ESS_MODES}'
+        )
+    if not family:
+        return None
+    from common.essential_ops import (
+        ESSENTIAL_BY_FAMILY,
+        find_ops as _find_ops,
+        essential_score as _ess_score,
+        essential_pass as _ess_pass,
+    )
+    if family not in ESSENTIAL_BY_FAMILY:
+        return None
+    _ops = _find_ops(code_str or '')
+    if ess_mode == 'binary':
+        p = _ess_pass(family, _ops)
+        return None if p is None else (1.0 if p else 0.0)
+    return _ess_score(family, _ops)
+
 
 def get_and_reset_pool_crashes() -> int:
     """Return pool crash count since last call and reset to 0."""
@@ -340,24 +380,7 @@ def _reward_worker_run(
 
     # Compute essential-ops score from RAW code via regex (no exec needed).
     # Done up-front so it survives SyntaxError / CQ failure paths.
-    ess_score: Optional[float] = None
-    if family:
-        try:
-            from common.essential_ops import (
-                ESSENTIAL_BY_FAMILY,
-                find_ops as _find_ops,
-                essential_score as _ess_score,
-                essential_pass as _ess_pass,
-            )
-            if family in ESSENTIAL_BY_FAMILY:
-                _ops = _find_ops(code_str or '')
-                if ess_mode == 'binary':
-                    p = _ess_pass(family, _ops)
-                    ess_score = None if p is None else (1.0 if p else 0.0)
-                else:
-                    ess_score = _ess_score(family, _ops)
-        except Exception:
-            ess_score = None
+    ess_score: Optional[float] = _compute_ess_score(code_str, family, ess_mode)
 
     signal.signal(signal.SIGALRM, _on_alarm)
     signal.alarm(max(1, int(timeout) + 2))
@@ -894,14 +917,32 @@ def compute_rewards_parallel(
             init_reward_pool(n_workers=workers)  # warm pool for next batch
             # fall through to subprocess for this batch
 
-    # Fallback: fresh subprocess per call (no ess support — pure IoU only).
-    # Worker pool is the only path that computes ess; the subprocess fallback
-    # is a rare crash-recovery path so losing ess for one batch is acceptable.
+    # Fallback: fresh subprocess per call. Pool crashes are NOT rare in
+    # practice (BrokenProcessPool fires when any worker OOMs / segfaults
+    # mid-batch — happens regularly with cadquery on adversarial codes), so
+    # this path must preserve the (iou, ess_score) contract. Otherwise an
+    # entire batch silently reverts to pure-IoU reward, drifting the RL
+    # objective away from `essential_reward_weight` for as long as the pool
+    # takes to warm back up.
+    #
+    # IoU comes from compute_reward (subprocess). ess_score is regex-based
+    # (no exec needed) so we compute it directly in the main process.
+    # SyntaxError handling matches the warm-pool path: ess is dropped when
+    # the raw code is too garbled to compile (compile() == cheap syntax check).
+    def _fallback_ess(code: str, fam: Optional[str]) -> Optional[float]:
+        try:
+            compile(code or '', '<string>', 'exec')
+        except SyntaxError:
+            return None
+        return _compute_ess_score(code, fam, ess_mode)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
+        iou_futures = [
             pool.submit(compute_reward, code, path, timeout)
             for code, path in zip(codes, gt_paths)
         ]
-        if return_pairs:
-            return [(f.result(), None) for f in futures]
-        return [f.result() for f in futures]
+        ious = [f.result() for f in iou_futures]
+    esss = [_fallback_ess(code, fam) for code, fam in zip(codes, families)]
+    if return_pairs:
+        return [_pack(iou, ess) for iou, ess in zip(ious, esss)]
+    return ious
