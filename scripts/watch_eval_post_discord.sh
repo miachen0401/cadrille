@@ -76,8 +76,12 @@ while true; do
             # When applicable, wait for all 3 max_iou@K bucket lines too so the
             # Discord post includes both greedy + max@K. K may be 8 or 16
             # depending on cfg.max_iou_k — match either via @[0-9]+.
+            #
+            # When max_iou_k=0 (disabled at config level), the entire log will
+            # never contain a max_iou@K line — skip this gate entirely so odd-
+            # thousand step posts don't hang waiting for output that won't come.
             half_step=$((step / 1000))
-            if [ $((half_step % 2)) -eq 1 ]; then
+            if [ $((half_step % 2)) -eq 1 ] && grep -qE '\] max_iou@[0-9]+ ' "$LOG_PATH" 2>/dev/null; then
                 n_max=$(echo "$block" | grep -cE '\] max_iou@[0-9]+ \(t=[0-9.]+\)=' || true)
                 if [ "$n_max" -lt 3 ]; then
                     echo "[watch] step=$step max_iou@K only $n_max/3 buckets logged, waiting"
