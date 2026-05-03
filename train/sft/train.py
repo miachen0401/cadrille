@@ -113,8 +113,10 @@ class PrintToFileCallback(TrainerCallback):
 def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
                      online_eval_n_per=20, mix_weights=None,
                      max_iou_k=8, max_iou_temperature=1.0,
-                     max_iou_every_n_evals=1):
-    from train.sft.online_eval import OnlineIoUEvalCallback
+                     max_iou_every_n_evals=1,
+                     sample_log_every=1000, sample_log_n_per=4):
+    from train.sft.online_eval import (
+        OnlineIoUEvalCallback, TrainSampleLogCallback, load_online_eval_subsets)
     cbs = [
         PrintToFileCallback(),
         WandbRunSaverCallback(),
@@ -126,6 +128,15 @@ def _build_callbacks(processor, seed, hf_upload_repo, hf_upload_private,
             max_iou_every_n_evals=max_iou_every_n_evals,
         ),
     ]
+    # Preload a fixed set of training examples (image + GT code) for periodic
+    # logging to wandb — shows what the model trains on alongside eval predictions.
+    train_preview = load_online_eval_subsets(
+        n_per=sample_log_n_per, seed=seed + 100,
+        subsets=['recode20k_train', 'text2cad_train'])
+    if train_preview:
+        cbs.append(TrainSampleLogCallback(train_preview, log_every=sample_log_every))
+        print(f'[callbacks] TrainSampleLogCallback: {len(train_preview)} examples, '
+              f'every {sample_log_every} steps', flush=True)
     if hf_upload_repo:
         from train.sft.hf_uploader import HFCheckpointUploadCallback
         cbs.append(HFCheckpointUploadCallback(
@@ -579,20 +590,29 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 mode='img')
 
     # text2cad-bench available in TWO modes (separate sources, separate weights):
-    #   * text2cad_bench_img: image-conditioned (uses png_path, code) via CadRecode20kDataset
-    #   * text2cad_bench_text: text-conditioned (uses description, code) via Text2CADDataset
-    # Same train.pkl (each row has uid, code, description, png_path), but different
-    # __getitem__ produces different conditioning input. User policy 2026-04-28:
-    # do NOT mix img+text on the same sample — pick exactly one per training example.
+    #   * text2cad_bench_img: image-conditioned (uses png_path) via CadRecode20kDataset
+    #                         — only loaded when pkl rows have a 'png_path' field
+    #   * text2cad_bench_text: text-conditioned (uses description) via Text2CADDataset
+    # User policy 2026-04-28: do NOT mix img+text on the same sample.
     text2cad_bench_path = os.path.join(data_path, 'text2cad-bench')
     if os.path.isdir(text2cad_bench_path) and os.path.exists(os.path.join(text2cad_bench_path, 'train.pkl')):
-        if mode != 'pc':
+        # Check if png_path is present (not all fetched versions materialise PNGs)
+        _t2cb_has_png = False
+        with open(os.path.join(text2cad_bench_path, 'train.pkl'), 'rb') as _f:
+            _t2cb_first = pickle.load(_f)
+            if _t2cb_first and 'png_path' in _t2cb_first[0]:
+                _t2cb_has_png = True
+        if mode != 'pc' and _t2cb_has_png:
             sources['text2cad_bench_img'] = CadRecode20kDataset(
                 root_dir=text2cad_bench_path,
                 split='train',
                 img_size=268,
                 max_code_len=max_code_len,
                 mode='img')
+        elif mode != 'pc' and not _t2cb_has_png:
+            print('[text2cad_bench_img] skipped — pkl has no png_path; '
+                  'run data_prep/prerender_text2cad_bench.py to generate renders.',
+                  flush=True)
         if use_text:
             sources['text2cad_bench_text'] = Text2CADDataset(
                 root_dir=text2cad_bench_path,

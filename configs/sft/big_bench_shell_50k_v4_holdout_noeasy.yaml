@@ -33,7 +33,7 @@
 #   recode_bench:      472.2 * 1.037 = 490
 # Total: 1000
 
-checkpoints_dir: /ephemeral/checkpoints
+checkpoints_dir: /home/ubuntu/checkpoints
 data_path: ./data
 mode: img
 use_text: true

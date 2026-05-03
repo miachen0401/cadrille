@@ -656,11 +656,15 @@ def _write_predictions_probe(examples, all_codes, per_item_iou,
     try:
         import wandb
         if wandb.run is not None:
-            cols = ['bucket', 'uid', 'iou', 'pred_code', 'gt_code', 'description']
+            cols = ['bucket', 'uid', 'image', 'iou', 'pred_code', 'gt_code', 'description']
             tbl = wandb.Table(columns=cols)
-            for r in rows:
+            for idx, r in enumerate(rows):
+                ex = examples[idx]
+                imgs = ex.get('video') or []
+                img_obj = wandb.Image(imgs[0]) if imgs else None
                 tbl.add_data(
                     r['bucket'], r['uid'],
+                    img_obj,
                     r['iou'] if r['iou'] is not None else float('nan'),
                     r['pred_code'][:4000] if r['pred_code'] else '',  # cap cell size
                     (r['gt_code'] or '')[:4000],
@@ -1208,3 +1212,48 @@ class OnlineIoUEvalCallback(TrainerCallback):
                 wandb.log(payload)
         except Exception as e:
             print(f'[online-eval] wandb.log failed: {e}', flush=True)
+
+
+class TrainSampleLogCallback(TrainerCallback):
+    """Log a fixed set of training samples (image + GT code) to wandb every N steps.
+
+    Purely data visualization — no model generation. Complements the eval
+    predictions table from OnlineIoUEvalCallback so the wandb panel shows
+    both what the model trains on and what it predicts.
+    """
+
+    def __init__(self, examples: list[dict], log_every: int = 1000):
+        self._examples = examples
+        self.log_every = log_every
+        self._last_logged = -1
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        step = int(state.global_step)
+        if step == 0 or step == self._last_logged:
+            return
+        if step % self.log_every != 0:
+            return
+        self._last_logged = step
+        try:
+            import wandb
+            if wandb.run is None:
+                return
+            cols = ['source', 'uid', 'image', 'description', 'gt_code']
+            tbl = wandb.Table(columns=cols)
+            for ex in self._examples:
+                imgs = ex.get('video') or []
+                img_obj = wandb.Image(imgs[0]) if imgs else None
+                tbl.add_data(
+                    ex.get('_dataset_label', '?'),
+                    ex.get('file_name', '?'),
+                    img_obj,
+                    (ex.get('description') or '')[:500],
+                    (ex.get('_gt_code') or '')[:3000],
+                )
+            wandb.log({f'samples/train/step_{step:06d}': tbl})
+            print(f'[train-samples] step={step} logged {len(self._examples)} '
+                  f'train samples to wandb', flush=True)
+        except Exception as e:
+            print(f'[train-samples] wandb log failed: {e}', flush=True)
