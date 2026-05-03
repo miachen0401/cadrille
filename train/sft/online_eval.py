@@ -288,8 +288,11 @@ def _multilabel_op_metrics(pred_codes: list[str], gt_codes: list[str],
 #   ops + IoU:  BenchCAD val (full triplet: img + STL + .py)
 #   ops only:   recode20k train, text2cad train
 #   IoU only:   DeepCAD test, Fusion360 test (mesh-only datasets, no GT code)
-_SUBSETS_DEFAULT = ('benchcad_val', 'recode20k_train', 'text2cad_train',
+_SUBSETS_DEFAULT = ('benchcad_val', 'iso_val',
+                    'recode20k_train', 'text2cad_train',
                     'deepcad_test', 'fusion360_test')
+# bench_simple_val intentionally dropped from default — bench-simple is a
+# TRAINING source only; OOD eval lives in benchcad_val + iso_val.
 
 # Module-level state set from train.py via set_holdout_families(); when set,
 # benchcad_val items are tagged with `_dataset_label = 'BenchCAD val IID'` /
@@ -297,12 +300,26 @@ _SUBSETS_DEFAULT = ('benchcad_val', 'recode20k_train', 'text2cad_train',
 # (e.g. eval/img/BenchCAD val IID/IoU mean) so wandb shows IID/OOD curves.
 _HOLDOUT_FAMILIES: set[str] = set()
 
+# §7 v2: bench-simple op-pattern holdout — drives a SECOND OOD bucket
+# `'bench-simple OOD'` loaded from data/benchcad-simple/val.pkl. The IID
+# partner bucket `'bench-simple IID'` covers the 44 of 54 fams not held out
+# (small subset for sanity; main eval signal is the OOD bucket).
+_HOLDOUT_FAMILIES_V2: set[str] = set()
+
 
 def set_holdout_families(families: list[str] | set[str] | None) -> None:
     """Configure which families are OOD for BC val bucket split.
     Called from train.py once cfg is loaded."""
     global _HOLDOUT_FAMILIES
     _HOLDOUT_FAMILIES = set(families) if families else set()
+
+
+def set_holdout_families_v2(families: list[str] | set[str] | None) -> None:
+    """Configure which bench-simple op patterns are OOD for the v2 bucket.
+    When non-empty, _load_bench_simple_val() emits stratified IID + OOD
+    rows tagged with `'bench-simple IID'` / `'bench-simple OOD'`."""
+    global _HOLDOUT_FAMILIES_V2
+    _HOLDOUT_FAMILIES_V2 = set(families) if families else set()
 
 
 def _seeded_sample(items, n, seed=42):
@@ -388,6 +405,134 @@ def _load_benchcad_val(n: int, seed: int) -> list[dict]:
     return out
 
 
+def _load_iso_val(n: int, seed: int) -> list[dict]:
+    """cad_iso_106 val — img modality, GT .py only (no STL → no IoU on raw exec).
+
+    Mirrors _load_benchcad_val: when _HOLDOUT_FAMILIES is set, splits into
+    'iso val IID' / 'iso val OOD' by family. iso val is the SECOND mech-OOD
+    eval pool (~836 OOD rows across 10 families) — paired with BC val OOD
+    (~177 rows) so paper has two independent mech-OOD test bodies.
+
+    Family is regex-extracted from uid (iso pkl rows lack explicit family).
+    """
+    from PIL import Image
+    import sys as _sys; _sys.path.insert(0, '.')
+    from train.rl.dataset import _extract_family
+
+    root_p = Path('data/cad-iso-106')
+    pkl = root_p / 'val.pkl'
+    if not pkl.exists():
+        return []
+    with pkl.open('rb') as f:
+        rows = pickle.load(f)
+
+    # Add `family` derived from uid
+    for r in rows:
+        if 'family' not in r:
+            r['family'] = _extract_family(r.get('uid', ''))
+
+    if _HOLDOUT_FAMILIES:
+        picks = _stratified_sample_by_family(
+            rows, _HOLDOUT_FAMILIES,
+            n_iid=n, n_ood_per_family=5, seed=seed,
+        )
+        # Override the 'BenchCAD val IID/OOD' labels to 'iso val IID/OOD'
+        picks = [(r, lbl.replace('BenchCAD val', 'iso val')) for r, lbl in picks]
+    else:
+        sampled = _seeded_sample(rows, n, seed)
+        picks = [(r, 'iso val') for r in sampled]
+
+    # GT STLs are pre-rendered per-uid by data_prep/render_iso_val_stls.py for
+    # the 100 uids that show up in §7 v2 eval (frozen at seed=42). When the STL
+    # exists, set gt_mesh_path so the IoU pipeline runs on this bucket too.
+    val_meshes = root_p / 'val_meshes'
+
+    out = []
+    for r, label in picks:
+        png = root_p / r['png_path']
+        py  = root_p / r['py_path']
+        if not (png.exists() and py.exists()):
+            continue
+        item = {
+            '_modality': 'img',
+            '_dataset_label': label,
+            '_gt_code': py.read_text(),
+            '_family': r.get('family'),
+            'file_name': r['uid'],
+            'video': [Image.open(png).convert('RGB')],
+            'description': 'Generate cadquery code',
+        }
+        stl_path = val_meshes / f"{r['uid']}.stl"
+        if stl_path.exists():
+            item['gt_mesh_path'] = str(stl_path)
+        out.append(item)
+    return out
+
+
+def _load_bench_simple_val(n: int, seed: int) -> list[dict]:
+    """bench-simple val — img modality, GT .py only (no STL → no IoU).
+
+    Produces the §7 v2 OOD bucket. When _HOLDOUT_FAMILIES_V2 is set:
+      - 'bench-simple OOD': n_per_fam=5 per held-out op pattern (10 fams × 5 = 50)
+      - 'bench-simple IID': n random rows from the other 44 fams (control)
+    When unset, returns empty (no v2 bucket emitted).
+
+    Family is regex-extracted from uid since bench-simple val.pkl lacks an
+    explicit `family` field.
+    """
+    from PIL import Image
+    if not _HOLDOUT_FAMILIES_V2:
+        return []
+    root_p = Path('data/benchcad-simple')
+    pkl = root_p / 'val.pkl'
+    if not pkl.exists():
+        return []
+    with pkl.open('rb') as f:
+        rows = pickle.load(f)
+
+    # Extract family from uid (e.g. 'simple_revolve_cut_00042' → 'simple_revolve_cut')
+    import sys as _sys; _sys.path.insert(0, '.')
+    from train.rl.dataset import _extract_family
+
+    rng = random.Random(seed)
+    holdout = _HOLDOUT_FAMILIES_V2
+
+    # Stratified OOD: 5 per held-out fam (mirror BC val OOD scheme)
+    ood_pick: list[tuple[dict, str]] = []
+    for fam in sorted(holdout):
+        fam_rows = [r for r in rows if _extract_family(r.get('uid', '')) == fam]
+        rng.shuffle(fam_rows)
+        for r in fam_rows[:5]:
+            ood_pick.append((r, 'bench-simple OOD'))
+
+    # IID partner: n random from non-holdout fams (sanity control)
+    iid_pool = [r for r in rows
+                if (_extract_family(r.get('uid', '')) or '') not in holdout
+                and _extract_family(r.get('uid', ''))]
+    rng.shuffle(iid_pool)
+    iid_pick = [(r, 'bench-simple IID') for r in iid_pool[:n]]
+
+    out = []
+    for r, label in iid_pick + ood_pick:
+        png = root_p / r['png_path']
+        py  = root_p / r['py_path']
+        if not (png.exists() and py.exists()):
+            continue
+        out.append({
+            '_modality': 'img',
+            '_dataset_label': label,
+            '_gt_code': py.read_text(),
+            '_family': _extract_family(r.get('uid', '')),
+            'file_name': r['uid'],
+            # No GT mesh available — bench-simple ships .py + _render.png only.
+            # IoU is undefined for this bucket; ess_pass / op_loss / recall
+            # still computable from gt_code regex.
+            'video': [Image.open(png).convert('RGB')],
+            'description': 'Generate cadquery code',
+        })
+    return out
+
+
 def _load_recode20k_train(n: int, seed: int) -> list[dict]:
     """cad-recode-20k train — img modality, has GT .py (no STL → no IoU)."""
     from PIL import Image
@@ -463,13 +608,15 @@ def _load_stl_dir_test(root: str, label: str, n: int, seed: int) -> list[dict]:
 
 
 _SOURCE_LOADERS = {
-    'benchcad_val':    lambda n, s: _load_benchcad_val(n, s),
-    'recode20k_train': lambda n, s: _load_recode20k_train(n, s),
-    'text2cad_train':  lambda n, s: _load_text2cad_train(n, s),
-    'deepcad_test':    lambda n, s: _load_stl_dir_test(
-                          'data/deepcad_test_mesh', 'DeepCAD test', n, s),
-    'fusion360_test':  lambda n, s: _load_stl_dir_test(
-                          'data/fusion360_test_mesh', 'Fusion360 test', n, s),
+    'benchcad_val':     lambda n, s: _load_benchcad_val(n, s),
+    'iso_val':          lambda n, s: _load_iso_val(n, s),
+    'bench_simple_val': lambda n, s: _load_bench_simple_val(n, s),
+    'recode20k_train':  lambda n, s: _load_recode20k_train(n, s),
+    'text2cad_train':   lambda n, s: _load_text2cad_train(n, s),
+    'deepcad_test':     lambda n, s: _load_stl_dir_test(
+                           'data/deepcad_test_mesh', 'DeepCAD test', n, s),
+    'fusion360_test':   lambda n, s: _load_stl_dir_test(
+                           'data/fusion360_test_mesh', 'Fusion360 test', n, s),
 }
 
 
@@ -1106,7 +1253,16 @@ class OnlineIoUEvalCallback(TrainerCallback):
                  predictions_dir: str | None = None):
         self.processor = processor
         self.n_per_dataset = n_per_dataset
-        self.seed = seed
+        # IMPORTANT: eval seed is HARDCODED to 42 regardless of the training
+        # seed. This guarantees that every config (and every training seed
+        # within a config) scores on the EXACT same eval rows — paper-side
+        # row identity for cross-run comparison is decoupled from training-
+        # side stochasticity (init / shuffle / dropout).
+        self.seed = 42
+        if seed != 42:
+            print(f'[online-eval] ignoring train seed={seed} for eval row '
+                  f'selection — eval always uses seed=42 for cross-run '
+                  f'reproducibility', flush=True)
         self.subsets = subsets
         self.eval_batch_size = eval_batch_size
         self.reward_workers = reward_workers

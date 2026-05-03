@@ -47,8 +47,15 @@ while true; do
             # Wait until all expected buckets are logged for this step
             # (otherwise IoU for the last bucket might be missing). Heuristic:
             # count "[img/" + "[text/" lines after the marker.
+            #
+            # IMPORTANT: scope the block to step=N's eval block only —
+            # stop at the NEXT "step=M running IoU eval" marker (M ≠ N).
+            # Otherwise max_iou@K lines from later eval cycles can satisfy
+            # the gate prematurely and trigger a Discord post for step=N
+            # before its own max-IoU results have actually landed.
             block=$(awk -v m="step=${step} running IoU eval" '
-                $0 ~ m {found=1}
+                $0 ~ m {found=1; print; next}
+                found && /running IoU eval/ {exit}
                 found {print}
             ' "$LOG_PATH")
             # New online_eval splits BenchCAD val into IID + OOD when
@@ -65,14 +72,15 @@ while true; do
                 echo "[watch] step=$step only $n_done/$n_thresh buckets logged, waiting"
                 continue
             fi
-            # max_iou@8 cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
-            # When applicable, wait for all 3 max_iou@8 bucket lines too so the
-            # Discord post includes both greedy + max@8.
+            # max_iou@K cycle: fires at step 1k, 3k, 5k, 7k, ... (odd thousand).
+            # When applicable, wait for all 3 max_iou@K bucket lines too so the
+            # Discord post includes both greedy + max@K. K may be 8 or 16
+            # depending on cfg.max_iou_k — match either via @[0-9]+.
             half_step=$((step / 1000))
             if [ $((half_step % 2)) -eq 1 ]; then
-                n_max=$(echo "$block" | grep -cE '\] max_iou@8 \(t=[0-9.]+\)=' || true)
+                n_max=$(echo "$block" | grep -cE '\] max_iou@[0-9]+ \(t=[0-9.]+\)=' || true)
                 if [ "$n_max" -lt 3 ]; then
-                    echo "[watch] step=$step max_iou@8 only $n_max/3 buckets logged, waiting"
+                    echo "[watch] step=$step max_iou@K only $n_max/3 buckets logged, waiting"
                     continue
                 fi
             fi
@@ -87,6 +95,17 @@ while true; do
                 echo "[watch] step=$step posted, marker=$marker"
             else
                 echo "[watch] step=$step FAILED, will retry next poll"
+            fi
+
+            # Refresh §7 v2 fig 7 (IoU + ess vs step, 4 buckets × 5 configs)
+            # on EVERY eval tick — cheap (~1s), keeps the headline plot current
+            # without waiting for a 5000-step boundary. Posts to Discord.
+            echo "[watch] step=$step refreshing fig 7 ..."
+            if uv run python -m scripts.analysis.plot_fig7_v2 --post \
+                    --out-dir "$OUT_DIR/fig7" > /dev/null 2>&1; then
+                echo "[watch] step=$step fig 7 refreshed + posted"
+            else
+                echo "[watch] step=$step fig 7 refresh failed (non-fatal)"
             fi
 
             # Every 5000 steps, refresh the §7 main+appendix figure suite

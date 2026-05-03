@@ -45,35 +45,46 @@ from eval.bench import run_bench  # noqa: E402
 
 
 def _build_ood_rows(seed: int = 42, n_per_fam: int = 5) -> list[dict]:
-    """50 OOD rows = 10 fams × 5, deterministic via seeded sample of val.pkl."""
+    """50 OOD rows = 10 fams × 5, picked by the SAME function that
+    online_eval uses for its BC val OOD bucket. This guarantees that any
+    retro-evaluated ckpt is scored on the EXACT same 50 samples that
+    baseline / ood / iid see in their per-step JSONLs — apples-to-apples
+    across all four §7 lines.
+    """
+    from train.sft.online_eval import _stratified_sample_by_family
+
     val_pkl = REPO / 'data/benchcad/val.pkl'
     with open(val_pkl, 'rb') as f:
         rows = pickle.load(f)
 
-    rng = random.Random(seed)
+    # Match online_eval call signature: n_iid=50 picks IID samples first
+    # (consumes rng state), then n_ood_per_family=5 picks per holdout family.
+    picks = _stratified_sample_by_family(
+        rows, set(HOLDOUT_FAMILIES),
+        n_iid=50, n_ood_per_family=n_per_fam, seed=seed)
+
+    base = REPO / 'data/benchcad'
     ood_rows = []
-    for fam in sorted(HOLDOUT_FAMILIES):
-        fam_rows = [r for r in rows if r.get('family') == fam]
-        rng.shuffle(fam_rows)
-        for r in fam_rows[:n_per_fam]:
-            base = REPO / 'data/benchcad'
-            png = base / r['png_path']
-            py  = base / r['py_path']
-            stl = base / r['mesh_path']
-            if not (png.exists() and py.exists() and stl.exists()):
-                continue
-            ood_rows.append({
-                'stem':           r['uid'],
-                'composite_png':  Image.open(png).convert('RGB'),
-                'gt_code':        py.read_text(),
-                'family':         fam,
-                'difficulty':     r.get('difficulty', '?'),
-                'base_plane':     r.get('base_plane', '?'),
-                'split':          'ood',
-                'feature_tags':   r.get('feature_tags', '{}'),
-                'feature_count':  r.get('feature_count', 0),
-                'gt_mesh_path':   str(stl),
-            })
+    for r, label in picks:
+        if 'OOD' not in label:
+            continue
+        png = base / r['png_path']
+        py  = base / r['py_path']
+        stl = base / r['mesh_path']
+        if not (png.exists() and py.exists() and stl.exists()):
+            continue
+        ood_rows.append({
+            'stem':           r['uid'],
+            'composite_png':  Image.open(png).convert('RGB'),
+            'gt_code':        py.read_text(),
+            'family':         r.get('family'),
+            'difficulty':     r.get('difficulty', '?'),
+            'base_plane':     r.get('base_plane', '?'),
+            'split':          'ood',
+            'feature_tags':   r.get('feature_tags', '{}'),
+            'feature_count':  r.get('feature_count', 0),
+            'gt_mesh_path':   str(stl),
+        })
     return ood_rows
 
 

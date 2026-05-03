@@ -1,0 +1,142 @@
+# §7 v2 — ood: bench-stack EXCL bench-simple AND 10 v1 mech families.
+
+#
+
+# §7 role (2): hardest training condition for the bench-simple OOD test.
+
+# Model sees mechanical complexity (iso parts, BC bench-style mech parts
+
+# minus the v1 mech-OOD 10) but never the atomic op-pattern primitives
+
+# (bench-simple is held out entirely). Tests "does complex mech without
+
+# atomic foundation generalize to atomic op composition?" — user
+
+# hypothesis: 更垃圾 (worse than ood_enhanced).
+
+#
+
+# Total mix weight: 1000, HQ 60 / bench-stack 40.
+
+checkpoints_dir: /ephemeral/checkpoints
+
+data_path: ./data
+
+mode: img
+
+use_text: true
+
+backbone: qwen3_vl
+
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+max_steps: 50000
+
+batch_size: 8
+
+accumulation_steps: 4
+
+learning_rate: 2.0e-4
+
+warmup_steps: 2000
+
+lr_scheduler_type: cosine
+
+weight_decay: 0.01
+
+bf16: true
+
+gradient_checkpointing: true
+
+dataloader_workers: 4
+
+group_by_length: true
+
+log_steps: 50
+
+save_steps: 2000
+
+eval_steps: 1000
+
+online_eval_n_per: 50
+
+max_iou_k: 0  # disabled — saves ~3.7h/config (was 16)
+
+
+
+eval_on_start: true
+
+resume_from_checkpoint: null
+
+run_name: null
+
+seed: 42
+
+max_code_len: 1500
+
+
+# Pool target (cap-only at 300k, bench/iso use train_v4_holdout pkl):
+
+#   bench:  8.3k    iso:   91.7k                    (ours = 100k)
+
+#   t2c_img: 18.3k  t2c_text: 18.3k recode: 163.4k  (HQ = 200k)
+
+sft_mix_weights:
+
+  benchcad:             28
+
+  cad_iso_106:         306
+
+  benchcad_simple:       0
+
+  benchcad_easy:         0
+
+  text2cad_bench_img:   61
+
+  text2cad_bench_text:  61
+
+  recode_bench:        544
+
+# v1 mech holdout — kept so bench/iso filter the 10 mech families out.
+
+holdout_families:
+
+  - tapered_boss
+
+  - taper_pin
+
+  - venturi_tube
+
+  - bucket
+
+  - dome_cap
+
+  - nozzle
+
+  - enclosure
+
+  - waffle_plate
+
+  - bolt
+
+  - duct_elbow
+
+# Bench/iso use the v1 mech-holdout pkl. Bench-simple weight=0 so its pkl
+
+# choice doesn't matter; we point it at the v2 holdout pkl for clarity.
+
+benchcad_train_pkl: train_v4_holdout.pkl
+
+cad_iso_106_train_pkl: train_v4_holdout.pkl
+
+curriculum_phases: null
+
+save_only_model: false
+
+save_total_limit: 4
+
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-ood-v2-50k
+
+hf_upload_private: false
+
+wandb_project: cadrille-sft

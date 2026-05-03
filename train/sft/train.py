@@ -1,6 +1,8 @@
 import os
+import json
 import math
 import pickle
+from pathlib import Path
 import yaml
 
 # transformers 5.6+ requires torch>=2.6 for torch.load() of optimizer.pt during
@@ -407,7 +409,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         max_iou_k=8, max_iou_temperature=1.0, max_iou_every_n_evals=1,
         curriculum_phases=None,
         benchcad_train_pkl=None, cad_iso_106_train_pkl=None,
-        holdout_families=None):
+        benchcad_simple_train_pkl=None,
+        holdout_families=None, holdout_families_v2=None,
+        total_train_dp=None, sft_pool_rows=None):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -538,14 +542,16 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
     # rewrite needed); image+code, no description. Same on-disk layout as
     # recode_bench so we reuse CadRecode20kDataset.
     benchcad_simple_path = os.path.join(data_path, 'benchcad-simple')
-    if os.path.isdir(benchcad_simple_path) and os.path.exists(os.path.join(benchcad_simple_path, 'train.pkl')):
+    benchcad_simple_pkl = benchcad_simple_train_pkl or 'train.pkl'
+    if os.path.isdir(benchcad_simple_path) and os.path.exists(os.path.join(benchcad_simple_path, benchcad_simple_pkl)):
         if mode != 'pc':
             sources['benchcad_simple'] = CadRecode20kDataset(
                 root_dir=benchcad_simple_path,
                 split='train',
                 img_size=268,
                 max_code_len=max_code_len,
-                mode='img')
+                mode='img',
+                pkl_filename=benchcad_simple_pkl)
 
     # Phase F (T8 follow-up): BenchCAD/cad_iso_106 imported via the same
     # data_prep/import_benchcad_simple.py pipeline (different upstream
@@ -598,6 +604,118 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
                 root_dir=text2cad_bench_path,
                 split='train',
                 max_code_len=max_code_len)
+
+    # Optional: cap the unique-row pool to a fixed total dp count,
+    # subsampling each source proportionally to its mix weight. Default off
+    # (None / 0) → use full source sizes.
+    #
+    # Use case: enforce identical "data volume" across configs that mix
+    # different source compositions (§7 v2 5-line ablation), so the only
+    # confound is content not pool-size diversity.
+    #
+    # Pool-size control — TWO modes (sft_pool_rows takes priority):
+    #
+    # 1. Explicit (`sft_pool_rows: {src: N, …}`):
+    #    train.py truncates each source to exactly the listed count. Use
+    #    this when the yaml has been "frozen" with computed counts via
+    #    data_prep/compute_v2_pool_rows.py — gives perfectly reproducible
+    #    per-source row choices across machines.
+    #
+    # 2. Implicit (`total_train_dp: N`, no sft_pool_rows):
+    #    Saturate-and-redistribute: per-source target = weight × N /
+    #    total_weight, capped at availability; deficit redistributed to
+    #    non-saturated sources. Iterative.
+    #
+    # Both modes share the same per-source rng seed
+    # (sha256(f'{base_seed}:{src_name}')[:4]) so smaller target = prefix
+    # of larger for the same source.
+    if sft_pool_rows:
+        # Mode 1 — explicit per-source counts (frozen)
+        if total_train_dp:
+            print('[sft_pool_rows] both sft_pool_rows AND total_train_dp set; '
+                  'sft_pool_rows takes priority (set total_train_dp: null to silence).',
+                  flush=True)
+        import random as _rnd
+        import hashlib as _hl
+        base_seed = int(seed) if isinstance(seed, int) else 42
+        actual_total = sum(sft_pool_rows.values())
+        print(f'[sft_pool_rows] explicit per-source pool: '
+              f'{actual_total:,} rows across {len(sft_pool_rows)} sources',
+              flush=True)
+        for src_name, ds in sources.items():
+            target = int(sft_pool_rows.get(src_name, 0))
+            if target <= 0:
+                continue
+            if not hasattr(ds, 'annotations'):
+                print(f'  {src_name:24s}  (no .annotations attr — skip)')
+                continue
+            cur = len(ds.annotations)
+            if target >= cur:
+                print(f'  {src_name:24s}  {cur:,} kept  (target {target:,} ≥ available)')
+                continue
+            _digest = _hl.sha256(f'{base_seed}:{src_name}'.encode()).digest()
+            src_seed = int.from_bytes(_digest[:4], 'big')
+            _rng = _rnd.Random(src_seed)
+            idx = list(range(cur))
+            _rng.shuffle(idx)
+            idx = sorted(idx[:target])
+            ds.annotations = [ds.annotations[i] for i in idx]
+            if hasattr(ds, 'lengths') and ds.lengths is not None and \
+                    len(ds.lengths) == cur:
+                ds.lengths = [ds.lengths[i] for i in idx]
+            print(f'  {src_name:24s}  {cur:,} → {target:,}  (src_seed={src_seed})')
+    elif total_train_dp:
+        # Removed: saturate-redistribute path. The rounding made targets
+        # off by 1-2 from total_train_dp (CodeRabbit flag), and we've
+        # converged on natural-pool sampling (Plan A) for §7 v2. If you
+        # want a precise pool cap, use explicit `sft_pool_rows:` —
+        # generated once via data_prep/compute_v2_pool_rows.py and
+        # committed for provenance.
+        raise ValueError(
+            'total_train_dp is set without sft_pool_rows. The saturate-'
+            'redistribute path was removed (was inexact and dead code in '
+            'practice). Either drop total_train_dp from your config '
+            '(natural pool, Plan A) or generate explicit sft_pool_rows '
+            'via data_prep/compute_v2_pool_rows.py.'
+        )
+
+    # Defensive filter — remove any row whose uid appears in the eval set.
+    # The 90/10 split at data prep already guarantees disjointness, but we
+    # apply this filter unconditionally so that no eval uid CAN possibly
+    # leak into training, even if a future data-prep script regresses or a
+    # custom pkl is dropped in. Reads data/_eval_uids/v2_eval_uids.json
+    # (regenerate via `uv run python scripts/dump_eval_uids.py`).
+    #
+    # FAIL-CLOSED: any error here aborts the run. This is the last line of
+    # defense for paper provenance — silently continuing without filtering
+    # could leak eval uids into training. If you intentionally want to skip
+    # the filter, delete data/_eval_uids/v2_eval_uids.json (the `exists()`
+    # gate then short-circuits).
+    eval_uids_path = Path('data/_eval_uids/v2_eval_uids.json')
+    if eval_uids_path.exists():
+        _eval_uids: set[str] = set()
+        for _bucket_uids in json.loads(eval_uids_path.read_text()).values():
+            _eval_uids.update(_bucket_uids)
+        for src_name, ds in sources.items():
+            if not hasattr(ds, 'annotations'):
+                continue
+            cur = len(ds.annotations)
+            # Index-aligned filter so ds.lengths stays positionally
+            # consistent with ds.annotations even when dropped rows aren't
+            # at the end (e.g. group_by_length sampler reads ds.lengths[i]
+            # to bucket batches).
+            keep_idx = [i for i, r in enumerate(ds.annotations)
+                        if r.get('uid') not in _eval_uids]
+            drop = cur - len(keep_idx)
+            if drop > 0:
+                ds.annotations = [ds.annotations[i] for i in keep_idx]
+                if hasattr(ds, 'lengths') and ds.lengths is not None \
+                        and len(ds.lengths) == cur:
+                    ds.lengths = [ds.lengths[i] for i in keep_idx]
+                print(f'[eval-leak-filter] {src_name}: dropped {drop} eval-overlap rows '
+                      f'({cur} → {len(keep_idx)})', flush=True)
+        print(f'[eval-leak-filter] {len(_eval_uids):,} eval uids checked across '
+              f'{len(sources)} sources', flush=True)
 
     train_dataset = ConcatDataset(list(sources.values())) if len(sources) > 1 \
         else next(iter(sources.values()))
@@ -813,14 +931,32 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             max_iou_every_n_evals=max_iou_every_n_evals,
         ))
 
-    # Wire holdout_families into online_eval so BC val splits IID/OOD per
-    # eval (separate buckets in wandb: eval/img/BenchCAD val IID/* and
-    # eval/img/BenchCAD val OOD/*).
-    if holdout_families:
-        from train.sft import online_eval as _oe
-        _oe.set_holdout_families(holdout_families)
-        print(f'[online-eval] BC val IID/OOD split enabled, holdout_families='
-              f'{sorted(holdout_families)}', flush=True)
+    # Wire holdout_families into online_eval so BC val + iso val split into
+    # IID/OOD buckets (separate metrics in wandb: eval/img/BenchCAD val IID/*,
+    # eval/img/BenchCAD val OOD/*, eval/img/iso val IID/*, eval/img/iso val
+    # OOD/*). The split is decoupled from train data filtering — even
+    # configs that don't filter the train pkl (baseline/iid) still need the
+    # 4-bucket eval so all §7 v2 lines plot on the same axes.
+    #
+    # Default: read configs/sft/holdout_families.yaml unconditionally so
+    # every config in the chain shows the same 4 val buckets. cfg.holdout_families
+    # (when set) overrides — kept for backward compat.
+    from train.sft import online_eval as _oe
+    eval_holdout = holdout_families
+    if not eval_holdout:
+        try:
+            with open('configs/sft/holdout_families.yaml') as f:
+                eval_holdout = yaml.safe_load(f).get('holdout_families', [])
+        except FileNotFoundError:
+            eval_holdout = []
+    if eval_holdout:
+        _oe.set_holdout_families(eval_holdout)
+        print(f'[online-eval] BC + iso val IID/OOD split enabled, holdout_families='
+              f'{sorted(eval_holdout)}', flush=True)
+    if holdout_families_v2:
+        _oe.set_holdout_families_v2(holdout_families_v2)
+        print(f'[online-eval] bench-simple OOD bucket enabled, holdout_families_v2='
+              f'{sorted(holdout_families_v2)}', flush=True)
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Always save final checkpoint (regardless of save_steps cadence)
@@ -939,9 +1075,26 @@ def main():
     # epoch boundary. First phase MUST start at step 0.
     curriculum_phases     = cfg.get('curriculum_phases', None)
     # v4-holdout: alternate train pkl + holdout family list (consumed by online_eval).
-    benchcad_train_pkl    = cfg.get('benchcad_train_pkl', None)
-    cad_iso_106_train_pkl = cfg.get('cad_iso_106_train_pkl', None)
-    holdout_families      = cfg.get('holdout_families', None)
+    benchcad_train_pkl        = cfg.get('benchcad_train_pkl', None)
+    cad_iso_106_train_pkl     = cfg.get('cad_iso_106_train_pkl', None)
+    benchcad_simple_train_pkl = cfg.get('benchcad_simple_train_pkl', None)
+    holdout_families          = cfg.get('holdout_families', None)
+    # §7 v2: bench-simple op-pattern holdout (separate from v1 mech holdout
+    # so a config can use both — e.g. ood_v2 holds out 10 mech AND 10 simple_op).
+    holdout_families_v2       = cfg.get('holdout_families_v2', None)
+    # Optional: cap the total unique training rows across all sources to a
+    # fixed number, subsampling each source proportionally to its mix weight.
+    # Default None → use full source sizes (back-compat). Set to e.g. 500000
+    # to enforce identical pool-size across configs whose source composition
+    # differs (controls for "data volume" confound in §7 v2 ablation).
+    total_train_dp            = cfg.get('total_train_dp', None)
+    # Explicit per-source row counts. Takes priority over total_train_dp —
+    # when set, train.py truncates each source to exactly the listed count
+    # (using the same per-source rng seed for cross-config row identity).
+    # Generated by data_prep/compute_v2_pool_rows.py from the saturate-
+    # redistribute math, then committed back into the yaml for explicit
+    # provenance ("trained on EXACTLY these rows; here's the recipe").
+    sft_pool_rows             = cfg.get('sft_pool_rows', None)
 
     # Resolve effective batch/accum for name generation (mirrors run() auto logic)
     eff_batch = batch_size or (8 if use_text else 28)
@@ -997,9 +1150,13 @@ def main():
         'max_iou_temperature':    max_iou_temperature,
         'max_iou_every_n_evals':  max_iou_every_n_evals,
         'curriculum_phases':      curriculum_phases,
-        'benchcad_train_pkl':     benchcad_train_pkl,
-        'cad_iso_106_train_pkl':  cad_iso_106_train_pkl,
-        'holdout_families':       holdout_families,
+        'benchcad_train_pkl':         benchcad_train_pkl,
+        'cad_iso_106_train_pkl':      cad_iso_106_train_pkl,
+        'benchcad_simple_train_pkl':  benchcad_simple_train_pkl,
+        'holdout_families':           holdout_families,
+        'holdout_families_v2':        holdout_families_v2,
+        'total_train_dp':             total_train_dp,
+        'sft_pool_rows':              sft_pool_rows,
     }
 
     print(f'Run name : {run_name}')
@@ -1027,7 +1184,11 @@ def main():
         curriculum_phases=curriculum_phases,
         benchcad_train_pkl=benchcad_train_pkl,
         cad_iso_106_train_pkl=cad_iso_106_train_pkl,
-        holdout_families=holdout_families)
+        benchcad_simple_train_pkl=benchcad_simple_train_pkl,
+        holdout_families=holdout_families,
+        holdout_families_v2=holdout_families_v2,
+        total_train_dp=total_train_dp,
+        sft_pool_rows=sft_pool_rows)
 
 
 if __name__ == '__main__':

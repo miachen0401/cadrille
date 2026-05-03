@@ -1,0 +1,81 @@
+# Cadrille RL §8 — pure-IoU control (baseline for ess-iou comparison).
+#
+# Used as the §8 control: identical recipe + ckpt as rl_ess_iou_v1.yaml,
+# only differs in essential_reward_weight=0.0 → reward = IoU only.
+#
+# Compares to:
+#   * rl_ess_iou_v1.yaml — essential_reward_weight=0.2 (ess + IoU shaped)
+#
+# Usage:
+#   set -a; source .env; set +a
+#   uv run python -m train.rl.train --config configs/rl/rl_pure_iou.yaml
+
+checkpoints_dir: /ephemeral/checkpoints
+
+mode: cppo
+# Set after picking the best ckpt via scripts/pick_rl_start_ckpt.py
+checkpoint_path: /ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/checkpoint-30000
+
+# RL training data — bench train_v4_holdout (89 IID families, 10k rows) +
+# DeepCAD/Fusion360 sample. Built by scripts/build_rl_candidate_pool.py.
+data_dir: null
+train_modality: img
+hard_examples_pkl: ./data/_rl/candidates_bench_dc_fu.pkl
+dpo_dataset: null
+
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+# Training (paper recipe + lr scaled for single-A100 batch=4 vs paper 16)
+max_steps: 12000
+lr: 1.0e-6
+
+# Dr. CPPO official settings
+G: 16
+top_N: 4
+eps_high: 0.2
+eps_low: 0.1
+entropy_coef: 0.01
+batch_updates: 3
+batch_size: 4
+max_new_tokens: 400
+rollout_temperature: 1.0
+reward_normalization: false
+reward_workers: 24
+use_buffer: false
+eval_batch_size: 32
+eval_workers: 24
+eval_timeout: 120.0
+sequential_generation: false
+
+# Algorithm
+adv_std_norm: false
+soft_invalid_reward: -1.0
+
+# Essential-ops reward shaping — DISABLED for control run
+essential_reward_weight: 0.0
+essential_reward_mode: fractional
+
+# Curriculum off — already trained on these IID families during SFT
+curriculum: false
+
+# Validation — keep BC val OOD as the headline transfer metric
+# (Reuses online_eval IID/OOD split via holdout_families thread-through;
+# RL eval inherits the same logic from train.rl.eval.)
+val_deepcad_dir:       ./data/deepcad_test_mesh
+val_fusion360_dir:     ./data/fusion360_test_mesh
+val_samples_deepcad:   50
+val_samples_fusion360: 50
+val_modalities:        img
+eval_steps: 200
+
+# Logging & ckpts
+log_steps: 10
+save_steps: 500
+save_total_limit: 6
+
+hf_upload_repo: Hula0401/cadrille-rl-pure-iou
+hf_upload_private: false
+
+wandb_project: cadrille-rl
+wandb_offline: false
+run_name: rl-pure-iou-G16-from-ood_enhance-30k

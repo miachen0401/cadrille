@@ -1,0 +1,65 @@
+# §7 v2 — iid_enhanced: bench + iso (FULL, no holdout) + simple. NO easy.
+#
+# §7 role (5): IID upper bound with atomic op augmentation. Full mech
+# data + atomic op patterns (44 of 54 simple fams kept). Compared to
+# ood_enhanced_v2 (same weights) the only difference is bench/iso use
+# full train.pkl. Quantifies "what does the 10 mech holdout cost when
+# atomic op data is also present?"
+#
+# Total mix weight: 1000, HQ 60 / bench-stack 40.
+# bench/iso use FULL train.pkl; simple uses v2 holdout pkl (10 simple_op out).
+
+checkpoints_dir: /ephemeral/checkpoints
+data_path: ./data
+mode: img
+use_text: true
+backbone: qwen3_vl
+base_model: Qwen/Qwen3-VL-2B-Instruct
+
+max_steps: 50000
+batch_size: 8
+accumulation_steps: 4
+learning_rate: 2.0e-4
+warmup_steps: 2000
+lr_scheduler_type: cosine
+weight_decay: 0.01
+bf16: true
+gradient_checkpointing: true
+dataloader_workers: 4
+group_by_length: true
+
+log_steps: 50
+save_steps: 2000
+eval_steps: 1000
+online_eval_n_per: 50
+max_iou_k: 0  # disabled — saves ~3.7h/config (was 16)
+eval_on_start: true
+
+resume_from_checkpoint: null
+run_name: null
+seed: 42
+max_code_len: 1500
+
+# Pool target (cap at 300k, bench/iso FULL, simple v2 holdout):
+#   bench: 10.0k   iso: 110.0k   simple: 60.9k    (ours = 100k cap → 100k)
+#   t2c_img: 18.3k t2c_text: 18.3k recode: 163.4k (HQ = 200k)
+sft_mix_weights:
+  benchcad:             21
+  cad_iso_106:         233
+  benchcad_simple:      79
+  benchcad_easy:         0
+  text2cad_bench_img:   61
+  text2cad_bench_text:  61
+  recode_bench:        545
+
+# No mech holdout. simple uses v2 holdout pkl (10 simple_op patterns out).
+benchcad_simple_train_pkl: train_v2_holdout.pkl
+
+curriculum_phases: null
+
+save_only_model: false
+save_total_limit: 4
+
+hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-iid-enhanced-v2-50k
+hf_upload_private: false
+wandb_project: cadrille-sft

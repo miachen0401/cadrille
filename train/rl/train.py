@@ -46,7 +46,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoProcessor
 
-from common.model import Cadrille
+from common.model import Cadrille, get_cadrille_class
 from train.rl.config import load_yaml, resolve_args
 from common.meshio import MeshDataset
 from train.rl.dataset import RLDataset, DPODataset
@@ -138,8 +138,8 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     exactly why reward = -10 without waiting for training to get going.
     """
     import subprocess as _sp
-    from cadrille import collate
-    from rl.reward import _get_worker_path
+    from common.model import collate
+    from common.metrics import _get_worker_path
     import json as _json
 
     print(f'\n{"="*60}')
@@ -350,7 +350,8 @@ def train(args, cfg_to_save=None):
         # DDP: load onto the local GPU explicitly; device_map='auto' would
         # spread layers across all visible GPUs (model parallelism), which is
         # incompatible with DDP.
-        model = Cadrille.from_pretrained(
+        cadrille_cls = get_cadrille_class(getattr(args, 'backbone', 'qwen2_vl'))
+        model = cadrille_cls.from_pretrained(
             args.checkpoint_path,
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
@@ -360,7 +361,8 @@ def train(args, cfg_to_save=None):
         if rank == 0:
             print(f'DDP: {world_size} ranks, local_rank={local_rank}')
     else:
-        model = Cadrille.from_pretrained(
+        cadrille_cls = get_cadrille_class(getattr(args, 'backbone', 'qwen2_vl'))
+        model = cadrille_cls.from_pretrained(
             args.checkpoint_path,
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
@@ -450,7 +452,7 @@ def train(args, cfg_to_save=None):
         except Exception:
             _total_gb = 0
         if _total_gb >= 32:
-            from rl.reward import init_reward_pool
+            from common.metrics import init_reward_pool
             n_rw = getattr(args, 'reward_workers', 8)
             init_reward_pool(n_workers=n_rw)
             print(f'Reward pool warmed ({n_rw} workers, RAM={_total_gb:.0f} GB)', flush=True)

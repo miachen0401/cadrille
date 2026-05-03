@@ -193,7 +193,7 @@ def compute_policy_entropy(log_probs: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 _GEN_INPUT_KEYS = ('input_ids', 'attention_mask', 'point_clouds', 'is_pc', 'is_img',
-                   'pixel_values_videos', 'video_grid_thw')
+                   'pixel_values_videos', 'video_grid_thw', 'mm_token_type_ids')
 
 
 def model_forward(model, full_ids, attention_mask, g_batch, device):
@@ -207,6 +207,20 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
     non-null; _update_causal_mask then checks attention_mask[:, -1] and
     raises ValueError if any completion ended before max_len (right-padding).
     """
+    # Build mm_token_type_ids for full sequence (prompt + completion).
+    # Qwen3-VL needs this for M-RoPE; processor supplies it for the prompt;
+    # completion tokens are pure text → type 0.
+    mm_token_type_ids = g_batch.get('mm_token_type_ids')
+    if mm_token_type_ids is not None:
+        prompt_mm = mm_token_type_ids.to(device)
+        full_len = full_ids.shape[1]
+        prompt_len = prompt_mm.shape[1]
+        if full_len > prompt_len:
+            pad = torch.zeros(prompt_mm.shape[0], full_len - prompt_len,
+                              dtype=prompt_mm.dtype, device=device)
+            mm_token_type_ids = torch.cat([prompt_mm, pad], dim=1)
+        else:
+            mm_token_type_ids = prompt_mm[:, :full_len]
     return model(
         input_ids=full_ids.to(device),
         attention_mask=attention_mask.to(device),
@@ -221,6 +235,7 @@ def model_forward(model, full_ids, attention_mask, g_batch, device):
         video_grid_thw=(
             g_batch['video_grid_thw'].to(device)
             if g_batch.get('video_grid_thw') is not None else None),
+        mm_token_type_ids=mm_token_type_ids,
     )
 
 
@@ -434,6 +449,7 @@ def cppo_step(model, optimizer, items, processor, args,
     # ------------------------------------------------------------------
     all_code_strings: list = []
     all_gt_paths:     list = []
+    all_families:     list = []   # per-row family hint (None when unknown)
     mb_gen_data:      list = []   # (mb_batch, mb_gen_ids, prompt_len, M)
 
     t_gen = time.perf_counter()
@@ -452,8 +468,10 @@ def cppo_step(model, optimizer, items, processor, args,
             for i in range(M * G)
         ]
         mb_gt = [it['gt_mesh_path'] for it in mb_items for _ in range(G)]
+        mb_fams = [it.get('family') for it in mb_items for _ in range(G)]
         all_code_strings.extend(mb_codes)
         all_gt_paths.extend(mb_gt)
+        all_families.extend(mb_fams)
         mb_gen_data.append((mb_batch, mb_gen_ids, prompt_len, M))
     gen_seconds = time.perf_counter() - t_gen
 
@@ -465,11 +483,46 @@ def cppo_step(model, optimizer, items, processor, args,
         total_gen_len += _mask.sum().item()
     avg_gen_len = total_gen_len / max(1, B * G)
 
+    # Essential-ops reward shaping config (default 0.0 = pure-IoU, back-compat).
+    ess_w     = float(getattr(args, 'essential_reward_weight', 0.0))
+    ess_mode  = str(getattr(args, 'essential_reward_mode', 'fractional'))
+    pass_fams = all_families if ess_w > 0.0 else None
+
     t_rew = time.perf_counter()
-    all_rewards = compute_rewards_parallel(all_code_strings, all_gt_paths,
-                                           workers=args.reward_workers,
-                                           soft_invalid=float(getattr(args, 'soft_invalid_reward', -1.0)))
+    raw_pairs = compute_rewards_parallel(
+        all_code_strings, all_gt_paths,
+        workers=args.reward_workers,
+        soft_invalid=float(getattr(args, 'soft_invalid_reward', -1.0)),
+        families=pass_fams, ess_mode=ess_mode, return_pairs=True)
     rew_seconds = time.perf_counter() - t_rew
+
+    # Compose final scalar reward: when ess_w > 0 AND a row's family has a
+    # spec (ess is not None), reward = w*ess + (1-w)*iou. Otherwise pure IoU.
+    # Track ess coverage + means for diagnostics.
+    all_rewards: list = []
+    _iou_only_count = 0
+    _ess_count      = 0
+    _ess_sum        = 0.0
+    _iou_for_ess_sum = 0.0
+    for iou, ess in raw_pairs:
+        if ess_w > 0.0 and ess is not None:
+            r = ess_w * float(ess) + (1.0 - ess_w) * float(iou)
+            _ess_count += 1
+            _ess_sum += float(ess)
+            _iou_for_ess_sum += float(iou)
+        else:
+            r = float(iou)
+            _iou_only_count += 1
+        all_rewards.append(r)
+
+    if ess_w > 0.0:
+        _ess_cov = _ess_count / max(1, _ess_count + _iou_only_count)
+        _ess_mean = (_ess_sum / max(1, _ess_count)) if _ess_count else float('nan')
+        _iou_mean_ess_rows = (_iou_for_ess_sum / max(1, _ess_count)) if _ess_count else float('nan')
+        print(f'[reward] ess_w={ess_w:.2f} mode={ess_mode}  '
+              f'ess_coverage={_ess_cov:.2f} ({_ess_count}/{_ess_count + _iou_only_count})  '
+              f'ess_mean={_ess_mean:.3f}  iou_mean(ess_rows)={_iou_mean_ess_rows:.3f}',
+              flush=True)
 
     # ------------------------------------------------------------------
     # Build per-mini-batch PPO tensors: advantages, old_lp, masks.
@@ -1027,7 +1080,9 @@ def train_cppo(model, optimizer, dataset, processor,
                 if 'INTERNAL ASSERT FAILED' in msg or 'handles_.at' in msg:
                     print(f'[step {step}] FATAL CUDA allocator error — restarting from last checkpoint is required.\n{e}')
                     raise
-                print(f'[step {step}] cppo_step error: {e}')
+                import traceback as _tb
+                _tb.print_exc()
+                print(f'[step {step}] cppo_step error: {e}', flush=True)
                 torch.cuda.empty_cache()
                 continue
 
