@@ -25,7 +25,7 @@ if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
     unset _line
 fi
 
-START_FROM="${START_FROM:-baseline_v2}"
+START_FROM="${START_FROM:-ood_enhanced_v2}"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%S)] $*"; }
 
@@ -45,11 +45,11 @@ log "pre-flight ok"
 # Use a single space between label and config — multi-space breaks the
 # `${entry#* }` parameter expansion below.
 RUNS=(
-    "baseline_v2 configs/sft/baseline_v2.yaml"
-    "iid_enhanced_v2 configs/sft/iid_enhanced_v2.yaml"
-    "ood_v2 configs/sft/ood_v2.yaml"
     "ood_enhanced_v2 configs/sft/ood_enhanced_v2.yaml"
+    "ood_v2 configs/sft/ood_v2.yaml"
+    "iid_enhanced_v2 configs/sft/iid_enhanced_v2.yaml"
     "iid_v2 configs/sft/iid_v2.yaml"
+    "baseline_v2 configs/sft/baseline_v2.yaml"
 )
 
 skip=true
