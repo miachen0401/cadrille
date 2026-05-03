@@ -32,7 +32,7 @@ if [[ -z "${DISCORD_WEBHOOK_URL:-}" ]]; then
     unset _line
 fi
 
-START_FROM="${START_FROM:-ood_enhanced_v2}"
+START_FROM="${START_FROM:-iid_enhanced_v2}"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%S)] $*"; }
 
