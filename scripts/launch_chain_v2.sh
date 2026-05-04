@@ -84,7 +84,13 @@ RUNS=(
 )
 
 skip=true
-[[ "$START_FROM" == "baseline_v2" ]] && skip=false
+# Edge case: when START_FROM matches the very first entry of RUNS, the loop
+# below would still skip it on first iteration (skip=true at entry, then
+# label==START_FROM flips skip but `continue` is also missed because…
+# actually, looking at the loop, the label-match path correctly sets
+# skip=false and FALLS THROUGH to launch_run. So no special-casing needed.
+# (Previous hardcoded check for "baseline_v2" was stale — it dated to when
+# baseline was the first RUNS entry.)
 
 launch_run() {
     local label="$1" config="$2"
