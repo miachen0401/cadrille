@@ -160,61 +160,61 @@ def write_csv(by_config: dict[str, list[dict]], path: Path) -> None:
                 w.writerow({'config': cfg, **r})
 
 
-def plot_metric(by_config: dict[str, list[dict]], metric: str, title: str,
-                out_path: Path) -> int:
-    """Plot one metric (iou or ess) as a 2×2 panel of bucket curves."""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
-    axes = axes.flatten()
+def plot_single_panel(by_config: dict[str, list[dict]],
+                      bucket: str, metric: str,
+                      title: str, ylabel: str,
+                      out_path: Path) -> int:
+    """Single-panel fig: one bucket × one metric, lines per config.
+
+    Matches the §7 paper figure layout (each metric/bucket gets its own fig).
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
     n_lines = 0
-    for ax, bucket in zip(axes, BUCKETS):
-        for cfg, rows in by_config.items():
-            if not rows:
-                continue
-            xs = [r['step'] for r in rows if r['bucket'] == bucket]
-            ys = [r[metric] for r in rows if r['bucket'] == bucket]
-            if not xs:
-                continue
-            ax.plot(xs, ys, '-o', color=COLORS[cfg], label=cfg, markersize=3,
-                    linewidth=1.5)
-            n_lines += 1
-        ax.set_title(bucket, fontsize=10)
-        ax.set_xlabel('step')
-        ax.set_ylabel(metric)
-        ax.grid(alpha=0.3)
-        ax.set_ylim(-0.02, 1.02)
-    # Single legend
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc='upper center', ncol=5,
-                   bbox_to_anchor=(0.5, 1.02), fontsize=9)
-    fig.suptitle(title, fontsize=12, y=1.05)
+    for cfg, rows in by_config.items():
+        if not rows:
+            continue
+        xs = [r['step'] for r in rows if r['bucket'] == bucket]
+        ys = [r[metric] for r in rows if r['bucket'] == bucket]
+        if not xs:
+            continue
+        ax.plot(xs, ys, '-o', color=COLORS[cfg], label=cfg, markersize=4,
+                linewidth=2)
+        n_lines += 1
+    ax.set_xlabel('training step', fontsize=11)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.set_title(title, fontsize=12)
+    ax.grid(alpha=0.3)
+    ax.set_ylim(-0.02, 1.02)
+    if n_lines > 0:
+        ax.legend(loc='best', fontsize=9, framealpha=0.9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
     return n_lines
 
 
-def post_to_discord(iou_path: Path, ess_path: Path,
+def post_to_discord(fig_paths: list[Path],
                     by_config: dict[str, list[dict]]) -> None:
     url = os.environ.get('DISCORD_WEBHOOK_URL')
     if not url:
         print('DISCORD_WEBHOOK_URL not set — skipping post')
         return
-    # Build the latest-step summary
-    summary_lines = ['📊 **§7 v2 fig — auto refresh**', '', '```']
+    # Build the latest-step summary on BC val (paper-headline source)
+    summary_lines = ['📊 **§7 v2 — IID/OOD × IoU/ess (BC val)**', '', '```']
+    summary_lines.append(f'{"config":<18}{"step":>6}  {"IID IoU":>8}{"IID ess":>9}  {"OOD IoU":>8}{"OOD ess":>9}')
     for cfg in CONFIGS:
         rows = by_config.get(cfg, [])
         if not rows:
-            summary_lines.append(f'{cfg:<22} no data')
+            summary_lines.append(f'{cfg:<18}{"—":>6}    no data')
             continue
         latest = max(r['step'] for r in rows)
         latest_rows = [r for r in rows if r['step'] == latest]
+        bc_iid = next((r for r in latest_rows if r['bucket'] == 'BenchCAD val IID'), None)
         bc_ood = next((r for r in latest_rows if r['bucket'] == 'BenchCAD val OOD'), None)
-        iso_ood = next((r for r in latest_rows if r['bucket'] == 'iso val OOD'), None)
-        if bc_ood and iso_ood:
+        if bc_iid and bc_ood:
             summary_lines.append(
-                f'{cfg:<22} step={latest:>5}  BC_OOD IoU={bc_ood["iou"]:.3f}  '
-                f'iso_OOD IoU={iso_ood["iou"]:.3f}  ess={bc_ood["ess"]:.3f}/{iso_ood["ess"]:.3f}'
+                f'{cfg:<18}{latest:>6}  {bc_iid["iou"]:>8.3f}{bc_iid["ess"]:>9.3f}'
+                f'  {bc_ood["iou"]:>8.3f}{bc_ood["ess"]:>9.3f}'
             )
     summary_lines.append('```')
     content = '\n'.join(summary_lines)
@@ -226,17 +226,14 @@ def post_to_discord(iou_path: Path, ess_path: Path,
         if isinstance(s, str):
             s = s.encode()
         body.write(s)
-    # JSON payload (content)
     _write(f'--{boundary}\r\n')
     _write('Content-Disposition: form-data; name="payload_json"\r\n')
     _write('Content-Type: application/json\r\n\r\n')
     _write(json.dumps({'content': content}))
     _write('\r\n')
-    # Attachment 1: IoU panel
-    for i, (path, label) in enumerate([(iou_path, 'fig7_iou.png'),
-                                        (ess_path, 'fig7_ess.png')]):
+    for i, path in enumerate(fig_paths):
         _write(f'--{boundary}\r\n')
-        _write(f'Content-Disposition: form-data; name="files[{i}]"; filename="{label}"\r\n')
+        _write(f'Content-Disposition: form-data; name="files[{i}]"; filename="{path.name}"\r\n')
         _write('Content-Type: image/png\r\n\r\n')
         _write(path.read_bytes())
         _write('\r\n')
@@ -275,22 +272,31 @@ def main() -> None:
         print(f'  {cfg:<22} {len(rows)} rows, steps={steps[0]}..{steps[-1]} ({len(steps)} ticks)')
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    iou_path = args.out_dir / 'fig7_v2_iou.png'
-    ess_path = args.out_dir / 'fig7_v2_ess.png'
     csv_path = args.out_dir / 'fig7_v2_metrics.csv'
-
-    n_iou_lines = plot_metric(by_config, 'iou',
-                              'IoU vs step (greedy, n=50 per bucket)', iou_path)
-    n_ess_lines = plot_metric(by_config, 'ess',
-                              'ess_pass vs step (n=50 per bucket, OOD = held-out 10 mech fams)',
-                              ess_path)
     write_csv(by_config, csv_path)
-    print(f'\n→ {iou_path}  ({n_iou_lines} lines)')
-    print(f'→ {ess_path}  ({n_ess_lines} lines)')
-    print(f'→ {csv_path}')
+    print(f'\n→ {csv_path}')
+
+    # 4 single-panel figs (paper layout): IID/OOD × IoU/ess on BC val.
+    # iso/DC/Fu still in the CSV for follow-up analysis.
+    panels = [
+        ('BenchCAD val IID', 'iou', 'IID IoU (BenchCAD val IID, n=50)',
+         'IoU (greedy, mean over 50)', args.out_dir / 'fig7_iid_iou.png'),
+        ('BenchCAD val IID', 'ess', 'IID ess_ops (BenchCAD val IID, n=50)',
+         'essential_pass rate', args.out_dir / 'fig7_iid_ess.png'),
+        ('BenchCAD val OOD', 'iou', 'OOD IoU (BenchCAD val OOD, 10 held-out mech families)',
+         'IoU (greedy, mean over 50)', args.out_dir / 'fig7_ood_iou.png'),
+        ('BenchCAD val OOD', 'ess', 'OOD ess_ops (BenchCAD val OOD, 10 held-out mech families)',
+         'essential_pass rate', args.out_dir / 'fig7_ood_ess.png'),
+    ]
+    fig_paths: list[Path] = []
+    for bucket, metric, title, ylabel, path in panels:
+        n = plot_single_panel(by_config, bucket, metric, title, ylabel, path)
+        print(f'→ {path}  ({n} lines)')
+        if n > 0:
+            fig_paths.append(path)
 
     if args.post:
-        post_to_discord(iou_path, ess_path, by_config)
+        post_to_discord(fig_paths, by_config)
 
 
 if __name__ == '__main__':
