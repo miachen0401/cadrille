@@ -68,6 +68,10 @@ def resolve_args(args, cfg: dict) -> dict:
     args.val_samples_deepcad   = cfg.get('val_samples_deepcad',
                                          _legacy_samples if _legacy_samples else 25)
     args.val_samples_fusion360 = cfg.get('val_samples_fusion360', 25)
+    # Optional BenchCAD val for IID/OOD breakdown (per-row family + ess_score).
+    # When set, eval logs eval/img/bc_{iid,ood}/{IoU mean,ess_mean,ess_pass_rate,...}.
+    args.val_benchcad_pkl      = cfg.get('val_benchcad_pkl', None)
+    args.val_samples_benchcad  = cfg.get('val_samples_benchcad', 200)
     args.val_modalities        = cfg.get('val_modalities', 'pc')
     args.eval_steps            = cfg.get('eval_steps', 500)
 

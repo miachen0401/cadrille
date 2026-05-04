@@ -41,6 +41,7 @@ if _env.exists():
 from common.model import collate, get_cadrille_class  # noqa: E402
 from common.meshio import render_img  # noqa: E402
 from common.metrics import compute_metrics  # noqa: E402
+from common.essential_ops import find_ops, essential_score  # noqa: E402
 
 
 def _detect_backbone_from_config(ckpt_dir: str) -> str:
@@ -141,11 +142,104 @@ def _generate_one_split(model, processor, split_dir: Path, n_samples: int,
     fout.close()
 
 
+@torch.inference_mode()
+def _generate_benchcad(model, processor, val_pkl: Path, n_samples: int,
+                       batch_size: int, max_new_tokens: int, seed: int,
+                       out_csv: Path) -> None:
+    """Eval benchcad val.pkl items: per-row generates code, computes IoU + ess_score.
+
+    Output CSV columns: file_name, family, iou, ess_score
+    Parent (`train/rl/eval.py`) splits rows by `family ∈ HOLDOUT_FAMILIES`
+    into IID vs OOD buckets and aggregates per bucket.
+    """
+    import pickle
+    import random as _r
+    rows = pickle.load(open(val_pkl, 'rb'))
+    rng = _r.Random(seed)
+    rng.shuffle(rows)
+    rows = rows[:n_samples]
+    if not rows:
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        out_csv.write_text('file_name,family,iou,ess_score\n')
+        return
+
+    bench_root = Path(val_pkl).parent
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    fout = out_csv.open('w', newline='')
+    writer = csv.writer(fout)
+    writer.writerow(['file_name', 'family', 'iou', 'ess_score'])
+
+    device = next(model.parameters()).device
+    eos_id = model.config.eos_token_id
+    img_token_id = getattr(model.config, 'image_token_id', None)
+    vid_token_id = getattr(model.config, 'video_token_id', None)
+    bad_words = [[t] for t in (img_token_id, vid_token_id) if t is not None]
+
+    for batch_start in range(0, len(rows), batch_size):
+        chunk = rows[batch_start: batch_start + batch_size]
+        items = []
+        for r in chunk:
+            stl_path = bench_root / r['mesh_path']
+            png_path = bench_root / r['png_path']
+            try:
+                if png_path.exists():
+                    img_item = {'video': [Image.open(png_path).convert('RGB')]}
+                else:
+                    img_item = render_img(str(stl_path))
+            except Exception as e:
+                print(f'[eval_img/bc] render failed {r["uid"]}: {e}', flush=True)
+                writer.writerow([r['uid'], r.get('family', ''), '', ''])
+                continue
+            items.append({
+                'video':       img_item['video'],
+                'description': 'Generate cadquery code',
+                'file_name':   r['uid'],
+                '_stl':        str(stl_path),
+                '_family':     r.get('family', ''),
+            })
+        if not items:
+            continue
+        batch = collate(items, processor, n_points=256, eval=True)
+        gen_kwargs = dict(
+            input_ids=batch['input_ids'].to(device),
+            attention_mask=batch['attention_mask'].to(device),
+            point_clouds=batch['point_clouds'].to(device),
+            is_pc=batch['is_pc'].to(device),
+            is_img=batch['is_img'].to(device),
+            max_new_tokens=max_new_tokens,
+            do_sample=False, temperature=None, top_p=None, top_k=None,
+            eos_token_id=eos_id, bad_words_ids=(bad_words or None),
+        )
+        for k in ('pixel_values_videos', 'video_grid_thw', 'mm_token_type_ids'):
+            v = batch.get(k)
+            if v is not None:
+                gen_kwargs[k] = v.to(device)
+        if hasattr(model, 'rope_deltas'):
+            model.rope_deltas = None
+        out_ids = model.generate(**gen_kwargs)
+        prompt_len = batch['input_ids'].shape[1]
+        for i, item in enumerate(items):
+            code = processor.decode(out_ids[i, prompt_len:], skip_special_tokens=True)
+            iou, _cd = compute_metrics(code, item['_stl'], timeout=60)
+            iou_w = '' if iou is None else float(iou)
+            # ess_score: regex-based, runs on raw code (works even when CQ exec fails)
+            ops = find_ops(code)
+            ess = essential_score(item['_family'], ops) if item['_family'] else None
+            ess_w = '' if ess is None else float(ess)
+            writer.writerow([item['file_name'], item['_family'], iou_w, ess_w])
+            fout.flush()
+    fout.close()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--checkpoint',     required=True, help='Cadrille ckpt dir')
-    ap.add_argument('--splits',         required=True, nargs='+',
-                    help='Each arg: short:dir (e.g. deepcad:/path/to/dir)')
+    ap.add_argument('--splits',         nargs='+', default=None,
+                    help='Each arg: short:dir (e.g. deepcad:/path/to/dir). '
+                         'Mutually exclusive with --benchcad-val-pkl.')
+    ap.add_argument('--benchcad-val-pkl', default=None,
+                    help='If set, eval benchcad val.pkl with per-row family + ess_score. '
+                         'Output CSV at <out-dir>/benchcad/results.csv.')
     ap.add_argument('--n-samples',      type=int, default=50)
     ap.add_argument('--out-dir',        required=True)
     ap.add_argument('--batch-size',     type=int, default=8)
@@ -154,6 +248,8 @@ def main() -> None:
     ap.add_argument('--backbone',       default=None,
                     help='Auto-detected from ckpt config.json if omitted.')
     args = ap.parse_args()
+    if not args.splits and not args.benchcad_val_pkl:
+        ap.error('one of --splits or --benchcad-val-pkl is required')
 
     backbone = args.backbone or _detect_backbone_from_config(args.checkpoint)
     base_model = _base_model_for(backbone)
@@ -172,18 +268,27 @@ def main() -> None:
     ).eval().to('cuda')
 
     out_root = Path(args.out_dir)
-    for spec in args.splits:
-        if ':' not in spec:
-            print(f'[eval_img] bad split spec {spec!r}, expected short:dir', flush=True)
-            continue
-        short, gt_dir = spec.split(':', 1)
-        out_csv = out_root / short / 'results.csv'
-        print(f'[eval_img] {short} ({args.n_samples} samples) → {out_csv}', flush=True)
-        _generate_one_split(
-            model, processor, Path(gt_dir), args.n_samples,
+    if args.benchcad_val_pkl:
+        out_csv = out_root / 'benchcad' / 'results.csv'
+        print(f'[eval_img/bc] benchcad val ({args.n_samples} items) → {out_csv}', flush=True)
+        _generate_benchcad(
+            model, processor, Path(args.benchcad_val_pkl), args.n_samples,
             args.batch_size, args.max_new_tokens, args.seed,
             out_csv,
         )
+    else:
+        for spec in args.splits:
+            if ':' not in spec:
+                print(f'[eval_img] bad split spec {spec!r}, expected short:dir', flush=True)
+                continue
+            short, gt_dir = spec.split(':', 1)
+            out_csv = out_root / short / 'results.csv'
+            print(f'[eval_img] {short} ({args.n_samples} samples) → {out_csv}', flush=True)
+            _generate_one_split(
+                model, processor, Path(gt_dir), args.n_samples,
+                args.batch_size, args.max_new_tokens, args.seed,
+                out_csv,
+            )
 
     del model
     torch.cuda.empty_cache()

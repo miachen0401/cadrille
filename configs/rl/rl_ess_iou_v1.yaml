@@ -64,11 +64,14 @@ essential_reward_mode: fractional
 
 curriculum: false
 
-# Validation — DC50 + Fu50 (paper-style); val_modalities=img to match training
+# Validation — DC50 + Fu50 + benchcad val IID/OOD (paper + IID/OOD breakdown).
+# val_benchcad_pkl: per-row family + ess_score; eval logs eval/img/bc_{iid,ood}/*
 val_deepcad_dir:       ./data/deepcad_test_mesh
 val_fusion360_dir:     ./data/fusion360_test_mesh
 val_samples_deepcad:   50
 val_samples_fusion360: 50
+val_benchcad_pkl:      ./data/benchcad/val.pkl
+val_samples_benchcad:  200            # bench val has ~1815 rows; 200 ≈ ~180 IID + ~20 OOD
 val_modalities:        img
 eval_steps: 30                    # paper uses 5 — that's overkill; 30 ≈ every ~half-epoch
 
