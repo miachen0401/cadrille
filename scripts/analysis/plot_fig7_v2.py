@@ -110,21 +110,23 @@ def _current_chain_start() -> str | None:
 
 
 def collect_all(chain_start_ts: str | None = None) -> dict[str, list[dict]]:
-    """Walk logs/, pick up all per-config rows from the CURRENT chain only.
+    """Walk logs/, pick up all per-config rows.
 
-    Filter logs by filename timestamp >= chain_start_ts (defaults to the
-    last `=== chain start` line in logs/launch_chain_v2.log). Skips
-    failed-start logs that contain a step=0 eval but never moved past it.
+    For each config, includes:
+      * the LATEST log that has substantive eval data (>4 rows, post-step-0)
+      * earlier logs with the same config name that have substantive data
+        (handles resumed runs and chain-run-across-sessions)
 
-    Special case: ood_enhanced_v2 may resume from an earlier ckpt (its
-    config sets resume_from_checkpoint), so we always include ALL its
-    logs from the last 24h to keep step 0..current contiguous on the plot.
+    Excludes failed-start logs (only step=0, ≤ 4 rows) — those are aborted
+    runs that never moved past eval-on-start.
+
+    `chain_start_ts` is no longer used as a hard cutoff (was too aggressive
+    — would drop completed prior-chain runs whose logs predate the current
+    chain start). The 'failed-start' filter alone now handles noise.
 
     When multiple logs exist for the same config, dedupe by (step, bucket)
     — later log wins (handles resume overlap cleanly).
     """
-    if chain_start_ts is None:
-        chain_start_ts = _current_chain_start()
     by_config: dict[str, dict[tuple[int, str], dict]] = {c: {} for c in CONFIGS}
     for cfg in CONFIGS:
         log_files = sorted(LOGS_DIR.glob(f'{cfg}_*.log'))
@@ -132,14 +134,11 @@ def collect_all(chain_start_ts: str | None = None) -> dict[str, list[dict]]:
             m = _LOG_FILENAME_RX.search(lf.name)
             if not m:
                 continue
-            file_ts = m.group('ts')
-            # Skip logs from earlier chain runs unless this is the resumed
-            # config (currently ood_enhanced_v2 — see config yaml).
-            if chain_start_ts and file_ts < chain_start_ts and cfg != 'ood_enhanced_v2':
-                continue
             rows = parse_log(lf)
             # Skip failed-start logs (only step=0, never advanced)
             if {r['step'] for r in rows} == {0} and len(rows) <= 4:
+                continue
+            if not rows:
                 continue
             for r in rows:
                 key = (r['step'], r['bucket'])
