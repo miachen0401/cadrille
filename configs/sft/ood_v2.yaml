@@ -30,7 +30,7 @@ backbone: qwen3_vl
 
 base_model: Qwen/Qwen3-VL-2B-Instruct
 
-max_steps: 50000
+max_steps: 20000  # was 50000 — match other v2 configs (friend HPC may run 50k separately)
 
 batch_size: 8
 
