@@ -1,0 +1,41 @@
+# §7 robustness experiment — v5 holdout (10 NEW mech families).
+#
+# Replicates the v1 holdout selection methodology with a different random
+# sample, to verify that the OOD plateau (ess_pass ≈ 0.30-0.45) on the
+# original 10 mech families is robust — i.e. not specific to that particular
+# 10, but a property of the holdout regime itself.
+#
+# Selection (matches data_prep/holdout_30_families.txt criterion):
+#   1. v3 baseline iou_mean >= 0.5 (family demonstrably learnable when seen)
+#   2. n >= 5 in eval pool
+#   3. Excluded: current 10 holdout families (bolt, bucket, dome_cap, ...)
+#   4. Excluded: 3 families v3 itself fails (helical_gear, sprocket, twisted_drill)
+#   5. From the 60-candidate pool, random.seed(42) → sample(10).
+#
+# Holdout span (v3 IoU range 0.57 - 0.96, mean 0.85):
+#   - capsule         (revolve / loft body, ax-symmetric, smooth)
+#   - clevis_pin      (small fastener, simple geometry, cross-hole)
+#   - cruciform       (4-arm structural, intersecting rectangles)
+#   - dog_bone        (revolve + chamfer, dumbbell)
+#   - heat_sink       (rib_array, hardest in this set)
+#   - i_beam          (extruded I-section, structural)
+#   - locator_block   (rect block + features)
+#   - rivet           (axisymmetric fastener, head + shank)
+#   - stepped_shaft   (axisymmetric stepped diameter)
+#   - vented_panel    (rarray of slots)
+#
+# Differs from v1 holdout (bolt, bucket, dome_cap, duct_elbow, enclosure,
+# nozzle, taper_pin, tapered_boss, venturi_tube, waffle_plate) in op-class
+# emphasis: v1 leans heavy mech/管/壳; v5 leans fastener/bracket/structural.
+
+holdout_families_v5:
+  - capsule
+  - clevis_pin
+  - cruciform
+  - dog_bone
+  - heat_sink
+  - i_beam
+  - locator_block
+  - rivet
+  - stepped_shaft
+  - vented_panel

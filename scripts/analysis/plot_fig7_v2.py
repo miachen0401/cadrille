@@ -35,16 +35,23 @@ LOGS_DIR = REPO / 'logs'
 
 CONFIGS = [
     'ood_enhanced_v2',
-    'ood_v2',
-    'iid_enhanced_v2',
+    # ood_v2 was a partial re-run on this HPC (stopped at step 2k); excluded
+    # from the paper figure since the friend HPC owns the canonical ood line.
+    # 'ood_v2',
+    # iid_enhanced_v2 skipped per option A (redundant with iid_v2 by symmetry).
+    # 'iid_enhanced_v2',
     'iid_v2',
     'baseline_v2',
 ]
+# Display labels for the legend (paper-friendly names).
+LABELS = {
+    'iid_v2':          'iid',
+    'ood_enhanced_v2': 'ood',     # 'ood' in paper === ood_enhanced_v2 (with simple)
+    'baseline_v2':     'baseline',
+}
 COLORS = {
-    'ood_enhanced_v2': '#d62728',  # red
-    'ood_v2':          '#ff7f0e',  # orange
-    'iid_enhanced_v2': '#1f77b4',  # blue
     'iid_v2':          '#2ca02c',  # green
+    'ood_enhanced_v2': '#d62728',  # red
     'baseline_v2':     '#7f7f7f',  # gray
 }
 BUCKETS = ['BenchCAD val IID', 'BenchCAD val OOD', 'iso val IID', 'iso val OOD']
@@ -167,26 +174,30 @@ def plot_single_panel(by_config: dict[str, list[dict]],
     """Single-panel fig: one bucket × one metric, lines per config.
 
     Matches the §7 paper figure layout (each metric/bucket gets its own fig).
+    Paper-style emphasis: thick lines, large fonts, simple labels.
     """
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(9, 6))
     n_lines = 0
-    for cfg, rows in by_config.items():
-        if not rows:
+    # Plot in order of CONFIGS so legend ordering is deterministic.
+    for cfg in CONFIGS:
+        rows = by_config.get(cfg, [])
+        if not rows or cfg not in COLORS:
             continue
         xs = [r['step'] for r in rows if r['bucket'] == bucket]
         ys = [r[metric] for r in rows if r['bucket'] == bucket]
         if not xs:
             continue
-        ax.plot(xs, ys, '-o', color=COLORS[cfg], label=cfg, markersize=4,
-                linewidth=2)
+        ax.plot(xs, ys, '-o', color=COLORS[cfg], label=LABELS.get(cfg, cfg),
+                markersize=7, linewidth=3.5, alpha=0.95)
         n_lines += 1
-    ax.set_xlabel('training step', fontsize=11)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_title(title, fontsize=12)
+    ax.set_xlabel('training step', fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=16)
+    ax.set_title(title, fontsize=17)
     ax.grid(alpha=0.3)
     ax.set_ylim(-0.02, 1.02)
+    ax.tick_params(axis='both', labelsize=14)
     if n_lines > 0:
-        ax.legend(loc='best', fontsize=9, framealpha=0.9)
+        ax.legend(loc='best', fontsize=15, framealpha=0.9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=120, bbox_inches='tight')
     plt.close(fig)
