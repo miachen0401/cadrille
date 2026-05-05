@@ -995,6 +995,7 @@ def train_cppo(model, optimizer, dataset, processor,
         print(f'\n[eval step={step} (pre-training baseline)]')
         try:
             raw_model = model.module if hasattr(model, 'module') else model
+            args._current_eval_step = step  # for eval_samples/step_N/ persisted snapshots
             val_metrics = run_validation(raw_model, val_examples, processor, args)
             log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
         except Exception as e:
@@ -1192,6 +1193,7 @@ def train_cppo(model, optimizer, dataset, processor,
                 if rank == 0:
                     print(f'\n[eval step={step}]')
                     raw_model = model.module if hasattr(model, 'module') else model
+                    args._current_eval_step = step
                     val_metrics = run_validation(raw_model, val_examples, processor, args)
                     log_eval(val_metrics, step=step, log_path=log_path, use_wandb=use_wandb)
                 if is_distributed:

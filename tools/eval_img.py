@@ -43,6 +43,11 @@ from common.meshio import render_img  # noqa: E402
 from common.metrics import compute_metrics  # noqa: E402
 from common.essential_ops import find_ops, essential_score  # noqa: E402
 
+# Module-level: tracks how many sample .py files we've already written per split
+# (DC, Fu, benchcad). Reset across subprocess invocations — each eval cycle dumps
+# fresh samples since the parent rmtree's the dir after parsing results.csv.
+_samples_saved: dict = {}
+
 
 def _detect_backbone_from_config(ckpt_dir: str) -> str:
     """Read config.json; map model_type to backbone name expected by get_cadrille_class."""
@@ -139,6 +144,20 @@ def _generate_one_split(model, processor, split_dir: Path, n_samples: int,
             cd_w  = '' if cd  is None else float(cd)
             writer.writerow([item['file_name'], iou_w, cd_w])
             fout.flush()
+            # Save first 5 generated codes per split to a sibling .py file
+            # so we can eyeball whether the model is producing sensible code.
+            global _samples_saved
+            if _samples_saved.get(out_csv.parent.name, 0) < 5:
+                _samples_saved[out_csv.parent.name] = _samples_saved.get(out_csv.parent.name, 0) + 1
+                idx = _samples_saved[out_csv.parent.name]
+                sample = out_csv.parent / f'sample_{idx:02d}_{item["file_name"]}.py'
+                sample.write_text(
+                    f"# eval_img.py sample @ {out_csv.parent.name}\n"
+                    f"# file_name={item['file_name']}  iou={iou_w}  cd={cd_w}\n"
+                    f"# stl: {item['_stl']}\n"
+                    f"# {'='*70}\n"
+                    f"{code}\n"
+                )
     fout.close()
 
 
@@ -222,12 +241,24 @@ def _generate_benchcad(model, processor, val_pkl: Path, n_samples: int,
             code = processor.decode(out_ids[i, prompt_len:], skip_special_tokens=True)
             iou, _cd = compute_metrics(code, item['_stl'], timeout=60)
             iou_w = '' if iou is None else float(iou)
-            # ess_score: regex-based, runs on raw code (works even when CQ exec fails)
             ops = find_ops(code)
             ess = essential_score(item['_family'], ops) if item['_family'] else None
             ess_w = '' if ess is None else float(ess)
             writer.writerow([item['file_name'], item['_family'], iou_w, ess_w])
             fout.flush()
+            # Save first 5 generated benchcad codes for inspection
+            global _samples_saved
+            if _samples_saved.get('benchcad', 0) < 5:
+                _samples_saved['benchcad'] = _samples_saved.get('benchcad', 0) + 1
+                idx = _samples_saved['benchcad']
+                sample = out_csv.parent / f'sample_{idx:02d}_{item["file_name"]}.py'
+                sample.write_text(
+                    f"# eval_img.py benchcad sample\n"
+                    f"# file_name={item['file_name']}  family={item['_family']}\n"
+                    f"# iou={iou_w}  ess_score={ess_w}\n"
+                    f"# {'='*70}\n"
+                    f"{code}\n"
+                )
     fout.close()
 
 

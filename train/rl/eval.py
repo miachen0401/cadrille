@@ -388,7 +388,30 @@ def _run_img_eval_subprocess(model, processor, img_examples: list, args) -> dict
                 print(f'[eval/img] WARNING: {bc_csv} not found — bc IID/OOD skipped', flush=True)
 
     finally:
-        # 6. Restore model params to GPU (optimizer states never left GPU).
+        # 6. Save the per-split sample .py files (model output snapshots) BEFORE
+        # we rmtree the eval dir. Persist into output_dir/eval_samples/step_N/
+        # so they're inspectable post-hoc — answers "is the model writing
+        # sensible code, or garbled tokens that happen to score IoU?".
+        try:
+            cur_step = getattr(args, '_current_eval_step', None)
+            tag = f'step_{cur_step:06d}' if isinstance(cur_step, int) else 'latest'
+            samples_root = os.path.join(output_dir, 'eval_samples', tag)
+            os.makedirs(samples_root, exist_ok=True)
+            for entry in os.listdir(out_root):
+                src_dir = os.path.join(out_root, entry)
+                if not os.path.isdir(src_dir):
+                    continue
+                py_files = [f for f in os.listdir(src_dir) if f.startswith('sample_') and f.endswith('.py')]
+                if py_files:
+                    dst_dir = os.path.join(samples_root, entry)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    for f in py_files:
+                        shutil.copy2(os.path.join(src_dir, f), os.path.join(dst_dir, f))
+                    print(f'[eval/img] saved {len(py_files)} samples → {dst_dir}', flush=True)
+        except Exception as _e:
+            print(f'[eval/img] sample-save warning: {_e}', flush=True)
+
+        # 7. Restore model params to GPU (optimizer states never left GPU).
         model.to(device)
         shutil.rmtree(ckpt_dir, ignore_errors=True)
         shutil.rmtree(out_root,  ignore_errors=True)
