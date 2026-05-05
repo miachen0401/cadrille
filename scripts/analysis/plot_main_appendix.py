@@ -44,7 +44,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from common.holdout import HOLDOUT_FAMILIES as HOLDOUT
-from common.essential_ops import ESSENTIAL_BY_FAMILY as ESS_SPEC
+from common.essential_ops import (
+    ESSENTIAL_BY_FAMILY as ESS_SPEC,
+    find_ops as _canon_find_ops,
+)
 
 # ------------------------------------------------------------------
 # Run registry — add a new dict entry when a new chain run lands its
@@ -58,13 +61,23 @@ RUNS = [
         'key':   'iid_v3',
         'label': '(1) iid — v3 baseline (trained on all 106 families)',
         'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0428-1320/predictions',
+        # v3 was trained pre-refactor → online JSONL has ~9 random OOD per
+        # step (BC val random 50, of which ~9 fall in holdout fams). Use the
+        # HF-driven retro 50-stratified eval so v3's line matches baseline /
+        # ood / ood_enhance exactly on the 50-OOD set.
+        'retro_ood_dir': '/home/ubuntu/cadrille/eval_outputs/v3_ood_retro_hf',
         'plot':  dict(color='C2', linewidth=2.0, marker='', linestyle='-', alpha=0.85),
     },
     {
         'key':   'ood_enhance',
         'label': '(3) ood_enhance — holdout + benchcad-easy (v4)',
         'dir':   '/ephemeral/checkpoints/sft-s50k-lr2e-4-b8a4-img-0430-0828/predictions',
-        'plot':  dict(color='C0', linewidth=2.0, marker='s', markersize=5, linestyle='-', alpha=0.9),
+        # Run pre-dates IID/OOD split refactor → online JSONL has ~9 random
+        # OOD per step (noisy, systematically high). Use the retro 50-OOD
+        # stratified eval (4 ckpts) for the BC val OOD bucket so the
+        # comparison with baseline/ood/iid is apples-to-apples.
+        'retro_ood_dir': '/home/ubuntu/cadrille/eval_outputs/v4_ood_retro',
+        'plot':  dict(color='C0', linewidth=2.0, marker='s', markersize=6, linestyle='-', alpha=0.9),
     },
     {
         'key':   'baseline',
@@ -185,6 +198,64 @@ def per_step(pred_dir, bucket_cfg, metric, uid2fam, patterns):
     return out
 
 
+def per_step_from_retro(retro_dir: str, metric: str, patterns) -> dict[int, float]:
+    """Per-step value from eval_v4_ood_retro outputs (50 stratified OOD per ckpt).
+
+    Used for ood_enhance — its online predictions JSONL only had ~9 random OOD
+    per step (run pre-dates the IID/OOD split refactor), but eval_v4_ood_retro
+    re-ran a fixed 50-OOD stratified sample at each saved checkpoint. Returns
+    {step: scalar} matching the shape of per_step() so it drops in seamlessly.
+
+    Only valid for the 'BC val OOD' bucket — DC/Fu/IID buckets use per_step().
+    """
+    p = Path(retro_dir)
+    if not p.is_dir():
+        return {}
+    out: dict[int, float] = {}
+    for step_dir in sorted(p.glob('step-*')):
+        if not step_dir.is_dir():
+            continue
+        try:
+            step = int(step_dir.name.split('-', 1)[1])
+        except ValueError:
+            continue
+        meta = step_dir / 'metadata.jsonl'
+        if not meta.exists():
+            continue
+        rows_meta = [json.loads(l) for l in meta.open() if l.strip()]
+        rows: list[dict] = []
+        for r in rows_meta:
+            py = step_dir / f'{r["stem"]}.py'
+            code = py.read_text() if py.exists() else ''
+            rows.append({
+                'uid':       r['stem'],
+                'family':    r.get('family'),
+                'pred_code': code,
+                'iou':       r.get('iou'),
+            })
+        # Family lookup uses the row's own 'family' field — bypasses uid2fam.
+        # We translate metric_value's calls by injecting family directly.
+        if metric == 'iou':
+            vals = [max(r.get('iou') or 0, 0) for r in rows]
+            out[step] = float(np.mean(vals)) if vals else 0.0
+        elif metric == 'exec':
+            vals = [(r.get('iou') is not None and r['iou'] >= 0) for r in rows]
+            out[step] = float(np.mean(vals)) if vals else 0.0
+        elif metric == 'ess_pass':
+            vals = []
+            for r in rows:
+                fam = r['family']
+                if fam is None:
+                    continue
+                ops = _canon_find_ops(r['pred_code'])  # canonical OP_PATTERNS
+                e = ess_pass(fam, ops)
+                if e is not None:
+                    vals.append(1 if e else 0)
+            if vals:
+                out[step] = float(np.mean(vals))
+    return out
+
+
 # ------------------------------------------------------------------
 # Plot helper
 # ------------------------------------------------------------------
@@ -196,14 +267,21 @@ def plot_one(bucket_name, metric, ylabel, title, outpath, ymax_hint=None,
     any_data = False
     max_step = 0
     for run in RUNS:
-        d = per_step(run['dir'], bucket_cfg, metric, uid2fam, patterns)
+        # For BC val OOD bucket, prefer a run's retro 50-stratified data when
+        # configured (apples-to-apples with the 50-OOD online_eval that
+        # baseline/ood/iid get). Fall back to per_step() everywhere else.
+        retro_dir = run.get('retro_ood_dir')
+        if bucket_name == 'BC val OOD' and retro_dir:
+            d = per_step_from_retro(retro_dir, metric, patterns)
+        else:
+            d = per_step(run['dir'], bucket_cfg, metric, uid2fam, patterns)
         if not d:
             continue
         any_data = True
         steps = sorted(d)
         max_step = max(max_step, max(steps))
         ax.plot(steps, [d[s] for s in steps],
-                label=f'{run["label"]} (n={len(steps)})',
+                label=f'{run["label"]} ({len(steps)} ckpts)',
                 **run['plot'])
 
     placeholder_x = np.arange(1000, max(max_step, 50000) + 1, 1000)
@@ -215,7 +293,9 @@ def plot_one(bucket_name, metric, ylabel, title, outpath, ymax_hint=None,
                 color=run['plot']['color'], linestyle='--', linewidth=1.2,
                 alpha=0.4, label=f'{run["label"]} [TBD]')
 
-    ax.set_title(title, fontsize=12)
+    ax.set_title(f'{title}\n'
+                 f'(each ckpt scored on the SAME stratified 50-OOD set: 10 fams × 5)',
+                 fontsize=11)
     ax.set_xlabel('training step', fontsize=11)
     ax.set_ylabel(ylabel, fontsize=11)
     if ymax_hint:

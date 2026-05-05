@@ -75,6 +75,31 @@ class HFCheckpointUploadCallback(TrainerCallback):
             print(f'[hf-upload] upload failed for step {step}: {e}', flush=True)
             traceback.print_exc()
 
+    def _upload_predictions(self, predictions_dir: str, step: int):
+        """Sync the predictions/ subdir to HF in a background thread.
+
+        Upload is idempotent (HF deduplicates by content hash) so re-pushing
+        the whole dir each step is cheap. Predictions JSONLs are tiny
+        (~50KB per step) — total upload per save step ≪ 1MB.
+        """
+        try:
+            from huggingface_hub import HfApi
+            prefix = f'{self.path_in_repo_prefix}/' if self.path_in_repo_prefix else ''
+            HfApi().upload_folder(
+                folder_path=predictions_dir,
+                repo_id=self.repo_id,
+                repo_type='model',
+                path_in_repo=f'{prefix}predictions',
+                token=self.token,
+                commit_message=f'predictions sync @ step-{step}',
+                ignore_patterns=['render_cache/**', '*.png', '*.posted'],
+            )
+            print(f'[hf-upload] synced predictions/ -> {self.repo_id} (step {step})',
+                  flush=True)
+        except Exception as e:
+            print(f'[hf-upload] predictions sync failed for step {step}: {e}',
+                  flush=True)
+
     def on_save(self, args, state, control, **kwargs):
         if not state.is_world_process_zero:
             return
@@ -101,6 +126,19 @@ class HFCheckpointUploadCallback(TrainerCallback):
         t.start()
         self._threads.append(t)
         print(f'[hf-upload] started background upload of checkpoint-{step}', flush=True)
+
+        # Also sync the predictions/ subdir so multi-HPC analysis can read
+        # all per-step JSONLs from HF without needing access to /ephemeral.
+        predictions_dir = Path(args.output_dir) / 'predictions'
+        if predictions_dir.is_dir():
+            t2 = threading.Thread(
+                target=self._upload_predictions,
+                args=(str(predictions_dir), step),
+                daemon=True,
+                name=f'hf-upload-pred-{step}',
+            )
+            t2.start()
+            self._threads.append(t2)
 
     def on_train_end(self, args, state, control, **kwargs):
         if not self._threads:

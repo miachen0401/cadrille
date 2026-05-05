@@ -36,6 +36,11 @@ import sys
 import tarfile
 from pathlib import Path
 
+# Make repo root importable + auto-load .env (HF_TOKEN).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
+
 
 def _split(stem: str, val_frac: float) -> str:
     h = int(hashlib.md5(stem.encode()).hexdigest(), 16)

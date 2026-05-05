@@ -1,4 +1,30 @@
-# SFT Configs — Paper §7 v4-holdout study
+# SFT Configs — Paper §7 study (v1 mech-OOD + v2 op-pattern-OOD)
+
+## §7 v2 — bench-simple op-pattern OOD (5-line ablation, current)
+
+| Config | mech-OOD (10 v1 fams) holdout | bench-simple OOD (10 v2 fams) holdout | benchcad-easy in train? | Mix HQ:bench | total_train_dp |
+|---|---|---|---|---|---|
+| `baseline_v2.yaml` | n/a (no bench)        | n/a (no bench)              | ✗ | 100/0 | 500k |
+| `iid_enhanced_v2.yaml` | n/a (no bench)        | n/a (no bench)              | ✓ | 60/40 | 500k |
+| `ood_v2.yaml`      | **YES** (held out)    | **YES** (held out from train, eval bucket) | ✗ | 60/40 | 500k |
+| `ood_enhanced_v2.yaml` | NO (in train)     | **YES** (held out from train, eval bucket) | ✗ | 60/40 | 500k |
+| `iid_v2.yaml`      | NO (in train)         | **YES** (held out from train; 44 IID fams in train, eval bucket on 10 OOD) | ✗ | 60/40 | 500k |
+
+`holdout_families_v2.yaml` is the canonical 10 op-pattern fams:
+`simple_revolve, simple_loft, simple_polygon_cut, simple_extrude_hole,
+simple_box_hole_fillet, simple_cyl_cut, simple_revolve_cut,
+simple_extrude_hole_fillet, simple_loft_cut, simple_taper_extrude_chamfer`.
+
+`total_train_dp: 500000` — caps unique training rows to 500k across all
+sources, subsampling each by mix-weight ratio (deterministic seed=42).
+Equalises pool size across the 5 lines so the only confound is content
+not data volume. Set to `null` to disable (use full source sizes).
+
+Eval bucket: `bench-simple OOD` = 50 stratified samples (10 fams × 5)
+loaded from `data/benchcad-simple/val.pkl` via online_eval. ess spec
+auto-derived from family name (e.g. `simple_revolve_cut → [revolve, cut]`).
+
+## §7 v1 — mech-OOD legacy (kept for §7 main figure)
 
 Four roles in the §7 figures, but only **three** trained runs needed —
 v3 already plays the iid role (it saw all 106 families during training).

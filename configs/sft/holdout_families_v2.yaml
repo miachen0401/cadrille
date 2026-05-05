@@ -1,0 +1,39 @@
+# §7 v2 holdout — bench-simple op patterns (54 fams in train pool, 10 held out)
+#
+# Setup change: in v1 (current §7) the OOD test set was 10 mechanical
+# families (bolt, taper_pin, ...) held out of benchcad train. In v2 the
+# OOD test set is 10 op-COMPOSITION patterns held out of benchcad-simple.
+# This isolates the question "does the model learn op composition?" from
+# "does the model recognize a specific mechanical category?" — the v1
+# holdout could pass via family-shape memorization; v2 cannot, because the
+# 10 held-out patterns are tiny shape primitives whose family identity is
+# defined by the op composition itself (e.g. simple_revolve_cut requires
+# both `revolve` AND `cut` to satisfy).
+#
+# Selection: span composition diversity — 1 op (rare baseline), 2 ops
+# (sketch+modifier), 3 ops (full composition). Even split across the
+# operation classes that matter for OOD mechanical parts (revolve, sweep,
+# loft, extrude+hole, cut, fillet, chamfer).
+#
+# Loaded by:
+#   * configs/sft/{baseline,ood,ood_enhanced,iid_easy,iid}_v2.yaml
+#   * data_prep/build_holdout_v2.py (writes train_v2_holdout.pkl per source)
+#   * train/sft/online_eval.py via set_holdout_families_v2() — controls the
+#     bench-simple OOD eval bucket
+#
+# IID partner (44 fams): everything in benchcad-simple NOT in this list.
+
+holdout_families_v2:
+  # 1-op patterns (baseline composition)
+  - simple_revolve              # solo revolve
+  - simple_loft                 # solo loft
+  # 2-op patterns (sketch + modifier)
+  - simple_polygon_cut          # polygon → cut
+  - simple_extrude_hole         # extrude → hole
+  - simple_box_hole_fillet      # box → hole → fillet (3-op)
+  - simple_cyl_cut              # cylinder → cut
+  # 3-op patterns (full composition)
+  - simple_revolve_cut          # revolve → cut
+  - simple_extrude_hole_fillet  # extrude → hole → fillet
+  - simple_loft_cut             # loft → cut
+  - simple_taper_extrude_chamfer # taper-extrude → chamfer

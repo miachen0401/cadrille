@@ -52,6 +52,7 @@ def resolve_args(args, cfg: dict) -> dict:
     # Core
     args.mode            = _p(args.mode,           cfg.get('mode'),           'cppo')
     args.base_model      = cfg.get('base_model', 'Qwen/Qwen2-VL-2B-Instruct')
+    args.backbone        = cfg.get('backbone', 'qwen2_vl')
     args.checkpoint_path = _p(args.checkpoint_path, cfg.get('checkpoint_path'), 'maksimko123/cadrille')
     args.max_steps       = _p(args.max_steps,       cfg.get('max_steps'),       50000)
     args.lr              = float(cfg.get('lr', 3e-5))
@@ -67,6 +68,10 @@ def resolve_args(args, cfg: dict) -> dict:
     args.val_samples_deepcad   = cfg.get('val_samples_deepcad',
                                          _legacy_samples if _legacy_samples else 25)
     args.val_samples_fusion360 = cfg.get('val_samples_fusion360', 25)
+    # Optional BenchCAD val for IID/OOD breakdown (per-row family + ess_score).
+    # When set, eval logs eval/img/bc_{iid,ood}/{IoU mean,ess_mean,ess_pass_rate,...}.
+    args.val_benchcad_pkl      = cfg.get('val_benchcad_pkl', None)
+    args.val_samples_benchcad  = cfg.get('val_samples_benchcad', 200)
     args.val_modalities        = cfg.get('val_modalities', 'pc')
     args.eval_steps            = cfg.get('eval_steps', 500)
 
@@ -131,6 +136,20 @@ def resolve_args(args, cfg: dict) -> dict:
     # (separate from SyntaxError/timeout which always get -1.0)
     # Default -1.0 = backward-compatible (no distinction).
     args.soft_invalid_reward    = float(cfg.get('soft_invalid_reward', -1.0))
+
+    # Essential-ops reward shaping: combine per-family essential_score with IoU.
+    #   reward = essential_reward_weight * ess_score + (1 - essential_reward_weight) * iou
+    # essential_reward_weight=0.0 (default) → backward-compatible pure-IoU reward.
+    # essential_reward_mode='binary' uses essential_pass (0 or 1);
+    # 'fractional' uses essential_score (0..1) — smoother gradient for RL.
+    # Rows whose family has no essential_ops spec (or where family is None) fall
+    # back to pure IoU automatically — the weighting is skipped per-row.
+    args.essential_reward_weight = float(cfg.get('essential_reward_weight', 0.0))
+    args.essential_reward_mode   = cfg.get('essential_reward_mode', 'fractional')
+    assert args.essential_reward_mode in ('binary', 'fractional'), \
+        f'essential_reward_mode must be binary|fractional, got {args.essential_reward_mode!r}'
+    assert 0.0 <= args.essential_reward_weight <= 1.0, \
+        f'essential_reward_weight must be in [0, 1], got {args.essential_reward_weight}'
 
     # HuggingFace checkpoint upload (async, background thread)
     args.hf_upload_repo = cfg.get('hf_upload_repo', None)   # e.g. "YourOrg/cadrille-rl"

@@ -27,7 +27,7 @@ fi
 # These are linked against by the Open3D wheel we build in step 4. Without
 # them ENABLE_HEADLESS_RENDERING=ON cmake fails. Idempotent — apt-get is a
 # no-op when packages are already installed.
-APT_PKGS="libgl1-mesa-glx libgl1-mesa-dev libosmesa6 libosmesa6-dev \
+APT_PKGS="libgl1 libgl1-mesa-dev libosmesa6 libosmesa6-dev \
           libglu1-mesa-dev libglew-dev libxi-dev libxinerama-dev \
           libxcursor-dev libxrandr-dev pkg-config build-essential \
           git git-lfs wget"
@@ -95,6 +95,19 @@ else
         git clone --depth 200 https://github.com/isl-org/Open3D.git "$BUILD_DIR"
         (cd "$BUILD_DIR" && git checkout 8e434558a9b1ecacba7854da7601a07e8bdceb26)
     fi
+    # Patch bundled glew.c for Ubuntu 24.04+ Mesa headers: glew.h pre-defines
+    # __gl_h_ which causes osmesa.h's `#include <GL/gl.h>` to no-op, leaving
+    # APIENTRY undefined → glew.c fails to parse osmesa.h's function decls.
+    # Add an `#ifndef APIENTRY; #define APIENTRY; #endif` before osmesa include.
+    GLEW_C="$BUILD_DIR/3rdparty/glew/src/glew.c"
+    if ! grep -q '^#  ifndef APIENTRY$' "$GLEW_C"; then
+        sed -i '/^#if defined(GLEW_OSMESA)$/,/^#  include <GL\/osmesa.h>$/{
+            /^#  define GLAPI extern$/a\
+#  ifndef APIENTRY\
+#    define APIENTRY\
+#  endif
+        }' "$GLEW_C"
+    fi
     mkdir -p "$BUILD_DIR/build"
     # `[ -f glob ]` does not expand — use compgen for a glob-aware existence test.
     WHL_DIR="$BUILD_DIR/build/lib/python_package/pip_package"
@@ -106,7 +119,8 @@ else
                          -DBUILD_WEBRTC=OFF -DBUILD_JUPYTER_EXTENSION=OFF \
                          -DBUILD_UNIT_TESTS=OFF -DBUILD_BENCHMARKS=OFF \
                          -DBUILD_EXAMPLES=OFF .. && \
-            make -j4)
+            make -j4 && \
+            make -j4 pip-package)
     fi
     WHL=$(compgen -G "$WHL_DIR/open3d_cpu*.whl" | head -1)
     if [ -n "$WHL" ]; then

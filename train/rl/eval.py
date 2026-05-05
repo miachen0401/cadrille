@@ -20,7 +20,7 @@ try:
 except ImportError:
     _WANDB_AVAILABLE = False
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ---------------------------------------------------------------------------
@@ -329,8 +329,89 @@ def _run_img_eval_subprocess(model, processor, img_examples: list, args) -> dict
             print(f'  [img/{label}] IoU={out[f"{prefix}/IoU mean"]:.3f}  '
                   f'Fail={out[f"{prefix}/Failures fraction"]*100:.1f}%', flush=True)
 
+        # 4b. (Optional) BenchCAD val: per-row family + ess_score; split IID/OOD.
+        bc_pkl = getattr(args, 'val_benchcad_pkl', None)
+        if bc_pkl and os.path.exists(bc_pkl):
+            n_bc = int(getattr(args, 'val_samples_benchcad', 200))
+            print(f'[eval/img] benchcad val: eval_img.py ({n_bc} items) ...', flush=True)
+            subprocess.run([
+                sys.executable, eval_img_py,
+                '--checkpoint',         ckpt_dir,
+                '--benchcad-val-pkl',   bc_pkl,
+                '--n-samples',          str(n_bc),
+                '--out-dir',            out_root,
+                '--batch-size',         str(getattr(args, 'eval_batch_size', 8)),
+                '--max-new-tokens',     str(args.max_new_tokens),
+                '--seed',               '42',
+            ], timeout=3600)
+
+            bc_csv = os.path.join(out_root, 'benchcad', 'results.csv')
+            if os.path.exists(bc_csv):
+                from common.holdout import HOLDOUT_FAMILIES  # set of fam names
+                from common.essential_ops import ESSENTIAL_BY_FAMILY
+                buckets = {'iid': {'iou': [], 'ess': [], 'fail': 0},
+                           'ood': {'iou': [], 'ess': [], 'fail': 0}}
+                with open(bc_csv) as f:
+                    for row in csv.DictReader(f):
+                        fam = (row.get('family') or '').strip()
+                        bucket = 'ood' if fam in HOLDOUT_FAMILIES else 'iid'
+                        try:
+                            iou = float(row['iou']) if row.get('iou') not in ('', 'None', None) else None
+                        except (ValueError, KeyError):
+                            iou = None
+                        try:
+                            ess = float(row['ess_score']) if row.get('ess_score') not in ('', 'None', None) else None
+                        except (ValueError, KeyError):
+                            ess = None
+                        if iou is None:
+                            buckets[bucket]['fail'] += 1
+                        else:
+                            buckets[bucket]['iou'].append(iou)
+                        # Only count ess for rows whose family has a spec
+                        if ess is not None and fam in ESSENTIAL_BY_FAMILY:
+                            buckets[bucket]['ess'].append(ess)
+                for name, b in buckets.items():
+                    n_total = len(b['iou']) + b['fail']
+                    prefix = f'eval/img/bc_{name}'
+                    out[f'{prefix}/IoU mean']          = float(np.mean(b['iou'])) if b['iou'] else 0.0
+                    out[f'{prefix}/IoU median']        = float(np.median(b['iou'])) if b['iou'] else 0.0
+                    out[f'{prefix}/ess_mean']          = float(np.mean(b['ess'])) if b['ess'] else 0.0
+                    out[f'{prefix}/ess_pass_rate']     = float(np.mean([1.0 if e >= 1.0 else 0.0 for e in b['ess']])) if b['ess'] else 0.0
+                    out[f'{prefix}/n_items']           = float(n_total)
+                    out[f'{prefix}/n_ess_eligible']    = float(len(b['ess']))
+                    out[f'{prefix}/Failures fraction'] = (b['fail'] / n_total) if n_total else 0.0
+                    print(f'  [img/bc_{name}] n={n_total} (ess_n={len(b["ess"])})  '
+                          f'IoU={out[f"{prefix}/IoU mean"]:.3f}  '
+                          f'ess_mean={out[f"{prefix}/ess_mean"]:.3f}  '
+                          f'ess_pass={out[f"{prefix}/ess_pass_rate"]*100:.1f}%', flush=True)
+            else:
+                print(f'[eval/img] WARNING: {bc_csv} not found — bc IID/OOD skipped', flush=True)
+
     finally:
-        # 6. Restore model params to GPU (optimizer states never left GPU).
+        # 6. Save the per-split sample .py files (model output snapshots) BEFORE
+        # we rmtree the eval dir. Persist into output_dir/eval_samples/step_N/
+        # so they're inspectable post-hoc — answers "is the model writing
+        # sensible code, or garbled tokens that happen to score IoU?".
+        try:
+            cur_step = getattr(args, '_current_eval_step', None)
+            tag = f'step_{cur_step:06d}' if isinstance(cur_step, int) else 'latest'
+            samples_root = os.path.join(output_dir, 'eval_samples', tag)
+            os.makedirs(samples_root, exist_ok=True)
+            for entry in os.listdir(out_root):
+                src_dir = os.path.join(out_root, entry)
+                if not os.path.isdir(src_dir):
+                    continue
+                py_files = [f for f in os.listdir(src_dir) if f.startswith('sample_') and f.endswith('.py')]
+                if py_files:
+                    dst_dir = os.path.join(samples_root, entry)
+                    os.makedirs(dst_dir, exist_ok=True)
+                    for f in py_files:
+                        shutil.copy2(os.path.join(src_dir, f), os.path.join(dst_dir, f))
+                    print(f'[eval/img] saved {len(py_files)} samples → {dst_dir}', flush=True)
+        except Exception as _e:
+            print(f'[eval/img] sample-save warning: {_e}', flush=True)
+
+        # 7. Restore model params to GPU (optimizer states never left GPU).
         model.to(device)
         shutil.rmtree(ckpt_dir, ignore_errors=True)
         shutil.rmtree(out_root,  ignore_errors=True)

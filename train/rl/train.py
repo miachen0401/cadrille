@@ -21,23 +21,17 @@ python rl/train.py --config configs/rl/4080.yaml --max-steps 3 --wandb-offline
 import os
 import sys
 
-# Load .env (HF_TOKEN, WANDB_API_KEY, etc.) before anything else
-_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
-if os.path.exists(_env_path):
-    with open(_env_path) as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith('#') and '=' in _line:
-                _k, _v = _line.split('=', 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
+# Allow execution from repo root or train/rl/ subdirectory before any other import.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Load .env (HF_TOKEN, WANDB_API_KEY, etc.) before anything else.
+from common.env import load_repo_env  # noqa: E402
+load_repo_env()
 
 # expandable_segments:True can trigger !handles_.at(i) INTERNAL ASSERT when
 # VRAM is near-full after inline eval (100 generate() calls fragment the pool).
 # garbage_collection_threshold=0.8 aggressively reclaims cached blocks instead.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.8")
-
-# Allow execution from repo root or rl/ subdirectory
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 import yaml
@@ -46,7 +40,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoProcessor
 
-from common.model import Cadrille
+from common.model import Cadrille, get_cadrille_class
 from train.rl.config import load_yaml, resolve_args
 from common.meshio import MeshDataset
 from train.rl.dataset import RLDataset, DPODataset
@@ -138,8 +132,8 @@ def _reward_smoke_test(model, dataset, processor, args, n=3):
     exactly why reward = -10 without waiting for training to get going.
     """
     import subprocess as _sp
-    from cadrille import collate
-    from rl.reward import _get_worker_path
+    from common.model import collate
+    from common.metrics import _get_worker_path
     import json as _json
 
     print(f'\n{"="*60}')
@@ -350,7 +344,8 @@ def train(args, cfg_to_save=None):
         # DDP: load onto the local GPU explicitly; device_map='auto' would
         # spread layers across all visible GPUs (model parallelism), which is
         # incompatible with DDP.
-        model = Cadrille.from_pretrained(
+        cadrille_cls = get_cadrille_class(getattr(args, 'backbone', 'qwen2_vl'))
+        model = cadrille_cls.from_pretrained(
             args.checkpoint_path,
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
@@ -360,7 +355,8 @@ def train(args, cfg_to_save=None):
         if rank == 0:
             print(f'DDP: {world_size} ranks, local_rank={local_rank}')
     else:
-        model = Cadrille.from_pretrained(
+        cadrille_cls = get_cadrille_class(getattr(args, 'backbone', 'qwen2_vl'))
+        model = cadrille_cls.from_pretrained(
             args.checkpoint_path,
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',
@@ -450,7 +446,7 @@ def train(args, cfg_to_save=None):
         except Exception:
             _total_gb = 0
         if _total_gb >= 32:
-            from rl.reward import init_reward_pool
+            from common.metrics import init_reward_pool
             n_rw = getattr(args, 'reward_workers', 8)
             init_reward_pool(n_workers=n_rw)
             print(f'Reward pool warmed ({n_rw} workers, RAM={_total_gb:.0f} GB)', flush=True)

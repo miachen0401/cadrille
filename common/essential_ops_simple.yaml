@@ -1,0 +1,174 @@
+# Auto-generated bench-simple op-pattern specs.
+# DO NOT EDIT BY HAND — regenerate via:
+#     uv run python -m data_prep.generate_simple_op_specs
+#
+# Each family name encodes its own composition spec; tokens map to
+# canonical OP_PATTERNS keys via data_prep.generate_simple_op_specs.TOKEN_MAP.
+# extrude / box / cyl / cone tokens are dropped as implicit primitives.
+
+simple_arc:
+  - threePointArc
+
+simple_box_chamfer:
+  - chamfer
+
+simple_box_cut:
+  - cut
+
+simple_box_fillet:
+  - fillet
+
+simple_box_hole:
+  - hole
+
+simple_box_hole_chamfer:
+  - hole
+  - chamfer
+
+simple_box_hole_fillet:
+  - hole
+  - fillet
+
+simple_cut:
+  - cut
+
+simple_cyl_chamfer:
+  - chamfer
+
+simple_cyl_cut:
+  - cut
+
+simple_cyl_fillet:
+  - fillet
+
+simple_cyl_hole:
+  - hole
+
+simple_extrude_chamfer:
+  - chamfer
+
+simple_extrude_cut:
+  - cut
+
+simple_extrude_fillet:
+  - fillet
+
+simple_extrude_hole:
+  - hole
+
+simple_extrude_hole_chamfer:
+  - hole
+  - chamfer
+
+simple_extrude_hole_fillet:
+  - hole
+  - fillet
+
+simple_fillet:
+  - fillet
+
+simple_hole:
+  - hole
+
+simple_loft:
+  - loft
+
+simple_loft_chamfer:
+  - loft
+  - chamfer
+
+simple_loft_cut:
+  - loft
+  - cut
+
+simple_loft_fillet:
+  - loft
+  - fillet
+
+simple_loft_hole:
+  - loft
+  - hole
+
+simple_polar_array:
+  - polarArray
+
+simple_polygon:
+  - polygon
+
+simple_polygon_chamfer:
+  - polygon
+  - chamfer
+
+simple_polygon_cut:
+  - polygon
+  - cut
+
+simple_polygon_fillet:
+  - polygon
+  - fillet
+
+simple_polygon_hole:
+  - polygon
+  - hole
+
+simple_polyline:
+  - polyline
+
+simple_rarray:
+  - rarray
+
+simple_rarray_cut:
+  - rarray
+  - cut
+
+simple_revolve:
+  - revolve
+
+simple_revolve_chamfer:
+  - revolve
+  - chamfer
+
+simple_revolve_cut:
+  - revolve
+  - cut
+
+simple_revolve_cut_chamfer:
+  - revolve
+  - cut
+  - chamfer
+
+simple_revolve_fillet:
+  - revolve
+  - fillet
+
+simple_revolve_hole:
+  - revolve
+  - hole
+
+simple_revolve_multiaxis:
+  - revolve
+
+simple_shell:
+  - shell
+
+simple_sphere:
+  - sphere
+
+simple_sweep_helix:
+  - sweep
+
+simple_sweep_helix_cut:
+  - sweep
+  - cut
+
+simple_taper_extrude:
+  - taper=
+
+simple_taper_extrude_chamfer:
+  - taper=
+  - chamfer
+
+simple_taper_extrude_hole:
+  - taper=
+  - hole
+

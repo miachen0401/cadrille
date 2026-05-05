@@ -294,6 +294,7 @@ def _make_cadrille_class(backbone_cls, output_cls):
             pixel_values_videos=None,
             image_grid_thw=None,
             video_grid_thw=None,
+            mm_token_type_ids=None,
             rope_deltas=None,
             cache_position=None,
             point_clouds=None,
@@ -354,6 +355,7 @@ def _make_cadrille_class(backbone_cls, output_cls):
                     pixel_values_videos=pixel_values_videos,
                     image_grid_thw=image_grid_thw,
                     video_grid_thw=video_grid_thw,
+                    mm_token_type_ids=mm_token_type_ids,
                     cache_position=cache_position,
                 )
                 # Only include kwargs the parent supports
