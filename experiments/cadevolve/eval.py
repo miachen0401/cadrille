@@ -35,7 +35,6 @@ from pathlib import Path
 
 import torch
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
-from transformers.models.qwen2_vl.configuration_qwen2_vl import Qwen2VLConfig
 from qwen_vl_utils import process_vision_info
 
 _REPO = Path(__file__).resolve().parent.parent.parent
@@ -222,7 +221,7 @@ def run_eval(rows, model, processor, out_dir: Path,
                 temperature=None,
                 top_p=None,
                 top_k=None,
-                eos_token_id=model.config.eos_token_id,
+                eos_token_id=getattr(model.config, 'eos_token_id', None) or model.config.text_config.eos_token_id,
             )
 
         prompt_len = inp['input_ids'].shape[1]
@@ -307,12 +306,16 @@ def main():
                                  epilog=__doc__)
     ap.add_argument('--ckpt',          required=True)
     ap.add_argument('--split',         default='test_iid',
-                    choices=['test_iid','test_ood_family','test_ood_plane','all'])
+                    help='Split name. "all" → test_iid+test_ood_family+test_ood_plane. '
+                         'Any other string is treated as a single literal split name '
+                         '(e.g. "train" for BenchCAD/cad_bench_722).')
     ap.add_argument('--limit',         type=int, default=0)
     ap.add_argument('--seed',          type=int, default=42)
     ap.add_argument('--batch-size',    type=int, default=2)
     ap.add_argument('--max-new-tokens',type=int, default=768)
     ap.add_argument('--score-workers', type=int, default=2)
+    ap.add_argument('--attn-impl',     default='sdpa',
+                    choices=['sdpa', 'flash_attention_2', 'eager'])
     ap.add_argument('--out',           required=True)
     ap.add_argument('--hf-repo',       default='Hula0401/test_bench')
     ap.add_argument('--label',         default=None)
@@ -330,7 +333,15 @@ def main():
     splits = ['test_iid','test_ood_family','test_ood_plane'] if args.split=='all' else [args.split]
     rows = []
     for sp in splits:
+        if sp not in ds:
+            print(f'ERROR: split "{sp}" not in dataset {args.hf_repo}. '
+                  f'Available: {list(ds.keys())}', file=sys.stderr); sys.exit(1)
         sp_rows = list(ds[sp])
+        # Inject 'split' / 'feature_tags' / 'feature_count' for datasets that lack them.
+        for r in sp_rows:
+            r.setdefault('split', sp)
+            r.setdefault('feature_tags', None)
+            r.setdefault('feature_count', None)
         if args.limit:
             rng = random.Random(args.seed); rng.shuffle(sp_rows)
             sp_rows = sp_rows[:args.limit]
@@ -339,14 +350,15 @@ def main():
 
     # Load model
     print(f'Loading model from {ckpt_path} ...', flush=True)
-    # Workaround: get_text_config(decoder=True) returns dict in transformers 4.50.3
-    Qwen2VLConfig.get_text_config = lambda self, **kw: self
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         str(ckpt_path), torch_dtype=torch.bfloat16,
-        attn_implementation='flash_attention_2', device_map='cuda')
-    # Tie lm_head (not saved in checkpoint — weight-tied to embed_tokens)
-    if model.lm_head.weight.data_ptr() != model.model.embed_tokens.weight.data_ptr():
-        model.lm_head.weight = model.model.embed_tokens.weight
+        attn_implementation=args.attn_impl, device_map='cuda')
+    # Tie lm_head (not saved in checkpoint — weight-tied to embed_tokens).
+    # transformers 5.x exposes embeddings via get_input_embeddings(); the old
+    # `model.model.embed_tokens` attribute path was removed.
+    embed = model.get_input_embeddings()
+    if model.lm_head.weight.data_ptr() != embed.weight.data_ptr():
+        model.lm_head.weight = embed.weight
         print('  lm_head tied to embed_tokens', flush=True)
     model.eval()
     print('Model loaded.', flush=True)
