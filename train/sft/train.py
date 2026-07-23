@@ -862,6 +862,10 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         os.environ.setdefault('WANDB_PROJECT', wandb_project)
         # Disable stdout/stderr streaming — prevents W&B rate-limit errors on long runs.
         os.environ.setdefault('WANDB_CONSOLE', 'off')
+        import swanlab
+        swanlab.sync_wandb()
+        os.environ.setdefault('WANDB_MODE', 'offline')
+        os.environ.setdefault('SWANLAB_PROJECT', wandb_project)
         # When resuming a checkpoint, re-attach to the existing W&B run so the
         # loss/eval curves are continuous rather than starting a fresh run.
         if resume_from_checkpoint:

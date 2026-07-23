@@ -5,9 +5,10 @@ description = "CAD reconstruction with SFT + RL fine-tuning (Dr. CPPO)"
 requires-python = ">=3.10"
 dependencies = [
     # PyTorch — CUDA 12.4 build (index configured below)
-    "torch==2.5.1",
-    "torchvision==0.20.1",
-    "torchaudio==2.5.1",
+    "torch==2.8.0",
+    "nvidia-cusparselt-cu12",
+    "torchvision==0.23.0",
+    "torchaudio==2.8.0",
     # Model / training
     "transformers>=5.6.0,<6.0",      # Qwen3-VL ships in 5.x
     "accelerate>=1.3.0",
@@ -29,6 +30,7 @@ dependencies = [
     "tqdm",
     "pyyaml",
     "numpy>=2.0",
+    "swanlab",
 ]
 
 # Three packages need special install steps — handled by scripts/setup.sh and Dockerfile:
@@ -48,10 +50,11 @@ dependencies = [
 
 [[tool.uv.index]]
 name = "pytorch-cu124"
-url  = "https://download.pytorch.org/whl/cu124"
+url  = "https://download.pytorch.org/whl/cu128"
 explicit = true          # only use this index for packages that explicitly opt in
 
 [tool.uv.sources]
 torch       = [{ index = "pytorch-cu124" }]
 torchvision = [{ index = "pytorch-cu124" }]
 torchaudio  = [{ index = "pytorch-cu124" }]
+nvidia-cusparselt-cu12 = [{ index = "pytorch-cu124" }]
