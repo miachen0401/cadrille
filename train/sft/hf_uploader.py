@@ -68,6 +68,11 @@ class HFCheckpointUploadCallback(TrainerCallback):
                 path_in_repo=path_in_repo,
                 token=self.token,
                 commit_message=f'ckpt-{step} auto-upload from SFT',
+                # Skip resume-only state: optimizer/scheduler/RNG. HF gets the
+                # ~16GB model weights (usable for RL/inference); local checkpoint
+                # keeps the full ~80GB state for crash-resume.
+                ignore_patterns=['optimizer.pt', 'optimizer.bin', 'optim_state.pt',
+                                 'scheduler.pt', 'rng_state*.pth'],
             )
             print(f'[hf-upload] pushed {local_dir} -> {self.repo_id}/{path_in_repo}',
                   flush=True)

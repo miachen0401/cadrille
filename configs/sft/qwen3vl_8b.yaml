@@ -58,7 +58,7 @@ dataloader_workers: 4
 group_by_length: true
 
 log_steps: 50
-save_steps: 2000
+save_steps: 5000
 eval_steps: 1000
 online_eval_n_per: 50
 max_iou_k: 8
@@ -103,7 +103,7 @@ curriculum_phases: null
 save_only_model: false
 save_total_limit: 4
 
-hf_upload_repo: null
-hf_upload_private: false
+hf_upload_repo: ysjmac/cadrille-qwen3vl-8b-sft
+hf_upload_private: true
 
 wandb_project: cadrille-sft
