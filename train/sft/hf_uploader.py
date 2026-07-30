@@ -57,8 +57,22 @@ class HFCheckpointUploadCallback(TrainerCallback):
 
     def _upload_dir(self, local_dir: str, step: int):
         """Runs in a background thread."""
+        stage_dir = None
         try:
+            import shutil, tempfile
             from huggingface_hub import HfApi
+            # Snapshot to a staging dir first: save_total_limit pruning can
+            # delete the checkpoint mid-upload (observed FileNotFoundError),
+            # so never upload from the live trainer-managed directory.
+            stage_root = os.path.join(tempfile.gettempdir(), 'hf_upload_stage')
+            os.makedirs(stage_root, exist_ok=True)
+            stage_dir = os.path.join(stage_root, f'ckpt-{step}-{os.getpid()}')
+            shutil.copytree(
+                local_dir, stage_dir,
+                ignore=shutil.ignore_patterns('optimizer.pt', 'optimizer.bin',
+                                              'optim_state.pt', 'scheduler.pt',
+                                              'rng_state*.pth'))
+            local_dir = stage_dir
             prefix = f'{self.path_in_repo_prefix}/' if self.path_in_repo_prefix else ''
             path_in_repo = f'{prefix}checkpoint-{step}'
             HfApi().upload_folder(
@@ -79,6 +93,10 @@ class HFCheckpointUploadCallback(TrainerCallback):
         except Exception as e:
             print(f'[hf-upload] upload failed for step {step}: {e}', flush=True)
             traceback.print_exc()
+        finally:
+            if stage_dir:
+                import shutil
+                shutil.rmtree(stage_dir, ignore_errors=True)
 
     def _upload_predictions(self, predictions_dir: str, step: int):
         """Sync the predictions/ subdir to HF in a background thread.

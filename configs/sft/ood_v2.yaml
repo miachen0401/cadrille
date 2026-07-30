@@ -30,7 +30,7 @@ backbone: qwen3_vl
 
 base_model: Qwen/Qwen3-VL-2B-Instruct
 
-max_steps: 20000  # was 50000 — match other v2 configs (friend HPC may run 50k separately)
+max_steps: 50000
 
 batch_size: 8
 
@@ -135,7 +135,7 @@ save_only_model: false
 
 save_total_limit: 4
 
-hf_upload_repo: Hula0401/cadrille-qwen3vl-2b-ood-v2-50k
+hf_upload_repo: ysjmac/cadrille-qwen3vl-2b-ood-v2-50k
 
 hf_upload_private: false
 

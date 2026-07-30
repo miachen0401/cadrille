@@ -865,7 +865,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
         import swanlab
         swanlab.sync_wandb()
         os.environ.setdefault('WANDB_MODE', 'offline')
-        os.environ.setdefault('SWANLAB_PROJECT', wandb_project)
+        # NOTE: do NOT set SWANLAB_PROJECT — swanlab>=0.9 expects it to be a
+        # JSON settings object, and the project name already flows through
+        # WANDB_PROJECT -> patched wandb.init -> swanlab.init.
         # When resuming a checkpoint, re-attach to the existing W&B run so the
         # loss/eval curves are continuous rather than starting a fresh run.
         if resume_from_checkpoint:
@@ -920,6 +922,9 @@ def run(data_path, output_dir, mode, use_text, max_steps, batch_size_override,
             load_best_model_at_end=has_val,
             seed=seed,
             data_seed=seed,
+            # Multimodal batches leave some params (e.g. point encoder in
+            # img/text mode) without grads; required for multi-GPU DDP.
+            ddp_find_unused_parameters=True,
             report_to=report_to),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,

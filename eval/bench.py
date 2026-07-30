@@ -50,14 +50,16 @@ from transformers import AutoProcessor
 _REPO = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO))
 
-from common.model import Cadrille, collate  # noqa: E402
+from common.model import Cadrille, collate, get_cadrille_class  # noqa: E402
 from common.metrics import compute_metrics   # noqa: E402
 
 _N_POINTS    = 256
 _DESCRIPTION = 'Generate cadquery code'
 
 # CadEvolve prompt (standard Qwen2-VL, image input)
-_CADEVOLVE_PROMPT = 'Generate CadQuery Python code for this 3D CAD model shown in multiple views.'
+_CADEVOLVE_PROMPT = os.environ.get('BENCH_USER_PROMPT',
+    'Generate CadQuery Python code for this 3D CAD model shown in multiple views.')
+_BENCH_SYSTEM_PROMPT = os.environ.get('BENCH_SYSTEM_PROMPT', '')
 
 # ---------------------------------------------------------------------------
 # GT code execution  →  temp STL
@@ -201,13 +203,14 @@ def run_bench_cadevolve(
         messages = []
         for row in batch:
             img = row['composite_png']  # PIL Image
-            messages.append([{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'image': img},
-                    {'type': 'text', 'text': _CADEVOLVE_PROMPT},
-                ],
-            }])
+            _msg = []
+            if _BENCH_SYSTEM_PROMPT:
+                _msg.append({'role': 'system',
+                             'content': [{'type': 'text', 'text': _BENCH_SYSTEM_PROMPT}]})
+            _msg.append({'role': 'user', 'content': [
+                {'type': 'image', 'image': img},
+                {'type': 'text', 'text': _CADEVOLVE_PROMPT}]})
+            messages.append(_msg)
 
         texts = [
             processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
@@ -531,6 +534,8 @@ def main() -> None:
     ap.add_argument('--score-workers',  type=int, default=4)
     ap.add_argument('--out',          required=True, help='Output directory')
     ap.add_argument('--hf-repo',      default='Hula0401/test_bench')
+    ap.add_argument('--backbone',     default='qwen2_vl',
+                    help='VL backbone of the checkpoint: qwen2_vl|qwen2_5_vl|qwen3_vl')
     ap.add_argument('--label',        default=None,
                     help='Human-readable label for report (default: ckpt basename)')
     args = ap.parse_args()
@@ -597,7 +602,7 @@ def main() -> None:
             model.lm_head.weight = model.model.embed_tokens.weight
             print('  lm_head tied to embed_tokens.', flush=True)
     else:
-        model = Cadrille.from_pretrained(
+        model = get_cadrille_class(args.backbone).from_pretrained(
             str(ckpt_path),
             torch_dtype=torch.bfloat16,
             attn_implementation='flash_attention_2',

@@ -132,7 +132,7 @@ def main() -> int:
 
     for i, row in enumerate(rows):
         stem = row["stem"]
-        code = row["gt_code"]
+        code = row.get("gt_code") or row["code"]  # repo rename: gt_code -> code
         png_bytes = row["composite_png"]
         if isinstance(png_bytes, dict):  # arrow struct with "bytes" key
             png_bytes = png_bytes.get("bytes", b"")
@@ -147,7 +147,10 @@ def main() -> int:
             py_path.write_text(code)
         if png_bytes and (args.force or not png_path.exists()):
             png_path.write_bytes(png_bytes)
-        if args.force or not stl_path.exists():
+        _skip_stems = set(filter(None, os.environ.get('BENCHCAD_SKIP_STEMS', '').split(',')))
+        if stem in _skip_stems:
+            pass  # known-pathological part (e.g. OCCT hang); dropped in step 4 via missing STL
+        elif args.force or not stl_path.exists():
             stl_jobs.append((str(py_path), str(stl_path)))
 
         annotations[split].append({
