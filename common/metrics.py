@@ -486,6 +486,9 @@ def init_reward_pool(n_workers: int = 8) -> None:
     not Python startup + library import (~1-2s savings per rollout).
     Idempotent: safe to call multiple times.
     """
+    if os.environ.get('REWARD_POOL_DISABLE'):
+        print('[reward pool] disabled — hang-proof subprocess fallback', flush=True)
+        return
     global _reward_pool
     if _reward_pool is not None:
         return
@@ -914,14 +917,49 @@ def compute_rewards_parallel(
                 for code, path, fam in zip(codes, gt_paths, families)
             ]
             results: list = []
-            for f in futures:
+            # Hung OCCT loops ignore SIGALRM (signal only fires on return to
+            # Python). A result-timeout leaves the worker occupied forever;
+            # enough of them poison the whole pool and every later future
+            # waits its own timeout (hours per batch). Detect + hard-reset.
+            import concurrent.futures as _cf
+            consec_timeouts = 0
+            poisoned = False
+            got_any = False
+            for fi, f in enumerate(futures):
+                if poisoned:
+                    results.append((-1.0, None) if return_pairs else -1.0)
+                    continue
                 try:
-                    iou, _cd, ess = f.result(timeout=timeout + 5)
+                    # cold-start grace: until the first successful result of the
+                    # batch, allow pool warmup (respawn takes ~30-60s)
+                    _to = (timeout + 5) if got_any else max(120.0, timeout + 5)
+                    iou, _cd, ess = f.result(timeout=_to)
+                    got_any = True
                     results.append(_pack(iou, ess))
+                    consec_timeouts = 0
                 except BrokenProcessPool:
                     raise  # bubble up to outer handler
+                except _cf.TimeoutError:
+                    results.append((-1.0, None) if return_pairs else -1.0)
+                    consec_timeouts += 1
+                    if consec_timeouts >= max(4, workers):
+                        poisoned = True
                 except Exception:
                     results.append((-1.0, None) if return_pairs else -1.0)
+            if poisoned:
+                print('[reward pool] pool poisoned (hung workers) — '
+                      'hard-killing + respawning', flush=True)
+                try:
+                    for proc in list(getattr(_reward_pool, '_processes', {}).values()):
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    _reward_pool.shutdown(wait=False)
+                except Exception:
+                    pass
+                _reward_pool = None
+                init_reward_pool(n_workers=workers)
             return results
         except BrokenProcessPool:
             global _reward_pool_crashes

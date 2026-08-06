@@ -1174,7 +1174,7 @@ def run_online_eval(model, processor, examples: list[dict],
                         if mean_iou is not None else '')
             ml_part = (f'op_loss_w={ml_loss_w:.3f}  recall={ml_recall:.3f}  '
                        f'rare_recall={ml_rare_recall:.3f}  '
-                       if ml_loss_w is not None else '')
+                       if None not in (ml_loss_w, ml_recall, ml_rare_recall) else '')
             ess_part = (f'ess_pass={ess_rate:.3f}(n={ess_n})  '
                         if ess_rate is not None else '')
             feat_part = (f'feat_F1={feat_f1_mean:.3f}  '
